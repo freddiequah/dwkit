@@ -1,7 +1,7 @@
 # Package Identity (Authoritative)
 
 ## Version
-v1.0
+v1.1
 
 ## Purpose
 This file locks the canonical package identity values.
@@ -12,11 +12,14 @@ Do not change these without an explicit version bump and recorded decision.
 |------|-------|--------|
 | PackageRootGlobal | DWKit | LOCKED |
 | PackageId (require prefix) | dwkit | LOCKED |
-| EventPrefix | TBD | REQUIRED (must be set before events) |
-| DataFolderName | TBD | REQUIRED (must be set before persistence expands) |
-| VersionTagStyle | TBD (observed Calendar-style in code) | DECISION PENDING |
+| EventPrefix | DWKit: | LOCKED |
+| DataFolderName | dwkit | LOCKED |
+| VersionTagStyle | Calendar (vYYYY-MM-DDX) | LOCKED |
+
+## Decision Record
+- 2026-01-06: Locked EventPrefix=DWKit:, DataFolderName=dwkit, VersionTagStyle=Calendar.
 
 ## Guardrails
-- Until EventPrefix is set: do not introduce any package events.
-- Until DataFolderName is set: do not expand package-owned persistence beyond the minimal current scope.
+- All event names MUST start with EventPrefix (DWKit:).
+- All package-owned persistence MUST use DataFolderName (dwkit) as the per-profile folder.
 - Any change to identity fields requires a version bump and a recorded decision.

@@ -10,9 +10,9 @@ This is a lightweight reference for contributors and for chat handoffs.
 ## Canonical Identity (Authoritative)
 - PackageRootGlobal: DWKit
 - PackageId (require prefix): dwkit
-- EventPrefix: TBD (REQUIRED before events are introduced)
-- DataFolderName: TBD (REQUIRED before package-owned persistence expands)
-- VersionTagStyle: TBD (currently observed Calendar-style tags in code, not yet locked)
+- EventPrefix: DWKit:
+- DataFolderName: dwkit
+- VersionTagStyle: Calendar (vYYYY-MM-DDX)
 
 ## Canonical Layout (Logical)
 - src/core           (logging, safe calls, helpers)
@@ -65,6 +65,6 @@ Rules:
   - dwcommands, dwhelp <cmd>, dwtest, dwinfo
 
 ## Guardrails (Important)
-- Do NOT add events until EventPrefix is finalized and recorded in PACKAGE_IDENTITY.md.
-- Do NOT expand package persistence until DataFolderName is finalized and recorded in PACKAGE_IDENTITY.md.
+- Do NOT add events unless the event is registered first in docs/Event_Registry_v1.0.md and complies with EventPrefix (DWKit:).
+- Do NOT expand package persistence unless it is per-profile under DataFolderName (dwkit) and includes explicit schema/versioning per the standard.
 - Manual means manual: no timers, no auto-login, no gameplay commands unless explicitly introduced as wrappers.

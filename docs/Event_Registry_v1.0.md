@@ -11,13 +11,12 @@ If an event is not registered here first, it does not exist.
 - All event names MUST start with EventPrefix.
 - Payload fields are contracts. Any payload change requires explicit acknowledgement.
 - Producers/consumers should be recorded where known.
-- Until EventPrefix is finalized, no new events should be introduced.
 
 ## Canonical Identity Status
-- EventPrefix: TBD (not yet locked)
+- EventPrefix: DWKit: (LOCKED)
 
 ## Events
 None.
 
 Reason:
-- EventPrefix is not finalized yet, so event names cannot be made compliant.
+- No events have been introduced yet.
