@@ -47,8 +47,14 @@ luac.out
 Thumbs.db
 Desktop.ini
 
-.vscode/
+# VS Code: ignore everything EXCEPT shareable workspace files
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# JetBrains
 .idea/
+
 *.swp
 *~
 *.tmp
