@@ -9,6 +9,9 @@ The format is based on Keep a Changelog, and versions follow the project's chose
 - Initial repository structure
 - Governance documentation
 - Baseline README, license, changelog
+- Runtime baseline module and manual loader init:
+  - dwkit.core.runtime_baseline
+  - dwkit.loader.init
 
 ### Changed
 - None
