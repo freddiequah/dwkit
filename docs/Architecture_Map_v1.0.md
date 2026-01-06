@@ -1,7 +1,7 @@
 # Architecture Map
 
 ## Version
-v1.1
+v1.2
 
 ## Purpose
 High-level map of the DWKit layout: what each folder is for, and what depends on what.
@@ -60,14 +60,16 @@ Rules:
 - Self-test runner (SAFE):
   - src/dwkit/tests/self_test_runner.lua
   - Smoke checks + prints compatibility baseline.
+  - Prints canonical identity fields for verification.
 
 - Command registry runtime surface (SAFE):
   - src/dwkit/bus/command_registry.lua
   - Runtime list/help derived from registry data.
+  - Exposes registry version accessor (getRegistryVersion) for SAFE diagnostics.
 
 - Typed SAFE aliases:
   - src/dwkit/services/command_aliases.lua
-  - dwcommands, dwhelp <cmd>, dwtest, dwinfo
+  - dwcommands, dwhelp <cmd>, dwtest, dwinfo, dwid, dwversion
 
 ## Guardrails (Important)
 - Do NOT add events unless the event is registered first in docs/Event_Registry_v1.0.md and complies with EventPrefix (DWKit:).
