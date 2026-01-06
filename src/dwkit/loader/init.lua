@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-01-06G
+-- Version     : v2026-01-06H
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -9,7 +9,8 @@
 -- Public API  :
 --   - init() -> DWKit table
 --
--- Events Emitted   : None
+-- Events Emitted   :
+--   - DWKit:Boot:Ready (SAFE internal, manual-only)
 -- Events Consumed  : None
 -- Persistence      : None
 -- Automation Policy: Manual only
@@ -87,6 +88,36 @@ function Loader.init()
     else
         DWKit.services.commandAliases = nil
         DWKit._commandAliasesLoadError = tostring(aliasOrErr)
+    end
+
+    -- Emit Boot:Ready (SAFE internal). Guarded and does not break init.
+    do
+        local prefix = (DWKit.core and DWKit.core.identity and DWKit.core.identity.eventPrefix) and tostring(DWKit.core.identity.eventPrefix) or "DWKit:"
+        local evName = prefix .. "Boot:Ready"
+
+        local eb = (DWKit.bus and DWKit.bus.eventBus) or nil
+        if type(eb) == "table" and type(eb.emit) == "function" then
+            local payload = { ts = os.time() }
+
+            local okCall, ok, delivered, errs = pcall(eb.emit, evName, payload)
+            if okCall and ok then
+                DWKit._bootReadyEmitted = true
+                DWKit._bootReadyEmitError = nil
+            else
+                DWKit._bootReadyEmitted = false
+                if okCall then
+                    local errCount = (type(errs) == "table") and #errs or 0
+                    DWKit._bootReadyEmitError = "emit failed: ok=" .. tostring(ok)
+                        .. " delivered=" .. tostring(delivered)
+                        .. " errors=" .. tostring(errCount)
+                else
+                    DWKit._bootReadyEmitError = "emit error: " .. tostring(ok)
+                end
+            end
+        else
+            DWKit._bootReadyEmitted = false
+            DWKit._bootReadyEmitError = "eventBus.emit not available"
+        end
     end
 
     return DWKit
