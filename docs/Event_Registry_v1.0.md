@@ -1,4 +1,4 @@
-# Event Registry
+﻿# Event Registry
 
 ## Version
 v1.4
@@ -42,3 +42,4 @@ If an event is not registered here first, it does not exist.
 
 ## Notes
 - Registry and bus skeleton exist to enforce "docs-first" event introduction.
+
