@@ -1,0 +1,23 @@
+{
+  "files.eol": "\n",
+  "editor.formatOnSave": true,
+
+  "Lua.runtime.version": "Lua 5.1",
+  "Lua.diagnostics.globals": [
+    "send",
+    "echo",
+    "cecho",
+    "decho",
+    "hecho",
+    "selectString",
+    "replace",
+    "tempTrigger",
+    "tempRegexTrigger",
+    "tempAlias",
+    "raiseEvent",
+    "raiseGlobalEvent",
+    "registerAnonymousEventHandler",
+    "killAnonymousEventHandler",
+    "getMudletHomeDir"
+  ]
+}
