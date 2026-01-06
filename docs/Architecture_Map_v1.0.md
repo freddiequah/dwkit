@@ -1,7 +1,7 @@
 # Architecture Map
 
 ## Version
-v1.0
+v1.1
 
 ## Purpose
 High-level map of the DWKit layout: what each folder is for, and what depends on what.
@@ -48,9 +48,14 @@ Rules:
   - Creates/returns global DWKit and attaches core modules.
   - Manual-only, no automation.
 
+- Canonical identity module:
+  - src/dwkit/core/identity.lua
+  - Single authoritative identity values (must match docs/PACKAGE_IDENTITY.md).
+
 - Compatibility baseline:
   - src/dwkit/core/runtime_baseline.lua
   - Prints: packageId + Lua version + Mudlet version (safe formatting).
+  - packageId is sourced from dwkit.core.identity (output unchanged).
 
 - Self-test runner (SAFE):
   - src/dwkit/tests/self_test_runner.lua
