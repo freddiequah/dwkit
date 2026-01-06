@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-01-06E
+-- Version     : v2026-01-06F
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -22,6 +22,7 @@ function Loader.init()
     DWKit = DWKit or {}
 
     DWKit.core = DWKit.core or {}
+    DWKit.core.identity = require("dwkit.core.identity")
     DWKit.core.runtimeBaseline = require("dwkit.core.runtime_baseline")
 
     -- Attach test surface (SAFE, manual-only). Guarded to avoid hard failure.

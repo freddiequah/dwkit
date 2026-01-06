@@ -1,6 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.core.runtime_baseline
 -- Owner       : Core
+-- Version     : v2026-01-06F
 -- Purpose     :
 --   - Provide manual runtime baseline info (Mudlet + Lua runtime strings).
 --   - DOES NOT send gameplay commands.
@@ -14,10 +15,14 @@
 -- Events Consumed  : None
 -- Persistence      : None
 -- Automation Policy: Manual only
--- Dependencies     : None (Mudlet globals used only if present)
+-- Dependencies     : dwkit.core.identity
 -- #########################################################################
 
 local M = {}
+
+M.VERSION = "v2026-01-06F"
+
+local ID = require("dwkit.core.identity")
 
 local function safeToString(v)
     if v == nil then return "nil" end
@@ -77,7 +82,7 @@ end
 
 function M.getInfo()
     return {
-        packageId     = "dwkit",
+        packageId     = ID.packageId,
         luaVersion    = safeToString(_VERSION),
         mudletVersion = detectMudletVersion(),
     }
