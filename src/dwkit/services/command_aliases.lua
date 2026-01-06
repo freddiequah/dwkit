@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-06D
+-- Version     : v2026-01-06E
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game]
@@ -9,6 +9,7 @@
 --       * dwtest
 --       * dwinfo
 --       * dwid
+--       * dwversion
 --   - Calls into DWKit.cmd (dwkit.bus.command_registry), DWKit.test, runtimeBaseline, and identity.
 --   - DOES NOT send gameplay commands.
 --   - DOES NOT start timers or automation.
@@ -33,6 +34,8 @@
 
 local M = {}
 
+M.VERSION = "v2026-01-06E"
+
 local STATE = {
     installed = false,
     aliasIds = {
@@ -41,6 +44,7 @@ local STATE = {
         dwtest = nil,
         dwinfo = nil,
         dwid = nil,
+        dwversion = nil,
     },
     lastError = nil,
 }
@@ -58,6 +62,12 @@ end
 
 local function _err(msg)
     _out("[DWKit Alias] ERROR: " .. tostring(msg))
+end
+
+local function _safeRequire(modName)
+    local ok, mod = pcall(require, modName)
+    if ok then return true, mod end
+    return false, mod
 end
 
 local function _hasCmd()
@@ -97,6 +107,75 @@ local function _printIdentity()
     _out("[DWKit] identity=" .. idVersion .. " packageId=" .. pkgId .. " eventPrefix=" .. evp .. " dataFolder=" .. df .. " versionTagStyle=" .. vts)
 end
 
+local function _printVersionSummary()
+    if type(_G.DWKit) ~= "table" then
+        _err("DWKit global not available. Run loader.init() first.")
+        return
+    end
+
+    -- Identity
+    local ident = nil
+    if _hasIdentity() then
+        ident = DWKit.core.identity
+    else
+        local okI, modI = _safeRequire("dwkit.core.identity")
+        if okI and type(modI) == "table" then ident = modI end
+    end
+
+    -- Runtime baseline module (for VERSION + baseline getInfo)
+    local rb = nil
+    if type(DWKit.core) == "table" and type(DWKit.core.runtimeBaseline) == "table" then
+        rb = DWKit.core.runtimeBaseline
+    else
+        local okRB, modRB = _safeRequire("dwkit.core.runtime_baseline")
+        if okRB and type(modRB) == "table" then rb = modRB end
+    end
+
+    -- Command registry version
+    local cmdRegVersion = "unknown"
+    if _hasCmd() and type(DWKit.cmd.getRegistryVersion) == "function" then
+        local okV, v = pcall(DWKit.cmd.getRegistryVersion)
+        if okV and v then cmdRegVersion = tostring(v) end
+    end
+
+    -- Self-test runner version (module constant, does NOT run tests)
+    local stVersion = "unknown"
+    local okST, st = _safeRequire("dwkit.tests.self_test_runner")
+    if okST and type(st) == "table" then
+        stVersion = tostring(st.VERSION or "unknown")
+    end
+
+    local idVersion = ident and tostring(ident.VERSION or "unknown") or "unknown"
+    local rbVersion = rb and tostring(rb.VERSION or "unknown") or "unknown"
+
+    local pkgId = ident and tostring(ident.packageId or "unknown") or "unknown"
+    local evp  = ident and tostring(ident.eventPrefix or "unknown") or "unknown"
+    local df   = ident and tostring(ident.dataFolderName or "unknown") or "unknown"
+    local vts  = ident and tostring(ident.versionTagStyle or "unknown") or "unknown"
+
+    local luaV = "unknown"
+    local mudletV = "unknown"
+    if rb and type(rb.getInfo) == "function" then
+        local okInfo, info = pcall(rb.getInfo)
+        if okInfo and type(info) == "table" then
+            luaV = tostring(info.luaVersion or "unknown")
+            mudletV = tostring(info.mudletVersion or "unknown")
+        end
+    end
+
+    _out("[DWKit] Version summary:")
+    _out("  identity        = " .. idVersion)
+    _out("  runtimeBaseline = " .. rbVersion)
+    _out("  selfTestRunner  = " .. stVersion)
+    _out("  commandRegistry = " .. cmdRegVersion)
+    _out("  commandAliases  = " .. tostring(M.VERSION or "unknown"))
+    _out("")
+    _out("[DWKit] Identity (locked):")
+    _out("  packageId=" .. pkgId .. " eventPrefix=" .. evp .. " dataFolder=" .. df .. " versionTagStyle=" .. vts)
+    _out("[DWKit] Runtime baseline:")
+    _out("  lua=" .. luaV .. " mudlet=" .. mudletV)
+end
+
 function M.isInstalled()
     return STATE.installed and true or false
 end
@@ -110,6 +189,7 @@ function M.getState()
             dwtest = STATE.aliasIds.dwtest,
             dwinfo = STATE.aliasIds.dwinfo,
             dwid = STATE.aliasIds.dwid,
+            dwversion = STATE.aliasIds.dwversion,
         },
         lastError = STATE.lastError,
     }
@@ -125,7 +205,7 @@ function M.uninstall()
         return false, STATE.lastError
     end
 
-    local ok1, ok2, ok3, ok4, ok5 = true, true, true, true, true
+    local ok1, ok2, ok3, ok4, ok5, ok6 = true, true, true, true, true, true
 
     if STATE.aliasIds.dwcommands then
         ok1 = pcall(killAlias, STATE.aliasIds.dwcommands)
@@ -152,9 +232,14 @@ function M.uninstall()
         STATE.aliasIds.dwid = nil
     end
 
+    if STATE.aliasIds.dwversion then
+        ok6 = pcall(killAlias, STATE.aliasIds.dwversion)
+        STATE.aliasIds.dwversion = nil
+    end
+
     STATE.installed = false
 
-    if not ok1 or not ok2 or not ok3 or not ok4 or not ok5 then
+    if not ok1 or not ok2 or not ok3 or not ok4 or not ok5 or not ok6 then
         STATE.lastError = "One or more aliases failed to uninstall"
         return false, STATE.lastError
     end
@@ -241,7 +326,13 @@ function M.install(opts)
         _printIdentity()
     end)
 
-    if not id1 or not id2 or not id3 or not id4 or not id5 then
+    -- Alias 6: dwversion
+    local dwversionPattern = [[^dwversion\s*$]]
+    local id6 = tempAlias(dwversionPattern, function()
+        _printVersionSummary()
+    end)
+
+    if not id1 or not id2 or not id3 or not id4 or not id5 or not id6 then
         STATE.lastError = "Failed to create one or more aliases"
         -- Best-effort cleanup if one succeeded
         if type(killAlias) == "function" then
@@ -250,6 +341,7 @@ function M.install(opts)
             if id3 then pcall(killAlias, id3) end
             if id4 then pcall(killAlias, id4) end
             if id5 then pcall(killAlias, id5) end
+            if id6 then pcall(killAlias, id6) end
         end
         return false, STATE.lastError
     end
@@ -259,11 +351,12 @@ function M.install(opts)
     STATE.aliasIds.dwtest = id3
     STATE.aliasIds.dwinfo = id4
     STATE.aliasIds.dwid = id5
+    STATE.aliasIds.dwversion = id6
     STATE.installed = true
     STATE.lastError = nil
 
     if not opts.quiet then
-        _out("[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid")
+        _out("[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion")
     end
 
     return true, nil
