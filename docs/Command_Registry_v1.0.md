@@ -1,7 +1,7 @@
 # Command Registry
 
 ## Version
-v1.5
+v1.6
 
 ## Purpose
 This document is the canonical registry of all user-facing commands.
@@ -22,6 +22,7 @@ If a command is not registered here, it does not exist.
 - dwid
 - dwinfo
 - dwtest
+- dwversion
 
 ## Command Details
 
@@ -108,6 +109,22 @@ If a command is not registered here, it does not exist.
 - Notes:
   - Typed alias implemented by dwkit.services.command_aliases.
   - Requires loader init to have run (so DWKit.test.run is attached). If missing, check DWKit.test._selfTestLoadError.
+
+### dwversion
+- Command: dwversion
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Prints consolidated DWKit module versions + runtime baseline (SAFE diagnostics).
+- Syntax:
+  - dwversion
+- Examples:
+  - dwversion
+- Safety: SAFE (no gameplay output sent)
+- Mode: manual
+- SendsToGame: NO
+- Notes:
+  - Typed alias implemented by dwkit.services.command_aliases.
+  - Prints versions for identity/runtimeBaseline/self_test_runner/command registry where available.
 
 ## Command Template (copy/paste)
 - Command:

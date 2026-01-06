@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-06E
+-- Version     : v2026-01-06F
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -15,6 +15,7 @@
 --   - help(name, opts?) -> boolean ok, table|nil cmdOrNil, string|nil errOrNil
 --   - register(def) -> boolean ok, string|nil errOrNil   (runtime-only, not persisted)
 --   - getAll() -> table copy (name -> def)
+--   - getRegistryVersion() -> string
 --
 -- Events Emitted   : None
 -- Events Consumed  : None
@@ -24,6 +25,8 @@
 -- #########################################################################
 
 local M = {}
+
+M.VERSION = "v2026-01-06F"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -43,7 +46,7 @@ end
 -- Registry (single source of truth)
 -- -------------------------
 local REG = {
-    version = "v2026-01-06E",
+    version = "v2026-01-06F",
     commands = {
         dwid = {
             command     = "dwid",
@@ -99,6 +102,24 @@ local REG = {
                 "Typed alias implemented by dwkit.services.command_aliases.",
                 "Requires loader init to have run (so DWKit.test.run is attached).",
                 "If missing, check DWKit.test._selfTestLoadError.",
+            },
+        },
+
+        dwversion = {
+            command     = "dwversion",
+            aliases     = {},
+            ownerModule = "dwkit.services.command_aliases",
+            description = "Prints consolidated DWKit module versions + runtime baseline (SAFE diagnostics).",
+            syntax      = "dwversion",
+            examples    = {
+                "dwversion",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Typed alias implemented by dwkit.services.command_aliases.",
+                "Prints identity/runtimeBaseline/self_test_runner/command registry versions where available.",
             },
         },
 
@@ -204,6 +225,10 @@ end
 -- -------------------------
 -- Public API
 -- -------------------------
+function M.getRegistryVersion()
+    return tostring(REG.version or "unknown")
+end
+
 function M.getAll()
     local out = {}
     for name, def in pairs(REG.commands) do

@@ -24,6 +24,8 @@
 
 local M = {}
 
+M.VERSION = "v2026-01-06B"
+
 -- -------------------------
 -- Safe output helper
 -- -------------------------
@@ -53,7 +55,7 @@ function M.run(opts)
     opts = opts or {}
 
     local results = {
-        version = "v2026-01-06B",
+        version = M.VERSION,
         pass = 0,
         fail = 0,
         checks = {},
