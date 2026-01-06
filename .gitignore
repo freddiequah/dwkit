@@ -1,7 +1,7 @@
-# Compiled Lua sources
+# =========================================================
+# Lua / build artifacts (from GitHub Lua template)
+# =========================================================
 luac.out
-
-# luarocks build files
 *.src.rock
 *.zip
 *.tar.gz
@@ -25,7 +25,7 @@ luac.out
 *.def
 *.exp
 
-# Shared objects (inc. Windows DLLs)
+# Shared objects
 *.dll
 *.so
 *.so.*
@@ -39,3 +39,55 @@ luac.out
 *.x86_64
 *.hex
 
+
+# =========================================================
+# OS / editor junk
+# =========================================================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+.vscode/
+.idea/
+*.swp
+*~
+*.tmp
+*.bak
+
+
+# =========================================================
+# Logs / debug dumps
+# =========================================================
+*.log
+*.trace
+*.stackdump
+
+
+# =========================================================
+# Mudlet-specific (DO NOT COMMIT profile data)
+# =========================================================
+# Local Mudlet profiles, saves, downloads, logs etc.
+# (Never commit your personal Mudlet profile directory)
+.mudlet/
+Mudlet/
+
+
+# If you keep local exports/packages in the repo folder
+# keep these ignored unless you deliberately want to publish them
+*.mpackage
+
+
+# =========================================================
+# Optional: local "release output" folder (recommended)
+# =========================================================
+dist/
+build/
+release/
+
+
+# =========================================================
+# Optional: secrets / local config overrides
+# =========================================================
+*.env
+.env
+.env.*
