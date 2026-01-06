@@ -1,7 +1,7 @@
 # Command Registry
 
 ## Version
-v1.4
+v1.5
 
 ## Purpose
 This document is the canonical registry of all user-facing commands.
@@ -19,6 +19,7 @@ If a command is not registered here, it does not exist.
 ## Command List
 - dwcommands
 - dwhelp
+- dwid
 - dwinfo
 - dwtest
 
@@ -56,6 +57,22 @@ If a command is not registered here, it does not exist.
 - Notes:
   - Implemented as a Mudlet alias (local only).
   - Backed by DWKit.cmd.help(name).
+
+### dwid
+- Command: dwid
+- Aliases: (none)
+- Owner Module: dwkit.core.identity
+- Description: Prints canonical DWKit identity (packageId/eventPrefix/data folder/tag style).
+- Syntax:
+  - dwid
+- Examples:
+  - dwid
+- Safety: SAFE (no gameplay output sent)
+- Mode: manual
+- SendsToGame: NO
+- Notes:
+  - Typed alias implemented by dwkit.services.command_aliases.
+  - Prints the same locked identity fields as shown in dwtest.
 
 ### dwinfo
 - Command: dwinfo

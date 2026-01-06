@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-06D
+-- Version     : v2026-01-06E
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -43,8 +43,26 @@ end
 -- Registry (single source of truth)
 -- -------------------------
 local REG = {
-    version = "v2026-01-06D",
+    version = "v2026-01-06E",
     commands = {
+        dwid = {
+            command     = "dwid",
+            aliases     = {},
+            ownerModule = "dwkit.core.identity",
+            description = "Prints canonical DWKit identity (packageId/eventPrefix/data folder/tag style).",
+            syntax      = "dwid",
+            examples    = {
+                "dwid",
+            },
+            safety      = "SAFE",   -- SAFE | COMBAT-SAFE | NOT SAFE
+            mode        = "manual", -- manual | opt-in | auto
+            sendsToGame = false,
+            notes       = {
+                "Typed alias implemented by dwkit.services.command_aliases.",
+                "Prints the same locked identity fields as shown in dwtest.",
+            },
+        },
+
         dwinfo = {
             command     = "dwinfo",
             aliases     = {},
