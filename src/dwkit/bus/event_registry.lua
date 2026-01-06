@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.event_registry
 -- Owner       : Bus
--- Version     : v2026-01-06G
+-- Version     : v2026-01-06H
 -- Purpose     :
 --   - Canonical registry for all DWKit events (code mirror of docs/Event_Registry_v1.0.md).
 --   - No events are emitted here. Registry only.
@@ -24,9 +24,11 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-06G"
+M.VERSION = "v2026-01-06H"
 
 local ID = require("dwkit.core.identity")
+
+local EV_BOOT_READY = tostring(ID.eventPrefix or "DWKit:") .. "Boot:Ready"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -48,7 +50,24 @@ end
 local REG = {
   version = M.VERSION,
   events = {
-    -- none yet
+    [EV_BOOT_READY] = {
+      name = EV_BOOT_READY,
+      description = "Emitted once after loader.init attaches DWKit surfaces; indicates kit is ready for manual use.",
+      payloadSchema = {
+        ts = "number",
+      },
+      producers = {
+        "dwkit.loader.init",
+      },
+      consumers = {
+        "internal (services/ui/tests)",
+      },
+      notes = {
+        "SAFE internal event (no gameplay commands).",
+        "Manual-only: emitted only when loader.init() is invoked.",
+        "Docs-first: registered in docs/Event_Registry_v1.0.md, mirrored here.",
+      },
+    },
   }
 }
 

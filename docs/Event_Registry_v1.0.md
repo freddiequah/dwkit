@@ -1,7 +1,7 @@
 # Event Registry
 
 ## Version
-v1.2
+v1.3
 
 ## Purpose
 This document is the canonical registry of all project events.
@@ -24,8 +24,21 @@ If an event is not registered here first, it does not exist.
   - Enforces: events must be registered in the registry before subscription or emit.
 
 ## Events
-None.
 
-Reason:
-- No events have been introduced yet.
+### DWKit:Boot:Ready
+- Description:
+  - Emitted once after loader.init attaches DWKit surfaces.
+  - Indicates the kit is ready for manual use.
+- PayloadSchema:
+  - ts: number (os.time() epoch seconds)
+- Producers:
+  - dwkit.loader.init
+- Consumers:
+  - internal (services/ui/tests)
+- Notes:
+  - SAFE internal event (no gameplay commands).
+  - Manual-only: emitted only when loader.init() is invoked.
+  - Docs-first: registered here first, then mirrored in code registry.
+
+## Notes
 - Registry and bus skeleton exist to enforce “docs-first” event introduction.
