@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-06B
+-- Version     : v2026-01-06D
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -43,22 +43,24 @@ end
 -- Registry (single source of truth)
 -- -------------------------
 local REG = {
-    version = "v2026-01-06B",
+    version = "v2026-01-06D",
     commands = {
         dwinfo = {
             command     = "dwinfo",
             aliases     = {},
             ownerModule = "dwkit.core.runtime_baseline",
             description = "Prints runtime baseline info (Lua + Mudlet version) for verification and support.",
-            syntax      = "lua DWKit.core.runtimeBaseline.printInfo()",
+            syntax      = "dwinfo  (or: lua DWKit.core.runtimeBaseline.printInfo())",
             examples    = {
+                "dwinfo",
                 "lua DWKit.core.runtimeBaseline.printInfo()",
             },
             safety      = "SAFE",   -- SAFE | COMBAT-SAFE | NOT SAFE
             mode        = "manual", -- manual | opt-in | auto
             sendsToGame = false,
             notes       = {
-                "Dev helper invoked via Mudlet input line. Will be wired into command system later.",
+                "Typed alias implemented by dwkit.services.command_aliases.",
+                "Dev helper also works via Mudlet input line with lua prefix.",
             },
         },
 
@@ -67,14 +69,16 @@ local REG = {
             aliases     = {},
             ownerModule = "dwkit.tests.self_test_runner",
             description = "Runs DWKit self-test runner (smoke checks + compatibility baseline output).",
-            syntax      = "lua DWKit.test.run()",
+            syntax      = "dwtest  (or: lua DWKit.test.run())",
             examples    = {
+                "dwtest",
                 "lua DWKit.test.run()",
             },
             safety      = "SAFE",
             mode        = "manual",
             sendsToGame = false,
             notes       = {
+                "Typed alias implemented by dwkit.services.command_aliases.",
                 "Requires loader init to have run (so DWKit.test.run is attached).",
                 "If missing, check DWKit.test._selfTestLoadError.",
             },

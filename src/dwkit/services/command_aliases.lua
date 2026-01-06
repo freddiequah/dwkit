@@ -1,12 +1,14 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-06A
+-- Version     : v2026-01-06C
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game]
 --       * dwhelp <cmd>
---   - Calls into DWKit.cmd (dwkit.bus.command_registry).
+--       * dwtest
+--       * dwinfo
+--   - Calls into DWKit.cmd (dwkit.bus.command_registry), DWKit.test, and runtimeBaseline.
 --   - DOES NOT send gameplay commands.
 --   - DOES NOT start timers or automation.
 --
@@ -23,6 +25,8 @@
 -- Dependencies     :
 --   - Mudlet: tempAlias(), killAlias() (optional but expected)
 --   - DWKit.cmd (attached by loader.init)
+--   - DWKit.test (attached by loader.init)
+--   - DWKit.core.runtimeBaseline (attached by loader.init)
 -- #########################################################################
 
 local M = {}
@@ -32,6 +36,8 @@ local STATE = {
     aliasIds = {
         dwcommands = nil,
         dwhelp = nil,
+        dwtest = nil,
+        dwinfo = nil,
     },
     lastError = nil,
 }
@@ -55,6 +61,17 @@ local function _hasCmd()
     return type(_G.DWKit) == "table" and type(_G.DWKit.cmd) == "table"
 end
 
+local function _hasTest()
+    return type(_G.DWKit) == "table" and type(_G.DWKit.test) == "table" and type(_G.DWKit.test.run) == "function"
+end
+
+local function _hasBaseline()
+    return type(_G.DWKit) == "table"
+        and type(_G.DWKit.core) == "table"
+        and type(_G.DWKit.core.runtimeBaseline) == "table"
+        and type(_G.DWKit.core.runtimeBaseline.printInfo) == "function"
+end
+
 function M.isInstalled()
     return STATE.installed and true or false
 end
@@ -65,6 +82,8 @@ function M.getState()
         aliasIds = {
             dwcommands = STATE.aliasIds.dwcommands,
             dwhelp = STATE.aliasIds.dwhelp,
+            dwtest = STATE.aliasIds.dwtest,
+            dwinfo = STATE.aliasIds.dwinfo,
         },
         lastError = STATE.lastError,
     }
@@ -80,8 +99,7 @@ function M.uninstall()
         return false, STATE.lastError
     end
 
-    local ok1, err1 = true, nil
-    local ok2, err2 = true, nil
+    local ok1, ok2, ok3, ok4 = true, true, true, true
 
     if STATE.aliasIds.dwcommands then
         ok1 = pcall(killAlias, STATE.aliasIds.dwcommands)
@@ -93,9 +111,19 @@ function M.uninstall()
         STATE.aliasIds.dwhelp = nil
     end
 
+    if STATE.aliasIds.dwtest then
+        ok3 = pcall(killAlias, STATE.aliasIds.dwtest)
+        STATE.aliasIds.dwtest = nil
+    end
+
+    if STATE.aliasIds.dwinfo then
+        ok4 = pcall(killAlias, STATE.aliasIds.dwinfo)
+        STATE.aliasIds.dwinfo = nil
+    end
+
     STATE.installed = false
 
-    if not ok1 or not ok2 then
+    if not ok1 or not ok2 or not ok3 or not ok4 then
         STATE.lastError = "One or more aliases failed to uninstall"
         return false, STATE.lastError
     end
@@ -156,23 +184,47 @@ function M.install(opts)
         end
     end)
 
-    if not id1 or not id2 then
+    -- Alias 3: dwtest
+    local dwtestPattern = [[^dwtest\s*$]]
+    local id3 = tempAlias(dwtestPattern, function()
+        if not _hasTest() then
+            _err("DWKit.test.run not available. Run loader.init() first.")
+            return
+        end
+        DWKit.test.run()
+    end)
+
+    -- Alias 4: dwinfo
+    local dwinfoPattern = [[^dwinfo\s*$]]
+    local id4 = tempAlias(dwinfoPattern, function()
+        if not _hasBaseline() then
+            _err("DWKit.core.runtimeBaseline.printInfo not available. Run loader.init() first.")
+            return
+        end
+        DWKit.core.runtimeBaseline.printInfo()
+    end)
+
+    if not id1 or not id2 or not id3 or not id4 then
         STATE.lastError = "Failed to create one or more aliases"
         -- Best-effort cleanup if one succeeded
         if type(killAlias) == "function" then
             if id1 then pcall(killAlias, id1) end
             if id2 then pcall(killAlias, id2) end
+            if id3 then pcall(killAlias, id3) end
+            if id4 then pcall(killAlias, id4) end
         end
         return false, STATE.lastError
     end
 
     STATE.aliasIds.dwcommands = id1
     STATE.aliasIds.dwhelp = id2
+    STATE.aliasIds.dwtest = id3
+    STATE.aliasIds.dwinfo = id4
     STATE.installed = true
     STATE.lastError = nil
 
     if not opts.quiet then
-        _out("[DWKit Alias] Installed: dwcommands, dwhelp")
+        _out("[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo")
     end
 
     return true, nil
