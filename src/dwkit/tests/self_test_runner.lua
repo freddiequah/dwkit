@@ -4,6 +4,7 @@
 -- Purpose     :
 --   - Provide a SAFE, manual-only self-test runner skeleton.
 --   - Prints PASS/FAIL summary + compatibility baseline output.
+--   - Prints canonical identity info (packageId/eventPrefix/dataFolderName/versionTagStyle).
 --   - DOES NOT send gameplay commands.
 --   - DOES NOT start timers or automation.
 --
@@ -17,6 +18,8 @@
 -- Dependencies     :
 --   - Optional: DWKit.core.runtimeBaseline (if loader already attached it)
 --   - Fallback: require("dwkit.core.runtime_baseline")
+--   - Optional: DWKit.core.identity (if loader already attached it)
+--   - Fallback: require("dwkit.core.identity")
 -- #########################################################################
 
 local M = {}
@@ -50,7 +53,7 @@ function M.run(opts)
     opts = opts or {}
 
     local results = {
-        version = "v2026-01-06A",
+        version = "v2026-01-06B",
         pass = 0,
         fail = 0,
         checks = {},
@@ -72,7 +75,22 @@ function M.run(opts)
     local hasGlobal = (type(_G.DWKit) == "table")
     addCheck("Global present (DWKit)", hasGlobal, "DWKit=" .. _yesNo(hasGlobal))
 
-    -- Check 2: runtime baseline availability
+    -- Check 2: canonical identity availability (safe; printed for verification)
+    local ident = nil
+    if hasGlobal and type(_G.DWKit.core) == "table" and type(_G.DWKit.core.identity) == "table" then
+        ident = _G.DWKit.core.identity
+        addCheck("identity attached via loader", true, "DWKit.core.identity=YES")
+    else
+        local okReq, mod = _safeRequire("dwkit.core.identity")
+        if okReq and type(mod) == "table" then
+            ident = mod
+            addCheck("identity require() fallback", true, "require(dwkit.core.identity)=OK")
+        else
+            addCheck("identity available", false, "Missing dwkit.core.identity (and not attached on DWKit.core)")
+        end
+    end
+
+    -- Check 3: runtime baseline availability
     local rb = nil
     if hasGlobal and type(_G.DWKit.core) == "table" and type(_G.DWKit.core.runtimeBaseline) == "table" then
         rb = _G.DWKit.core.runtimeBaseline
@@ -86,6 +104,21 @@ function M.run(opts)
             addCheck("runtimeBaseline available", false,
                 "Missing dwkit.core.runtime_baseline (and not attached on DWKit.core)")
         end
+    end
+
+    _out("")
+    _out("[DWKit Test] Canonical identity:")
+    if ident then
+        local idVersion = tostring(ident.VERSION or "unknown")
+        local pkgId = tostring(ident.packageId or "unknown")
+        local evp  = tostring(ident.eventPrefix or "unknown")
+        local df   = tostring(ident.dataFolderName or "unknown")
+        local vts  = tostring(ident.versionTagStyle or "unknown")
+        _out("[DWKit] identity=" .. idVersion .. " packageId=" .. pkgId .. " eventPrefix=" .. evp .. " dataFolder=" .. df .. " versionTagStyle=" .. vts)
+        addCheck("identity fields printed", true, "Printed canonical identity fields")
+    else
+        _out("  (No identity output available)")
+        addCheck("identity fields printed", false, "identity module not available")
     end
 
     _out("")
