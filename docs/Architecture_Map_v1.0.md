@@ -1,7 +1,7 @@
 # Architecture Map
 
 ## Version
-v1.2
+v1.3
 
 ## Purpose
 High-level map of the DWKit layout: what each folder is for, and what depends on what.
@@ -18,7 +18,7 @@ This is a lightweight reference for contributors and for chat handoffs.
 - src/core           (logging, safe calls, helpers)
 - src/config         (config surface, defaults, profile overrides)
 - src/persist        (paths, schema IO, migrations helpers)
-- src/bus            (event registry, command registry)
+- src/bus            (event registry, event bus, command registry)
 - src/services       (parsers/stores/business logic)
 - src/ui             (GUI modules, consumer-only)
 - src/integrations   (optional external integrations; degrade gracefully)
@@ -56,6 +56,16 @@ Rules:
   - src/dwkit/core/runtime_baseline.lua
   - Prints: packageId + Lua version + Mudlet version (safe formatting).
   - packageId is sourced from dwkit.core.identity (output unchanged).
+
+- Event registry (SAFE, registry only):
+  - src/dwkit/bus/event_registry.lua
+  - Code mirror of docs/Event_Registry_v1.0.md.
+  - No events exist yet (registry is empty).
+
+- Event bus skeleton (SAFE, internal only):
+  - src/dwkit/bus/event_bus.lua
+  - In-process publish/subscribe.
+  - Enforces: event MUST be registered in event_registry before use.
 
 - Self-test runner (SAFE):
   - src/dwkit/tests/self_test_runner.lua
