@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.event_bus
 -- Owner       : Bus
--- Version     : v2026-01-06G
+-- Version     : v2026-01-06H
 -- Purpose     :
 --   - SAFE internal event bus skeleton (in-process publish/subscribe).
 --   - Enforces: events MUST be registered in dwkit.bus.event_registry first.
@@ -22,7 +22,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-06G"
+M.VERSION = "v2026-01-06H"
 
 local ID  = require("dwkit.core.identity")
 local REG = require("dwkit.bus.event_registry")
@@ -35,11 +35,11 @@ local function _startsWith(s, prefix)
 end
 
 local STATE = {
-  nextToken = 1,
+  nextToken   = 1,
   subsByToken = {},    -- token -> { eventName=..., fn=... }
   subsByEvent = {},    -- eventName -> { [token]=fn, ... }
-  emitted = 0,
-  delivered = 0,
+  emitted     = 0,
+  delivered   = 0,
   handlerErrors = 0,
 }
 
@@ -86,8 +86,16 @@ function M.off(token)
 
   local ev = rec.eventName
   STATE.subsByToken[token] = nil
+
   if STATE.subsByEvent[ev] then
     STATE.subsByEvent[ev][token] = nil
+
+    -- Clean up empty buckets (helps keep state tidy)
+    local any = false
+    for _ in pairs(STATE.subsByEvent[ev]) do any = true break end
+    if not any then
+      STATE.subsByEvent[ev] = nil
+    end
   end
 
   return true, nil
@@ -109,7 +117,19 @@ function M.emit(eventName, payload)
     return true, 0, errors
   end
 
+  -- Snapshot subscribers first (best practice):
+  -- avoids undefined iteration behavior if handlers call off() during emit().
+  local snapshot = {}
   for token, fn in pairs(bucket) do
+    if type(fn) == "function" then
+      table.insert(snapshot, { token = token, fn = fn })
+    end
+  end
+
+  for _, rec in ipairs(snapshot) do
+    local token = rec.token
+    local fn    = rec.fn
+
     local okCall, callErr = pcall(fn, payload, eventName, token)
     if okCall then
       delivered = delivered + 1
@@ -126,12 +146,17 @@ end
 function M.getStats()
   local subs = 0
   for _ in pairs(STATE.subsByToken) do subs = subs + 1 end
+
+  local eventsWithSubs = 0
+  for _ in pairs(STATE.subsByEvent) do eventsWithSubs = eventsWithSubs + 1 end
+
   return {
     version = M.VERSION,
     emitted = STATE.emitted,
     delivered = STATE.delivered,
     handlerErrors = STATE.handlerErrors,
     subscribers = subs,
+    eventsWithSubscribers = eventsWithSubs,
   }
 end
 

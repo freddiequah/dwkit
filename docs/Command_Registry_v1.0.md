@@ -1,7 +1,7 @@
 # Command Registry
 
 ## Version
-v1.6
+v1.7
 
 ## Purpose
 This document is the canonical registry of all user-facing commands.
@@ -23,6 +23,8 @@ If a command is not registered here, it does not exist.
 - dwinfo
 - dwtest
 - dwversion
+- dwevents
+- dwevent
 
 ## Command Details
 
@@ -125,6 +127,40 @@ If a command is not registered here, it does not exist.
 - Notes:
   - Typed alias implemented by dwkit.services.command_aliases.
   - Prints versions for identity/runtimeBaseline/self_test_runner/command registry where available.
+  - Also prints eventRegistry/eventBus versions when present.
+
+### dwevents
+- Command: dwevents
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Lists registered DWKit events (SAFE).
+- Syntax:
+  - dwevents
+- Examples:
+  - dwevents
+- Safety: SAFE (no gameplay output sent)
+- Mode: manual
+- SendsToGame: NO
+- Notes:
+  - Typed alias implemented by dwkit.services.command_aliases.
+  - Backed by DWKit.bus.eventRegistry.listAll().
+
+### dwevent
+- Command: dwevent
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Shows detailed help for one DWKit event (SAFE).
+- Syntax:
+  - dwevent <EventName>
+- Examples:
+  - dwevent DWKit:Boot:Ready
+- Safety: SAFE (no gameplay output sent)
+- Mode: manual
+- SendsToGame: NO
+- Notes:
+  - Typed alias implemented by dwkit.services.command_aliases.
+  - Backed by DWKit.bus.eventRegistry.help(eventName).
+  - EventName must be the full registered name (must start with DWKit:).
 
 ## Command Template (copy/paste)
 - Command:

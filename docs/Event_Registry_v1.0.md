@@ -1,7 +1,7 @@
 # Event Registry
 
 ## Version
-v1.3
+v1.4
 
 ## Purpose
 This document is the canonical registry of all project events.
@@ -41,4 +41,4 @@ If an event is not registered here first, it does not exist.
   - Docs-first: registered here first, then mirrored in code registry.
 
 ## Notes
-- Registry and bus skeleton exist to enforce “docs-first” event introduction.
+- Registry and bus skeleton exist to enforce "docs-first" event introduction.
