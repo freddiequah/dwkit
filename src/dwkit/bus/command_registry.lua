@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-06F
+-- Version     : v2026-01-06G
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -26,7 +26,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-06F"
+M.VERSION = "v2026-01-06G"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -46,7 +46,7 @@ end
 -- Registry (single source of truth)
 -- -------------------------
 local REG = {
-    version = "v2026-01-06F",
+    version = "v2026-01-06G",
     commands = {
         dwid = {
             command     = "dwid",
@@ -120,6 +120,44 @@ local REG = {
             notes       = {
                 "Typed alias implemented by dwkit.services.command_aliases.",
                 "Prints identity/runtimeBaseline/self_test_runner/command registry versions where available.",
+                "Also prints eventRegistry/eventBus versions when present.",
+            },
+        },
+
+        dwevents = {
+            command     = "dwevents",
+            aliases     = {},
+            ownerModule = "dwkit.services.command_aliases",
+            description = "Lists registered DWKit events (SAFE).",
+            syntax      = "dwevents",
+            examples    = {
+                "dwevents",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Typed alias implemented by dwkit.services.command_aliases.",
+                "Backed by DWKit.bus.eventRegistry.listAll().",
+            },
+        },
+
+        dwevent = {
+            command     = "dwevent",
+            aliases     = {},
+            ownerModule = "dwkit.services.command_aliases",
+            description = "Shows detailed help for one DWKit event (SAFE).",
+            syntax      = "dwevent <EventName>",
+            examples    = {
+                "dwevent DWKit:Boot:Ready",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Typed alias implemented by dwkit.services.command_aliases.",
+                "Backed by DWKit.bus.eventRegistry.help(eventName).",
+                "EventName must be the full registered name (must start with DWKit:).",
             },
         },
 

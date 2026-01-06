@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-06E
+-- Version     : v2026-01-06F
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game]
@@ -10,7 +10,10 @@
 --       * dwinfo
 --       * dwid
 --       * dwversion
---   - Calls into DWKit.cmd (dwkit.bus.command_registry), DWKit.test, runtimeBaseline, and identity.
+--       * dwevents
+--       * dwevent <EventName>
+--   - Calls into DWKit.cmd (dwkit.bus.command_registry), DWKit.test, runtimeBaseline, identity,
+--     and event registry surface.
 --   - DOES NOT send gameplay commands.
 --   - DOES NOT start timers or automation.
 --
@@ -30,11 +33,12 @@
 --   - DWKit.test (attached by loader.init)
 --   - DWKit.core.runtimeBaseline (attached by loader.init)
 --   - DWKit.core.identity (attached by loader.init)
+--   - DWKit.bus.eventRegistry (attached by loader.init)
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-06E"
+M.VERSION = "v2026-01-06F"
 
 local STATE = {
     installed = false,
@@ -45,6 +49,8 @@ local STATE = {
         dwinfo = nil,
         dwid = nil,
         dwversion = nil,
+        dwevents = nil,
+        dwevent = nil,
     },
     lastError = nil,
 }
@@ -75,7 +81,9 @@ local function _hasCmd()
 end
 
 local function _hasTest()
-    return type(_G.DWKit) == "table" and type(_G.DWKit.test) == "table" and type(_G.DWKit.test.run) == "function"
+    return type(_G.DWKit) == "table"
+        and type(_G.DWKit.test) == "table"
+        and type(_G.DWKit.test.run) == "function"
 end
 
 local function _hasBaseline()
@@ -89,6 +97,13 @@ local function _hasIdentity()
     return type(_G.DWKit) == "table"
         and type(_G.DWKit.core) == "table"
         and type(_G.DWKit.core.identity) == "table"
+end
+
+local function _hasEventRegistry()
+    return type(_G.DWKit) == "table"
+        and type(_G.DWKit.bus) == "table"
+        and type(_G.DWKit.bus.eventRegistry) == "table"
+        and type(_G.DWKit.bus.eventRegistry.listAll) == "function"
 end
 
 local function _printIdentity()
@@ -138,6 +153,24 @@ local function _printVersionSummary()
         if okV and v then cmdRegVersion = tostring(v) end
     end
 
+    -- Event registry + bus versions (SAFE diagnostics)
+    local evRegVersion = "unknown"
+    if type(DWKit.bus) == "table" and type(DWKit.bus.eventRegistry) == "table" and type(DWKit.bus.eventRegistry.getRegistryVersion) == "function" then
+        local okE, v = pcall(DWKit.bus.eventRegistry.getRegistryVersion)
+        if okE and v then evRegVersion = tostring(v) end
+    else
+        local okER, modER = _safeRequire("dwkit.bus.event_registry")
+        if okER and type(modER) == "table" then
+            evRegVersion = tostring(modER.getRegistryVersion and modER.getRegistryVersion() or modER.VERSION or "unknown")
+        end
+    end
+
+    local evBusVersion = "unknown"
+    local okEB, modEB = _safeRequire("dwkit.bus.event_bus")
+    if okEB and type(modEB) == "table" then
+        evBusVersion = tostring(modEB.VERSION or "unknown")
+    end
+
     -- Self-test runner version (module constant, does NOT run tests)
     local stVersion = "unknown"
     local okST, st = _safeRequire("dwkit.tests.self_test_runner")
@@ -168,6 +201,8 @@ local function _printVersionSummary()
     _out("  runtimeBaseline = " .. rbVersion)
     _out("  selfTestRunner  = " .. stVersion)
     _out("  commandRegistry = " .. cmdRegVersion)
+    _out("  eventRegistry   = " .. evRegVersion)
+    _out("  eventBus        = " .. evBusVersion)
     _out("  commandAliases  = " .. tostring(M.VERSION or "unknown"))
     _out("")
     _out("[DWKit] Identity (locked):")
@@ -190,6 +225,8 @@ function M.getState()
             dwinfo = STATE.aliasIds.dwinfo,
             dwid = STATE.aliasIds.dwid,
             dwversion = STATE.aliasIds.dwversion,
+            dwevents = STATE.aliasIds.dwevents,
+            dwevent = STATE.aliasIds.dwevent,
         },
         lastError = STATE.lastError,
     }
@@ -205,7 +242,7 @@ function M.uninstall()
         return false, STATE.lastError
     end
 
-    local ok1, ok2, ok3, ok4, ok5, ok6 = true, true, true, true, true, true
+    local ok1, ok2, ok3, ok4, ok5, ok6, ok7, ok8 = true, true, true, true, true, true, true, true
 
     if STATE.aliasIds.dwcommands then
         ok1 = pcall(killAlias, STATE.aliasIds.dwcommands)
@@ -237,9 +274,19 @@ function M.uninstall()
         STATE.aliasIds.dwversion = nil
     end
 
+    if STATE.aliasIds.dwevents then
+        ok7 = pcall(killAlias, STATE.aliasIds.dwevents)
+        STATE.aliasIds.dwevents = nil
+    end
+
+    if STATE.aliasIds.dwevent then
+        ok8 = pcall(killAlias, STATE.aliasIds.dwevent)
+        STATE.aliasIds.dwevent = nil
+    end
+
     STATE.installed = false
 
-    if not ok1 or not ok2 or not ok3 or not ok4 or not ok5 or not ok6 then
+    if not ok1 or not ok2 or not ok3 or not ok4 or not ok5 or not ok6 or not ok7 or not ok8 then
         STATE.lastError = "One or more aliases failed to uninstall"
         return false, STATE.lastError
     end
@@ -261,7 +308,6 @@ function M.install(opts)
     end
 
     -- Alias 1: dwcommands [safe|game]
-    -- matches[2] is optional group: safe|game
     local dwcommandsPattern = [[^dwcommands(?:\s+(safe|game))?\s*$]]
     local id1 = tempAlias(dwcommandsPattern, function()
         if not _hasCmd() then
@@ -280,7 +326,6 @@ function M.install(opts)
     end)
 
     -- Alias 2: dwhelp <cmd>
-    -- matches[2] is the command name
     local dwhelpPattern = [[^dwhelp\s+(\S+)\s*$]]
     local id2 = tempAlias(dwhelpPattern, function()
         if not _hasCmd() then
@@ -332,9 +377,38 @@ function M.install(opts)
         _printVersionSummary()
     end)
 
-    if not id1 or not id2 or not id3 or not id4 or not id5 or not id6 then
+    -- Alias 7: dwevents
+    local dweventsPattern = [[^dwevents\s*$]]
+    local id7 = tempAlias(dweventsPattern, function()
+        if not _hasEventRegistry() then
+            _err("DWKit.bus.eventRegistry not available. Run loader.init() first.")
+            return
+        end
+        DWKit.bus.eventRegistry.listAll()
+    end)
+
+    -- Alias 8: dwevent <EventName>
+    local dweventPattern = [[^dwevent\s+(\S+)\s*$]]
+    local id8 = tempAlias(dweventPattern, function()
+        if not _hasEventRegistry() then
+            _err("DWKit.bus.eventRegistry not available. Run loader.init() first.")
+            return
+        end
+
+        local evName = (matches and matches[2]) and tostring(matches[2]) or ""
+        if evName == "" then
+            _err("Usage: dwevent <EventName>")
+            return
+        end
+
+        local ok, _, err = DWKit.bus.eventRegistry.help(evName)
+        if not ok then
+            _err(err or ("Unknown event: " .. evName))
+        end
+    end)
+
+    if not id1 or not id2 or not id3 or not id4 or not id5 or not id6 or not id7 or not id8 then
         STATE.lastError = "Failed to create one or more aliases"
-        -- Best-effort cleanup if one succeeded
         if type(killAlias) == "function" then
             if id1 then pcall(killAlias, id1) end
             if id2 then pcall(killAlias, id2) end
@@ -342,6 +416,8 @@ function M.install(opts)
             if id4 then pcall(killAlias, id4) end
             if id5 then pcall(killAlias, id5) end
             if id6 then pcall(killAlias, id6) end
+            if id7 then pcall(killAlias, id7) end
+            if id8 then pcall(killAlias, id8) end
         end
         return false, STATE.lastError
     end
@@ -352,11 +428,13 @@ function M.install(opts)
     STATE.aliasIds.dwinfo = id4
     STATE.aliasIds.dwid = id5
     STATE.aliasIds.dwversion = id6
+    STATE.aliasIds.dwevents = id7
+    STATE.aliasIds.dwevent = id8
     STATE.installed = true
     STATE.lastError = nil
 
     if not opts.quiet then
-        _out("[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion")
+        _out("[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion, dwevents, dwevent")
     end
 
     return true, nil
