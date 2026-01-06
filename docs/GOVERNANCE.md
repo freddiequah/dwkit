@@ -1,20 +1,18 @@
-# dwkit Governance and Development Standard
+# Governance (Public Summary)
 
-This repository is governed by the project's authoritative standard:
+dwkit is built as a personal, product-grade Mudlet kit with a strict internal development standard.
 
-FULL ANCHOR PACK — MUDLET KIT GOVERNANCE (Mudlet Package Development Standard v1.5)
+## Key rules (summary)
+- Baseline: Mudlet 4.19.1 + embedded Lua runtime
+- Modular design (core/services/UI separation)
+- Only one intentional global namespace
+- Per-profile persistence only; no hardcoded profile names/absolute paths
+- Event names are namespaced and treated as contracts
+- UI is consumer-only; logic lives in services
+- Changes are verification-gated (tests + expected results required)
 
-This document is the single source of truth for:
-- architecture, naming, module boundaries, load order
-- contracts and contract headers
-- event naming and payload rules (Event Registry)
-- persistence and schema rules
-- UI governance (LaunchPad + GUI Settings)
-- testing and verification gate rules
-- release and packaging discipline
-- command and alias registry policy
-- continuity and consistency lock rules
+## Contributions
+This is a personal repo. PRs are not accepted. Please fork.
 
-## Authoritative Standard (paste below)
-
-Paste the full Anchor Pack content here, then treat it as authoritative.
+## Full standard
+The full internal standard exists but is not published in this repository.
