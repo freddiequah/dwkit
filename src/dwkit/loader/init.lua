@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-01-06F
+-- Version     : v2026-01-06G
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -37,9 +37,30 @@ function Loader.init()
         DWKit.test._selfTestLoadError = tostring(runnerOrErr)
     end
 
-    -- Command Registry runtime (SAFE). Guarded to avoid hard failure.
+    -- Bus surfaces (SAFE). Guarded to avoid hard failure.
     DWKit.bus = DWKit.bus or {}
 
+    -- Event Registry (SAFE). Guarded. Registry only, no emit.
+    local okEvReg, evRegOrErr = pcall(require, "dwkit.bus.event_registry")
+    if okEvReg and type(evRegOrErr) == "table" then
+        DWKit.bus.eventRegistry = evRegOrErr
+        DWKit._eventRegistryLoadError = nil
+    else
+        DWKit.bus.eventRegistry = nil
+        DWKit._eventRegistryLoadError = tostring(evRegOrErr)
+    end
+
+    -- Event Bus (SAFE skeleton). Guarded. Does nothing unless manually used.
+    local okEvBus, evBusOrErr = pcall(require, "dwkit.bus.event_bus")
+    if okEvBus and type(evBusOrErr) == "table" then
+        DWKit.bus.eventBus = evBusOrErr
+        DWKit._eventBusLoadError = nil
+    else
+        DWKit.bus.eventBus = nil
+        DWKit._eventBusLoadError = tostring(evBusOrErr)
+    end
+
+    -- Command Registry runtime (SAFE). Guarded to avoid hard failure.
     local okCmd, cmdOrErr = pcall(require, "dwkit.bus.command_registry")
     if okCmd and type(cmdOrErr) == "table" then
         DWKit.bus.commandRegistry = cmdOrErr
@@ -51,7 +72,7 @@ function Loader.init()
         DWKit._cmdRegistryLoadError = tostring(cmdOrErr)
     end
 
-    -- Install SAFE typed aliases (dwcommands / dwhelp). Guarded and idempotent.
+    -- Install SAFE typed aliases (dwcommands / dwhelp / dwid / dwversion). Guarded and idempotent.
     DWKit.services = DWKit.services or {}
 
     local okAlias, aliasOrErr = pcall(require, "dwkit.services.command_aliases")

@@ -1,7 +1,7 @@
 # Event Registry
 
 ## Version
-v1.1
+v1.2
 
 ## Purpose
 This document is the canonical registry of all project events.
@@ -16,9 +16,16 @@ If an event is not registered here first, it does not exist.
 ## Canonical Identity Status
 - EventPrefix: DWKit: (LOCKED)
 
+## Code Surface (SAFE)
+- Registry mirror:
+  - src/dwkit/bus/event_registry.lua
+- Event bus skeleton (internal only):
+  - src/dwkit/bus/event_bus.lua
+  - Enforces: events must be registered in the registry before subscription or emit.
+
 ## Events
 None.
 
 Reason:
 - No events have been introduced yet.
-- Event bus / event emitter surface is not implemented yet (docs remain the source of truth until then).
+- Registry and bus skeleton exist to enforce “docs-first” event introduction.
