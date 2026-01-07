@@ -1,7 +1,7 @@
 # Command Registry
 
 ## Version
-v2.0
+v2.1
 
 ## Purpose
 This document is the canonical registry of all user-facing commands.
@@ -126,6 +126,7 @@ If a command is not registered here, it does not exist.
 - Notes:
   - Typed alias implemented by dwkit.services.command_aliases.
   - Requires loader init to have run (so DWKit.test.run is attached). If missing, check DWKit.test._selfTestLoadError.
+  - Required output sections + PASS/FAIL criteria are specified in: docs/Self_Test_Runner_v1.0.md
 
 ### dwversion
 - Command: dwversion
