@@ -1,7 +1,7 @@
 # Command Registry
 
 ## Version
-v2.2
+v2.3
 
 ## Purpose
 This document is the canonical registry of all user-facing commands.
@@ -14,6 +14,8 @@ If a command is not registered here, it does not exist.
 - Runtime listing/help must derive from the same registry data structure:
   - Source of truth (code): dwkit.bus.command_registry
   - Runtime surface: DWKit.cmd (after loader init)
+- Docs/runtime sync rule (required):
+  - Any invocation variants, syntax, examples, or behavioral notes recorded in this document MUST be mirrored in dwkit.bus.command_registry in the same change set (no drift).
 - Naming scheme (locked):
   - Typed commands are prefixed with "dw" to avoid collisions with the MUD's own commands.
   - The canonical discovery surface is: dwcommands + dwhelp.
@@ -130,6 +132,7 @@ If a command is not registered here, it does not exist.
   - Requires loader init to have run (so DWKit.test.run is attached). If missing, check DWKit.test._selfTestLoadError.
   - Required output sections + PASS/FAIL criteria are specified in: docs/Self_Test_Runner_v1.0.md
   - Quiet mode MUST avoid full registry listing output and prefer count-only registry checks.
+  - Docs/runtime sync reminder: the dwtest syntax/examples/notes in this document must match dwkit.bus.command_registry.
 
 ### dwversion
 - Command: dwversion
