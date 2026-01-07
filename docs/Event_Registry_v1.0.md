@@ -1,7 +1,7 @@
 ﻿# Event Registry
 
 ## Version
-v1.4
+v1.5
 
 ## Purpose
 This document is the canonical registry of all project events.
@@ -9,12 +9,14 @@ If an event is not registered here first, it does not exist.
 
 ## Rules
 - All event names MUST start with EventPrefix.
+- EventPrefix is locked in docs/PACKAGE_IDENTITY.md (authoritative).
 - Events MUST be registered here before being introduced in code.
 - Payload fields are contracts. Any payload change requires explicit acknowledgement.
 - Producers/consumers should be recorded where known.
 
-## Canonical Identity Status
-- EventPrefix: DWKit: (LOCKED)
+## Canonical Identity (Authoritative)
+- Source of truth: docs/PACKAGE_IDENTITY.md
+- EventPrefix MUST be used for all events in this registry.
 
 ## Code Surface (SAFE)
 - Registry mirror:
@@ -42,4 +44,3 @@ If an event is not registered here first, it does not exist.
 
 ## Notes
 - Registry and bus skeleton exist to enforce "docs-first" event introduction.
-
