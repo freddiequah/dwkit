@@ -11,6 +11,8 @@
 --
 -- Public API  :
 --   - run(opts?) -> boolean passAll, table results
+--     opts:
+--       - quiet: boolean (when true, prefer count-only registry checks)
 --
 -- Events Emitted   : None
 -- Events Consumed  : None
@@ -27,7 +29,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-07A"
+M.VERSION = "v2026-01-07D"
 
 -- -------------------------
 -- Safe output helper
@@ -65,11 +67,56 @@ local function _lineCheck(ok, name, detail)
     end
 end
 
+local function _countAnyTable(t)
+    if type(t) ~= "table" then return 0 end
+
+    -- If it's an array-like list, #t works.
+    -- If it's a map keyed by names, #t may be 0, so fall back to pairs().
+    local n = #t
+    if n and n > 0 then return n end
+
+    n = 0
+    for _ in pairs(t) do n = n + 1 end
+    return n
+end
+
+local function _getCountNoPrint(reg)
+    if type(reg) ~= "table" then return false, "registry not table" end
+
+    -- Prefer explicit count() if present
+    if type(reg.count) == "function" then
+        local ok, n = _safecall(reg.count)
+        if ok and type(n) == "number" then return true, n end
+        return false, "count() error"
+    end
+
+    -- Prefer getAll() if present
+    if type(reg.getAll) == "function" then
+        local ok, list = _safecall(reg.getAll)
+        if ok and type(list) == "table" then
+            return true, _countAnyTable(list)
+        end
+        return false, "getAll() error"
+    end
+
+    -- Fallback to listAll() if present (assumed SAFE; should not echo)
+    if type(reg.listAll) == "function" then
+        local ok, list = _safecall(reg.listAll)
+        if ok and type(list) == "table" then
+            return true, _countAnyTable(list)
+        end
+        return false, "listAll() error"
+    end
+
+    return false, "no count/getAll/listAll API"
+end
+
 -- -------------------------
 -- Main runner
 -- -------------------------
 function M.run(opts)
     opts = opts or {}
+    local quiet = (opts.quiet == true)
 
     local results = {
         version = M.VERSION,
@@ -77,6 +124,7 @@ function M.run(opts)
         fail = 0,
         checks = {},
         ts = os.time(),
+        quiet = quiet,
     }
 
     local function addCheck(name, ok, detail)
@@ -107,6 +155,7 @@ function M.run(opts)
     else
         _out("[DWKit Test] ts=" .. tostring(results.ts))
     end
+    _out("[DWKit Test] mode=" .. (quiet and "quiet" or "verbose"))
     _out("")
 
     -- ------------------------------------------------------------
@@ -253,20 +302,31 @@ function M.run(opts)
     local okEvReg = (type(evReg) == "table")
     check("event registry present", okEvReg, "eventRegistry=" .. _yesNo(okEvReg))
     if okEvReg then
-        local count = nil
-        if type(evReg.listAll) == "function" then
-            local okList, list = _safecall(evReg.listAll)
-            if okList and type(list) == "table" then
-                count = #list
-                _lineCheck(true, "event registry listable", "count=" .. tostring(count))
-                check("event registry listable", true, "count=" .. tostring(count))
+        if quiet then
+            local okCount, nOrErr = _getCountNoPrint(evReg)
+            if okCount then
+                _lineCheck(true, "event registry listable", "count=" .. tostring(nOrErr))
+                check("event registry listable", true, "count=" .. tostring(nOrErr))
             else
-                _lineCheck(false, "event registry listable", "listAll() error")
-                check("event registry listable", false, "listAll() error")
+                _lineCheck(false, "event registry listable", tostring(nOrErr))
+                check("event registry listable", false, tostring(nOrErr))
             end
         else
-            _lineCheck(false, "event registry listable", "listAll() missing")
-            check("event registry listable", false, "listAll() missing")
+            local count = nil
+            if type(evReg.listAll) == "function" then
+                local okList, list = _safecall(evReg.listAll)
+                if okList and type(list) == "table" then
+                    count = _countAnyTable(list)
+                    _lineCheck(true, "event registry listable", "count=" .. tostring(count))
+                    check("event registry listable", true, "count=" .. tostring(count))
+                else
+                    _lineCheck(false, "event registry listable", "listAll() error")
+                    check("event registry listable", false, "listAll() error")
+                end
+            else
+                _lineCheck(false, "event registry listable", "listAll() missing")
+                check("event registry listable", false, "listAll() missing")
+            end
         end
     else
         _lineCheck(false, "event registry present", "missing")
@@ -275,20 +335,31 @@ function M.run(opts)
     local okCmdReg = (type(cmdReg) == "table")
     check("command registry present", okCmdReg, "commandRegistry=" .. _yesNo(okCmdReg))
     if okCmdReg then
-        local count = nil
-        if type(cmdReg.listAll) == "function" then
-            local okList, list = _safecall(cmdReg.listAll)
-            if okList and type(list) == "table" then
-                count = #list
-                _lineCheck(true, "command registry listable", "count=" .. tostring(count))
-                check("command registry listable", true, "count=" .. tostring(count))
+        if quiet then
+            local okCount, nOrErr = _getCountNoPrint(cmdReg)
+            if okCount then
+                _lineCheck(true, "command registry listable", "count=" .. tostring(nOrErr))
+                check("command registry listable", true, "count=" .. tostring(nOrErr))
             else
-                _lineCheck(false, "command registry listable", "listAll() error")
-                check("command registry listable", false, "listAll() error")
+                _lineCheck(false, "command registry listable", tostring(nOrErr))
+                check("command registry listable", false, tostring(nOrErr))
             end
         else
-            _lineCheck(false, "command registry listable", "listAll() missing")
-            check("command registry listable", false, "listAll() missing")
+            local count = nil
+            if type(cmdReg.listAll) == "function" then
+                local okList, list = _safecall(cmdReg.listAll)
+                if okList and type(list) == "table" then
+                    count = _countAnyTable(list)
+                    _lineCheck(true, "command registry listable", "count=" .. tostring(count))
+                    check("command registry listable", true, "count=" .. tostring(count))
+                else
+                    _lineCheck(false, "command registry listable", "listAll() error")
+                    check("command registry listable", false, "listAll() error")
+                end
+            else
+                _lineCheck(false, "command registry listable", "listAll() missing")
+                check("command registry listable", false, "listAll() missing")
+            end
         end
     else
         _lineCheck(false, "command registry present", "missing")
@@ -306,14 +377,14 @@ function M.run(opts)
     _lineCheck(initKnown, "loader init status known", "lastInitTs=" .. tostring(DW and DW._lastInitTs or "nil"))
 
     local bootReadyKnown = (hasGlobal and DW._bootReadyEmitted ~= nil)
-    check("bootReady emitted flag known", bootReadyKnown,
+    check("bootReady emitted flag known",
+        bootReadyKnown,
         "_bootReadyEmitted=" .. tostring(DW and DW._bootReadyEmitted or "nil"))
-    _lineCheck(bootReadyKnown, "bootReady emitted flag known",
+    _lineCheck(bootReadyKnown,
+        "bootReady emitted flag known",
         "_bootReadyEmitted=" .. tostring(DW and DW._bootReadyEmitted or "nil"))
 
-    local hadEmitError = (hasGlobal and DW._bootReadyEmitError ~= nil and DW._bootReadyEmitError ~= false and DW._bootReadyEmitError ~= "")
     if hasGlobal then
-        -- If the field doesn't exist, we still report it as "none"
         local e = DW._bootReadyEmitError
         if e == nil or e == false or e == "" then
             check("bootReady emit error", true, "(none)")
