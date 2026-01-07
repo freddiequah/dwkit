@@ -1,8 +1,7 @@
 # Self-Test Runner (dwtest) - Specification
 
 ## Version
-v1.1
-
+v1.2
 ## Purpose
 This document defines the required output sections and PASS/FAIL criteria for the DWKit self-test runner.
 
@@ -22,6 +21,8 @@ This is a documentation-only spec. It does not define implementation details bey
   - dwtest
 - Alternate (Lua):
   - lua DWKit.test.run()
+- Quiet (Lua):
+  - lua local T=require("dwkit.tests.self_test_runner"); T.run({quiet=true})
 
 ## Preconditions
 - loader init should have been invoked before dwtest, so test surfaces are attached:
@@ -37,6 +38,7 @@ dwtest output MUST be copy/paste friendly and include these sections in this ord
   - DWKit label
   - self-test runner version (if available)
   - timestamp (human or epoch)
+  - mode line (exact format): [DWKit Test] mode=quiet OR [DWKit Test] mode=verbose
 
 2) Compatibility Baseline (Section A.0)
 - Prints:
@@ -65,6 +67,11 @@ dwtest output MUST be copy/paste friendly and include these sections in this ord
   - Event registry present and listable
   - Command registry present and listable
 - If registry exists, include a short count (events/commands) where available.
+
+Quiet-mode behavior (required when mode=quiet):
+- Registry checks MUST be count-only.
+- Registry checks MUST NOT print full registry listing blocks (no list spam).
+- Verbose mode may include list blocks, but must still print counts and PASS/FAIL lines.
 
 6) Loader / Boot Wiring Checks (SAFE)
 - Reports PASS/FAIL for:
@@ -125,6 +132,9 @@ When a contract change is made:
   - Explicit acknowledgement in chat before merging
 
 ## Changes
+v1.2
+- Added required header mode line (quiet/verbose).
+- Defined quiet-mode registry behavior as count-only (no list spam).
 v1.1
 - Declared this spec as the authoritative observable-output contract for dwtest.
 - Added Change Control / Contract Stability rules for contract modifications.
