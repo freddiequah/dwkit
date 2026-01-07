@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-07A
+-- Version     : v2026-01-07B
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -26,7 +26,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-07A"
+M.VERSION = "v2026-01-07B"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -46,7 +46,7 @@ end
 -- Registry (single source of truth)
 -- -------------------------
 local REG = {
-    version = "v2026-01-07A",
+    version = "v2026-01-07B",
     commands = {
         dwid = {
             command     = "dwid",
@@ -90,10 +90,11 @@ local REG = {
             aliases     = {},
             ownerModule = "dwkit.tests.self_test_runner",
             description = "Runs DWKit self-test runner (smoke checks + compatibility baseline output).",
-            syntax      = "dwtest  (or: lua DWKit.test.run())",
+            syntax      = "dwtest  (or: lua DWKit.test.run())  (quiet: lua local T=require(\"dwkit.tests.self_test_runner\"); T.run({quiet=true}))",
             examples    = {
                 "dwtest",
                 "lua DWKit.test.run()",
+                "lua local T=require(\"dwkit.tests.self_test_runner\"); T.run({quiet=true})",
             },
             safety      = "SAFE",
             mode        = "manual",
@@ -102,6 +103,7 @@ local REG = {
                 "Typed alias implemented by dwkit.services.command_aliases.",
                 "Requires loader init to have run (so DWKit.test.run is attached).",
                 "If missing, check DWKit.test._selfTestLoadError.",
+                "Quiet mode MUST avoid full registry listing output and prefer count-only registry checks (no list spam).",
             },
         },
 
