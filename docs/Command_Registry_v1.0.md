@@ -1,7 +1,7 @@
 # Command Registry
 
 ## Version
-v2.1
+v2.2
 
 ## Purpose
 This document is the canonical registry of all user-facing commands.
@@ -117,9 +117,11 @@ If a command is not registered here, it does not exist.
 - Syntax:
   - dwtest
   - (or) lua DWKit.test.run()
+  - (quiet) lua local T=require("dwkit.tests.self_test_runner"); T.run({quiet=true})
 - Examples:
   - dwtest
   - lua DWKit.test.run()
+  - lua local T=require("dwkit.tests.self_test_runner"); T.run({quiet=true})
 - Safety: SAFE (no gameplay output sent)
 - Mode: manual
 - SendsToGame: NO
@@ -127,6 +129,7 @@ If a command is not registered here, it does not exist.
   - Typed alias implemented by dwkit.services.command_aliases.
   - Requires loader init to have run (so DWKit.test.run is attached). If missing, check DWKit.test._selfTestLoadError.
   - Required output sections + PASS/FAIL criteria are specified in: docs/Self_Test_Runner_v1.0.md
+  - Quiet mode MUST avoid full registry listing output and prefer count-only registry checks.
 
 ### dwversion
 - Command: dwversion
