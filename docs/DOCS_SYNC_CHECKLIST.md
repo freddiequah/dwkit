@@ -51,7 +51,7 @@ Verification (minimum):
 - lua local L=require("dwkit.loader.init"); L.init()
 - dwtest
 - lua local T=require("dwkit.tests.self_test_runner"); T.run({quiet=true})
-- Confirm output matches the spec’s required sections and rules.
+- Confirm output matches the spec's required sections and rules.
 
 ### 3) Package identity contract sync (required)
 When modifying:
