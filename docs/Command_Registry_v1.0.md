@@ -1,7 +1,7 @@
 # Command Registry
 
 ## Version
-v1.8
+v1.9
 
 ## Purpose
 This document is the canonical registry of all user-facing commands.
@@ -15,6 +15,10 @@ If a command is not registered here, it does not exist.
   - Source of truth (code): dwkit.bus.command_registry
   - Runtime surface: DWKit.cmd (after loader init)
 - Typed commands are prefixed with "dw" to avoid collisions with the MUD's own commands.
+
+## Canonical Identity (Authoritative)
+- Source of truth: docs/PACKAGE_IDENTITY.md
+- PackageId (require prefix), EventPrefix, DataFolderName, and VersionTagStyle are locked there.
 
 ## Command List
 - dwcommands
