@@ -1,7 +1,7 @@
 # Command Registry
 
 ## Version
-v1.7
+v1.8
 
 ## Purpose
 This document is the canonical registry of all user-facing commands.
@@ -25,6 +25,7 @@ If a command is not registered here, it does not exist.
 - dwversion
 - dwevents
 - dwevent
+- dwboot
 
 ## Command Details
 
@@ -161,6 +162,23 @@ If a command is not registered here, it does not exist.
   - Typed alias implemented by dwkit.services.command_aliases.
   - Backed by DWKit.bus.eventRegistry.help(eventName).
   - EventName must be the full registered name (must start with DWKit:).
+
+### dwboot
+- Command: dwboot
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Prints DWKit boot wiring/health status (SAFE diagnostics).
+- Syntax:
+  - dwboot
+- Examples:
+  - dwboot
+- Safety: SAFE (no gameplay output sent)
+- Mode: manual
+- SendsToGame: NO
+- Notes:
+  - Typed alias implemented by dwkit.services.command_aliases.
+  - Reports which DWKit surfaces are attached and any loader/init load errors.
+  - Does not emit gameplay commands.
 
 ## Command Template (copy/paste)
 - Command:

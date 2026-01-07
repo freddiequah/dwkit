@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-01-06H
+-- Version     : v2026-01-07A
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -21,6 +21,9 @@ local Loader = {}
 function Loader.init()
     -- Only allowed global namespace: DWKit
     DWKit = DWKit or {}
+
+    -- Boot marker for troubleshooting (SAFE)
+    DWKit._lastInitTs = os.time()
 
     DWKit.core = DWKit.core or {}
     DWKit.core.identity = require("dwkit.core.identity")
@@ -73,7 +76,7 @@ function Loader.init()
         DWKit._cmdRegistryLoadError = tostring(cmdOrErr)
     end
 
-    -- Install SAFE typed aliases (dwcommands / dwhelp / dwid / dwversion). Guarded and idempotent.
+    -- Install SAFE typed aliases (dwcommands / dwhelp / dwid / dwversion / dwevents / dwevent / dwboot). Guarded and idempotent.
     DWKit.services = DWKit.services or {}
 
     local okAlias, aliasOrErr = pcall(require, "dwkit.services.command_aliases")
@@ -92,7 +95,8 @@ function Loader.init()
 
     -- Emit Boot:Ready (SAFE internal). Guarded and does not break init.
     do
-        local prefix = (DWKit.core and DWKit.core.identity and DWKit.core.identity.eventPrefix) and tostring(DWKit.core.identity.eventPrefix) or "DWKit:"
+        local prefix = (DWKit.core and DWKit.core.identity and DWKit.core.identity.eventPrefix) and
+            tostring(DWKit.core.identity.eventPrefix) or "DWKit:"
         local evName = prefix .. "Boot:Ready"
 
         local eb = (DWKit.bus and DWKit.bus.eventBus) or nil
@@ -103,8 +107,10 @@ function Loader.init()
             if okCall and ok then
                 DWKit._bootReadyEmitted = true
                 DWKit._bootReadyEmitError = nil
+                DWKit._bootReadyTs = payload.ts
             else
                 DWKit._bootReadyEmitted = false
+                DWKit._bootReadyTs = nil
                 if okCall then
                     local errCount = (type(errs) == "table") and #errs or 0
                     DWKit._bootReadyEmitError = "emit failed: ok=" .. tostring(ok)
@@ -116,6 +122,7 @@ function Loader.init()
             end
         else
             DWKit._bootReadyEmitted = false
+            DWKit._bootReadyTs = nil
             DWKit._bootReadyEmitError = "eventBus.emit not available"
         end
     end

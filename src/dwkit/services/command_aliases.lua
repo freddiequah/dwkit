@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-06F
+-- Version     : v2026-01-07A
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game]
@@ -12,6 +12,7 @@
 --       * dwversion
 --       * dwevents
 --       * dwevent <EventName>
+--       * dwboot
 --   - Calls into DWKit.cmd (dwkit.bus.command_registry), DWKit.test, runtimeBaseline, identity,
 --     and event registry surface.
 --   - DOES NOT send gameplay commands.
@@ -34,11 +35,12 @@
 --   - DWKit.core.runtimeBaseline (attached by loader.init)
 --   - DWKit.core.identity (attached by loader.init)
 --   - DWKit.bus.eventRegistry (attached by loader.init)
+--   - DWKit.bus.eventBus (attached by loader.init)
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-06F"
+M.VERSION = "v2026-01-07A"
 
 local STATE = {
     installed = false,
@@ -51,6 +53,7 @@ local STATE = {
         dwversion = nil,
         dwevents = nil,
         dwevent = nil,
+        dwboot = nil,
     },
     lastError = nil,
 }
@@ -106,20 +109,28 @@ local function _hasEventRegistry()
         and type(_G.DWKit.bus.eventRegistry.listAll) == "function"
 end
 
+local function _hasEventBus()
+    return type(_G.DWKit) == "table"
+        and type(_G.DWKit.bus) == "table"
+        and type(_G.DWKit.bus.eventBus) == "table"
+end
+
 local function _printIdentity()
     if not _hasIdentity() then
         _err("DWKit.core.identity not available. Run loader.init() first.")
         return
     end
 
-    local I = DWKit.core.identity
+    local I         = DWKit.core.identity
     local idVersion = tostring(I.VERSION or "unknown")
-    local pkgId = tostring(I.packageId or "unknown")
-    local evp  = tostring(I.eventPrefix or "unknown")
-    local df   = tostring(I.dataFolderName or "unknown")
-    local vts  = tostring(I.versionTagStyle or "unknown")
+    local pkgId     = tostring(I.packageId or "unknown")
+    local evp       = tostring(I.eventPrefix or "unknown")
+    local df        = tostring(I.dataFolderName or "unknown")
+    local vts       = tostring(I.versionTagStyle or "unknown")
 
-    _out("[DWKit] identity=" .. idVersion .. " packageId=" .. pkgId .. " eventPrefix=" .. evp .. " dataFolder=" .. df .. " versionTagStyle=" .. vts)
+    _out("[DWKit] identity=" ..
+        idVersion ..
+        " packageId=" .. pkgId .. " eventPrefix=" .. evp .. " dataFolder=" .. df .. " versionTagStyle=" .. vts)
 end
 
 local function _printVersionSummary()
@@ -181,13 +192,13 @@ local function _printVersionSummary()
     local idVersion = ident and tostring(ident.VERSION or "unknown") or "unknown"
     local rbVersion = rb and tostring(rb.VERSION or "unknown") or "unknown"
 
-    local pkgId = ident and tostring(ident.packageId or "unknown") or "unknown"
-    local evp  = ident and tostring(ident.eventPrefix or "unknown") or "unknown"
-    local df   = ident and tostring(ident.dataFolderName or "unknown") or "unknown"
-    local vts  = ident and tostring(ident.versionTagStyle or "unknown") or "unknown"
+    local pkgId     = ident and tostring(ident.packageId or "unknown") or "unknown"
+    local evp       = ident and tostring(ident.eventPrefix or "unknown") or "unknown"
+    local df        = ident and tostring(ident.dataFolderName or "unknown") or "unknown"
+    local vts       = ident and tostring(ident.versionTagStyle or "unknown") or "unknown"
 
-    local luaV = "unknown"
-    local mudletV = "unknown"
+    local luaV      = "unknown"
+    local mudletV   = "unknown"
     if rb and type(rb.getInfo) == "function" then
         local okInfo, info = pcall(rb.getInfo)
         if okInfo and type(info) == "table" then
@@ -211,6 +222,103 @@ local function _printVersionSummary()
     _out("  lua=" .. luaV .. " mudlet=" .. mudletV)
 end
 
+local function _yn(b) return b and "OK" or "MISSING" end
+
+local function _printBootHealth()
+    _out("[DWKit Boot] Health summary (dwboot)")
+    _out("")
+
+    if type(_G.DWKit) ~= "table" then
+        _out("  DWKit global                : MISSING")
+        _out("")
+        _out("  Next step:")
+        _out("    - Run: lua local L=require(\"dwkit.loader.init\"); L.init()")
+        return
+    end
+
+    local kit = _G.DWKit
+
+    local hasCore = (type(kit.core) == "table")
+    local hasBus = (type(kit.bus) == "table")
+    local hasServices = (type(kit.services) == "table")
+
+    local hasIdentity = hasCore and (type(kit.core.identity) == "table")
+    local hasRB = hasCore and (type(kit.core.runtimeBaseline) == "table")
+    local hasCmd = (type(kit.cmd) == "table")
+    local hasCmdReg = hasBus and (type(kit.bus.commandRegistry) == "table")
+    local hasEvReg = hasBus and (type(kit.bus.eventRegistry) == "table")
+    local hasEvBus = hasBus and (type(kit.bus.eventBus) == "table")
+    local hasTest = (type(kit.test) == "table") and (type(kit.test.run) == "function")
+    local hasAliases = hasServices and (type(kit.services.commandAliases) == "table")
+
+    _out("  DWKit global                : OK")
+    _out("  core.identity               : " .. _yn(hasIdentity))
+    _out("  core.runtimeBaseline        : " .. _yn(hasRB))
+    _out("  cmd (runtime surface)       : " .. _yn(hasCmd))
+    _out("  bus.commandRegistry         : " .. _yn(hasCmdReg))
+    _out("  bus.eventRegistry           : " .. _yn(hasEvReg))
+    _out("  bus.eventBus                : " .. _yn(hasEvBus))
+    _out("  test.run                    : " .. _yn(hasTest))
+    _out("  services.commandAliases     : " .. _yn(hasAliases))
+    _out("")
+
+    local initTs = kit._lastInitTs
+    if type(initTs) == "number" then
+        _out("  lastInitTs                  : " .. tostring(initTs))
+    else
+        _out("  lastInitTs                  : (unknown)")
+    end
+
+    local br = kit._bootReadyEmitted
+    _out("  bootReadyEmitted            : " .. tostring(br == true))
+    if type(kit._bootReadyTs) == "number" then
+        _out("  bootReadyTs                 : " .. tostring(kit._bootReadyTs))
+    end
+    if kit._bootReadyEmitError then
+        _out("  bootReadyEmitError          : " .. tostring(kit._bootReadyEmitError))
+    end
+
+    _out("")
+    _out("  load errors (if any):")
+    local anyErr = false
+
+    local function showErr(key, val)
+        if val ~= nil and tostring(val) ~= "" then
+            anyErr = true
+            _out("    - " .. key .. " = " .. tostring(val))
+        end
+    end
+
+    showErr("_cmdRegistryLoadError", kit._cmdRegistryLoadError)
+    showErr("_eventRegistryLoadError", kit._eventRegistryLoadError)
+    showErr("_eventBusLoadError", kit._eventBusLoadError)
+    showErr("_commandAliasesLoadError", kit._commandAliasesLoadError)
+    if type(kit.test) == "table" then
+        showErr("test._selfTestLoadError", kit.test._selfTestLoadError)
+    end
+
+    if not anyErr then
+        _out("    (none)")
+    end
+
+    if hasEvBus and type(kit.bus.eventBus.getStats) == "function" then
+        local okS, stats = pcall(kit.bus.eventBus.getStats)
+        if okS and type(stats) == "table" then
+            _out("")
+            _out("  eventBus stats:")
+            _out("    version      : " .. tostring(stats.version or "unknown"))
+            _out("    subscribers  : " .. tostring(stats.subscribers or 0))
+            _out("    emitted      : " .. tostring(stats.emitted or 0))
+            _out("    delivered    : " .. tostring(stats.delivered or 0))
+            _out("    handlerErrors: " .. tostring(stats.handlerErrors or 0))
+        end
+    end
+
+    _out("")
+    _out("  Tip: if anything is MISSING, run:")
+    _out("    lua local L=require(\"dwkit.loader.init\"); L.init()")
+end
+
 function M.isInstalled()
     return STATE.installed and true or false
 end
@@ -227,6 +335,7 @@ function M.getState()
             dwversion = STATE.aliasIds.dwversion,
             dwevents = STATE.aliasIds.dwevents,
             dwevent = STATE.aliasIds.dwevent,
+            dwboot = STATE.aliasIds.dwboot,
         },
         lastError = STATE.lastError,
     }
@@ -242,7 +351,7 @@ function M.uninstall()
         return false, STATE.lastError
     end
 
-    local ok1, ok2, ok3, ok4, ok5, ok6, ok7, ok8 = true, true, true, true, true, true, true, true
+    local ok1, ok2, ok3, ok4, ok5, ok6, ok7, ok8, ok9 = true, true, true, true, true, true, true, true, true
 
     if STATE.aliasIds.dwcommands then
         ok1 = pcall(killAlias, STATE.aliasIds.dwcommands)
@@ -284,9 +393,14 @@ function M.uninstall()
         STATE.aliasIds.dwevent = nil
     end
 
+    if STATE.aliasIds.dwboot then
+        ok9 = pcall(killAlias, STATE.aliasIds.dwboot)
+        STATE.aliasIds.dwboot = nil
+    end
+
     STATE.installed = false
 
-    if not ok1 or not ok2 or not ok3 or not ok4 or not ok5 or not ok6 or not ok7 or not ok8 then
+    if not ok1 or not ok2 or not ok3 or not ok4 or not ok5 or not ok6 or not ok7 or not ok8 or not ok9 then
         STATE.lastError = "One or more aliases failed to uninstall"
         return false, STATE.lastError
     end
@@ -407,7 +521,13 @@ function M.install(opts)
         end
     end)
 
-    if not id1 or not id2 or not id3 or not id4 or not id5 or not id6 or not id7 or not id8 then
+    -- Alias 9: dwboot
+    local dwbootPattern = [[^dwboot\s*$]]
+    local id9 = tempAlias(dwbootPattern, function()
+        _printBootHealth()
+    end)
+
+    if not id1 or not id2 or not id3 or not id4 or not id5 or not id6 or not id7 or not id8 or not id9 then
         STATE.lastError = "Failed to create one or more aliases"
         if type(killAlias) == "function" then
             if id1 then pcall(killAlias, id1) end
@@ -418,6 +538,7 @@ function M.install(opts)
             if id6 then pcall(killAlias, id6) end
             if id7 then pcall(killAlias, id7) end
             if id8 then pcall(killAlias, id8) end
+            if id9 then pcall(killAlias, id9) end
         end
         return false, STATE.lastError
     end
@@ -430,11 +551,12 @@ function M.install(opts)
     STATE.aliasIds.dwversion = id6
     STATE.aliasIds.dwevents = id7
     STATE.aliasIds.dwevent = id8
+    STATE.aliasIds.dwboot = id9
     STATE.installed = true
     STATE.lastError = nil
 
     if not opts.quiet then
-        _out("[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion, dwevents, dwevent")
+        _out("[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion, dwevents, dwevent, dwboot")
     end
 
     return true, nil
