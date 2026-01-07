@@ -1,7 +1,7 @@
 # Command Registry
 
 ## Version
-v1.9
+v2.0
 
 ## Purpose
 This document is the canonical registry of all user-facing commands.
@@ -14,11 +14,21 @@ If a command is not registered here, it does not exist.
 - Runtime listing/help must derive from the same registry data structure:
   - Source of truth (code): dwkit.bus.command_registry
   - Runtime surface: DWKit.cmd (after loader init)
-- Typed commands are prefixed with "dw" to avoid collisions with the MUD's own commands.
+- Naming scheme (locked):
+  - Typed commands are prefixed with "dw" to avoid collisions with the MUD's own commands.
+  - The canonical discovery surface is: dwcommands + dwhelp.
 
 ## Canonical Identity (Authoritative)
 - Source of truth: docs/PACKAGE_IDENTITY.md
 - PackageId (require prefix), EventPrefix, DataFolderName, and VersionTagStyle are locked there.
+
+## Section S Compliance Notes
+- Two command types are supported by this registry:
+  A) Kit Commands (SAFE diagnostics, config, UI control, tests)
+  B) Gameplay Command Wrappers (send commands to the MUD; must be explicitly labeled)
+- Current status:
+  - Gameplay Command Wrappers: NONE (as of v2.0)
+- Any new gameplay wrapper MUST include the extra wrapper fields in the Command Template.
 
 ## Command List
 - dwcommands
@@ -191,7 +201,13 @@ If a command is not registered here, it does not exist.
 - Description:
 - Syntax:
 - Examples:
-- Safety:
-- Mode:
-- SendsToGame:
+- Safety: (SAFE | COMBAT-SAFE | NOT SAFE)
+- Mode: (manual | opt-in | auto)
+- SendsToGame: (YES | NO)
 - Notes:
+
+### Gameplay Wrapper Fields (required when SendsToGame=YES)
+- underlyingGameCommand:
+- sideEffects:
+- rateLimit:
+- wrapperOf:
