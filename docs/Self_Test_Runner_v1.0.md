@@ -1,10 +1,14 @@
 # Self-Test Runner (dwtest) - Specification
 
 ## Version
-v1.0
+v1.1
 
 ## Purpose
 This document defines the required output sections and PASS/FAIL criteria for the DWKit self-test runner.
+
+This document is the authoritative observable-output contract for dwtest.
+Any change to headings, section order, PASS/FAIL tokens, verdict wording, or other required observable output elements is a contract change and must follow Change Control.
+
 It exists to enforce the Verification Gate (Section R) and the Self-Test Runner Standard (Section M).
 
 This is a documentation-only spec. It does not define implementation details beyond observable outputs.
@@ -93,8 +97,34 @@ When asked for verification, paste:
   - dwboot
   - dwversion
 
+## Change Control / Contract Stability
+The following are part of the dwtest observable-output contract:
+- Section headings and the required section order listed above
+- PASS/FAIL tokens and the final verdict line wording (PASS/FAIL)
+- Required printed identity fields (PackageRootGlobal, PackageId, EventPrefix, DataFolderName, VersionTagStyle)
+- Required baseline outputs (Mudlet version line behavior, _VERSION line)
+
+Allowed without bumping this document version:
+- Fixing typos or improving explanatory text that does not change required output
+- Adding clearly optional lines that do not rename or reorder required sections, and do not change PASS/FAIL semantics
+
+Requires a version bump in this document (contract change):
+- Renaming headings, changing section order, or removing required sections
+- Changing PASS/FAIL tokens or verdict wording
+- Changing required printed fields or required baseline line behavior
+
+When a contract change is made:
+- Bump the Version in this document
+- Record the change in the Changes section below
+- Obtain explicit acknowledgement in chat before merge
+
 ## Regression Notes
 - dwtest must remain SAFE as the project grows.
 - Any change to dwtest observable sections or PASS/FAIL logic requires:
   - A version bump in this document
   - Explicit acknowledgement in chat before merging
+
+## Changes
+v1.1
+- Declared this spec as the authoritative observable-output contract for dwtest.
+- Added Change Control / Contract Stability rules for contract modifications.
