@@ -1,0 +1,101 @@
+# Docs Sync Checklist (Required)
+
+This document defines the REQUIRED docs-to-runtime sync checks for dwkit.
+It exists to prevent drift between:
+- Documentation contracts (docs/*.md)
+- Runtime registries and observable outputs (src/*.lua)
+
+This is a documentation-only checklist. It does not define new runtime behavior.
+
+## Rule (No Drift)
+If any item listed below changes in docs, the corresponding runtime file(s) MUST be updated in the SAME change set (same branch/PR) so that docs and runtime remain consistent.
+
+## Checklist
+
+### 1) Command Registry sync (required)
+When modifying:
+- docs/Command_Registry_v1.0.md
+
+You MUST also verify/update:
+- src/dwkit/bus/command_registry.lua
+
+Scope of sync (must match):
+- Invocation variants (typed command usage, Lua alternatives, quiet modes)
+- Syntax strings
+- Examples
+- Behavioral notes that affect user expectations of output/behavior
+
+Notes:
+- docs/Command_Registry_v1.0.md is the canonical registry.
+- src/dwkit/bus/command_registry.lua is the runtime source of truth for dwhelp/dwcommands output.
+- No drift is allowed between the two.
+
+Verification (minimum):
+- Run: dwhelp <command>
+- Confirm: Syntax/Examples/Notes match the docs entry for that command.
+
+### 2) Self-test runner contract sync (required)
+When modifying:
+- docs/Self_Test_Runner_v1.0.md
+
+You MUST also verify/update:
+- src/dwkit/tests/self_test_runner.lua
+
+Scope of sync (must match):
+- Required output section order and headings
+- Required header fields (including mode line if specified)
+- PASS/FAIL token semantics
+- Any required quiet/verbose behavior described as contract
+
+Verification (minimum):
+- lua local L=require("dwkit.loader.init"); L.init()
+- dwtest
+- lua local T=require("dwkit.tests.self_test_runner"); T.run({quiet=true})
+- Confirm output matches the spec’s required sections and rules.
+
+### 3) Package identity contract sync (required)
+When modifying:
+- docs/PACKAGE_IDENTITY.md
+
+You MUST also verify/update:
+- src/dwkit/core/identity.lua (canonical identity fields)
+- Any runtime outputs that print identity fields (for example: dwid, dwversion, dwtest)
+
+Scope of sync (must match):
+- PackageId
+- EventPrefix
+- DataFolderName
+- VersionTagStyle
+- Any printed formatting that is treated as a contract in docs
+
+Verification (minimum):
+- lua local L=require("dwkit.loader.init"); L.init()
+- dwid
+- dwversion
+- dwtest
+- Confirm printed identity fields match docs/PACKAGE_IDENTITY.md.
+
+### 4) Event registry sync (required when it becomes runtime-visible)
+When modifying:
+- docs/Event_Registry_v1.0.md
+
+You MUST also verify/update:
+- src/dwkit/bus/event_registry.lua
+- Any runtime surfaces that display event registry data (for example: dwevents, dwevent)
+
+Scope of sync (must match):
+- Event names
+- Descriptions
+- Any required categorization rules (SAFE/GAME) if introduced
+
+Verification (minimum):
+- lua local L=require("dwkit.loader.init"); L.init()
+- dwevents
+- dwevent <EventName>
+- Confirm runtime output reflects the docs registry.
+
+## Definition of Done (Docs Sync)
+A docs change is DONE only when:
+- The corresponding runtime surfaces display the same invocation variants/syntax/examples/notes (where applicable)
+- Any contract-affecting observable output matches the spec (where applicable)
+- The change set contains BOTH docs and runtime updates when required (no split PRs that create drift)
