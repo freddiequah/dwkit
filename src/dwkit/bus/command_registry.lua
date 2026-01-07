@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-06G
+-- Version     : v2026-01-07A
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -26,7 +26,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-06G"
+M.VERSION = "v2026-01-07A"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -46,7 +46,7 @@ end
 -- Registry (single source of truth)
 -- -------------------------
 local REG = {
-    version = "v2026-01-06G",
+    version = "v2026-01-07A",
     commands = {
         dwid = {
             command     = "dwid",
@@ -158,6 +158,25 @@ local REG = {
                 "Typed alias implemented by dwkit.services.command_aliases.",
                 "Backed by DWKit.bus.eventRegistry.help(eventName).",
                 "EventName must be the full registered name (must start with DWKit:).",
+            },
+        },
+
+        dwboot = {
+            command     = "dwboot",
+            aliases     = {},
+            ownerModule = "dwkit.services.command_aliases",
+            description = "Prints DWKit boot wiring/health status (SAFE diagnostics).",
+            syntax      = "dwboot",
+            examples    = {
+                "dwboot",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Typed alias implemented by dwkit.services.command_aliases.",
+                "Reports which DWKit surfaces are attached and any loader/init load errors.",
+                "Does not emit gameplay commands.",
             },
         },
 
