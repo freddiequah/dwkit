@@ -1,29 +1,42 @@
 # Architecture Map
 
 ## Version
-v1.3
+v1.4
 
 ## Purpose
 High-level map of the DWKit layout: what each folder is for, and what depends on what.
 This is a lightweight reference for contributors and for chat handoffs.
 
+## Authoritative Contracts (Docs)
+These documents define the current locked contracts and required sync rules:
+- docs/PACKAGE_IDENTITY.md
+- docs/Command_Registry_v1.0.md
+- docs/Event_Registry_v1.0.md
+- docs/Self_Test_Runner_v1.0.md
+- docs/DOCS_SYNC_CHECKLIST.md
+- docs/GOVERNANCE.md
+
 ## Canonical Identity (Authoritative)
+Source of truth:
+- docs/PACKAGE_IDENTITY.md
+
+Locked fields (current):
 - PackageRootGlobal: DWKit
 - PackageId (require prefix): dwkit
 - EventPrefix: DWKit:
 - DataFolderName: dwkit
-- VersionTagStyle: Calendar (vYYYY-MM-DDX)
+- VersionTagStyle: Calendar (format: vYYYY-MM-DDX)
 
 ## Canonical Layout (Logical)
-- src/core           (logging, safe calls, helpers)
-- src/config         (config surface, defaults, profile overrides)
-- src/persist        (paths, schema IO, migrations helpers)
-- src/bus            (event registry, event bus, command registry)
-- src/services       (parsers/stores/business logic)
-- src/ui             (GUI modules, consumer-only)
-- src/integrations   (optional external integrations; degrade gracefully)
-- src/tests          (self-test runner helpers)
-- src/loader         (thin bootstrap scripts / entrypoints)
+- src/dwkit/core           (logging, safe calls, helpers, identity, runtime baseline)
+- src/dwkit/config         (config surface, defaults, profile overrides)
+- src/dwkit/persist        (paths, schema IO, migration helpers)
+- src/dwkit/bus            (event registry, event bus, command registry)
+- src/dwkit/services       (parsers/stores/business logic)
+- src/dwkit/ui             (GUI modules, consumer-only)
+- src/dwkit/integrations   (optional external integrations; degrade gracefully)
+- src/dwkit/tests          (self-test runner helpers)
+- src/dwkit/loader         (thin bootstrap scripts / entrypoints)
 
 ## Layers (No Cycles)
 Core -> Persist/Config -> Bus -> Services -> UI
@@ -45,22 +58,23 @@ Rules:
 ## Current Implemented Scope (as of this document)
 - Loader init:
   - src/dwkit/loader/init.lua
-  - Creates/returns global DWKit and attaches core modules.
+  - Creates/returns global DWKit and attaches core/bus/services surfaces.
   - Manual-only, no automation.
 
 - Canonical identity module:
   - src/dwkit/core/identity.lua
-  - Single authoritative identity values (must match docs/PACKAGE_IDENTITY.md).
+  - Mirrors docs/PACKAGE_IDENTITY.md (values MUST match).
 
 - Compatibility baseline:
   - src/dwkit/core/runtime_baseline.lua
   - Prints: packageId + Lua version + Mudlet version (safe formatting).
-  - packageId is sourced from dwkit.core.identity (output unchanged).
+  - packageId is sourced from dwkit.core.identity.
 
 - Event registry (SAFE, registry only):
   - src/dwkit/bus/event_registry.lua
   - Code mirror of docs/Event_Registry_v1.0.md.
-  - No events exist yet (registry is empty).
+  - Current registered events (runtime-visible):
+    - DWKit:Boot:Ready
 
 - Event bus skeleton (SAFE, internal only):
   - src/dwkit/bus/event_bus.lua
@@ -69,19 +83,34 @@ Rules:
 
 - Self-test runner (SAFE):
   - src/dwkit/tests/self_test_runner.lua
-  - Smoke checks + prints compatibility baseline.
-  - Prints canonical identity fields for verification.
+  - Smoke checks + prints compatibility baseline + canonical identity fields.
+  - Supports quiet mode for count-only registry checks (no list spam) per docs/Self_Test_Runner_v1.0.md.
 
 - Command registry runtime surface (SAFE):
   - src/dwkit/bus/command_registry.lua
   - Runtime list/help derived from registry data.
   - Exposes registry version accessor (getRegistryVersion) for SAFE diagnostics.
+  - dwtest includes quiet invocation variant in runtime help output.
 
 - Typed SAFE aliases:
   - src/dwkit/services/command_aliases.lua
-  - dwcommands, dwhelp <cmd>, dwtest, dwinfo, dwid, dwversion
+  - dwcommands [safe|game]
+  - dwhelp <cmd>
+  - dwid
+  - dwinfo
+  - dwtest
+  - dwversion
+  - dwevents
+  - dwevent <EventName>
+  - dwboot
 
 ## Guardrails (Important)
 - Do NOT add events unless the event is registered first in docs/Event_Registry_v1.0.md and complies with EventPrefix (DWKit:).
+- Do NOT change identity fields unless docs/PACKAGE_IDENTITY.md is version-bumped and a decision is recorded.
 - Do NOT expand package persistence unless it is per-profile under DataFolderName (dwkit) and includes explicit schema/versioning per the standard.
 - Manual means manual: no timers, no auto-login, no gameplay commands unless explicitly introduced as wrappers.
+
+## Docs/Runtime Sync (No Drift)
+- If any invocation variants, syntax, examples, or behavioral notes change in docs/Command_Registry_v1.0.md,
+  they MUST be mirrored in src/dwkit/bus/command_registry.lua in the same change set.
+- See: docs/DOCS_SYNC_CHECKLIST.md
