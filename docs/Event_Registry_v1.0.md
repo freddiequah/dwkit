@@ -1,7 +1,7 @@
 ﻿# Event Registry
 
 ## Version
-v1.5
+v1.6
 
 ## Purpose
 This document is the canonical registry of all project events.
@@ -41,6 +41,64 @@ If an event is not registered here first, it does not exist.
   - SAFE internal event (no gameplay commands).
   - Manual-only: emitted only when loader.init() is invoked.
   - Docs-first: registered here first, then mirrored in code registry.
+
+## Service Spine Events (Gate 2)
+
+### DWKit:Service:Presence:Updated
+- Description:
+  - Emitted when PresenceService state is updated.
+  - SAFE-only; no gameplay commands.
+- PayloadSchema:
+  - ts: number (os.time() epoch seconds)
+  - source: string ("manual" | "integration" | "test")
+  - presence: table
+    - isOnline: boolean
+    - roomName: string|nil
+    - roomId: string|nil
+    - zone: string|nil
+    - partyCount: number|nil
+- Producers:
+  - dwkit.services.presence_service (future)
+- Consumers:
+  - (none yet; future UI consumers may subscribe)
+- Notes:
+  - Contract: payload fields above are stable.
+  - Any future additions must be additive or versioned.
+
+### DWKit:Service:ActionModel:Updated
+- Description:
+  - Emitted when ActionModelService updates the action model snapshot.
+  - SAFE-only; no gameplay commands.
+- PayloadSchema:
+  - ts: number (os.time() epoch seconds)
+  - source: string ("manual" | "test")
+  - actions: table (list)
+    - id: string
+    - label: string
+    - enabled: boolean
+    - cooldownSec: number|nil
+- Producers:
+  - dwkit.services.action_model_service (future)
+- Consumers:
+  - (none yet; future UI consumers may subscribe)
+- Notes:
+  - Contract: this event represents a snapshot update.
+
+### DWKit:Service:SkillRegistry:Updated
+- Description:
+  - Emitted when SkillRegistryService updates the registry state (data loaded or modified).
+  - SAFE-only; no gameplay commands.
+- PayloadSchema:
+  - ts: number (os.time() epoch seconds)
+  - source: string ("manual" | "test")
+  - skillsCount: number
+  - classesCount: number
+- Producers:
+  - dwkit.services.skill_registry_service (future)
+- Consumers:
+  - (none yet; future UI consumers may subscribe)
+- Notes:
+  - Counts are used for sanity checks and UI summaries.
 
 ## Notes
 - Registry and bus skeleton exist to enforce "docs-first" event introduction.
