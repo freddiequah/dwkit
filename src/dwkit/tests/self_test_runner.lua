@@ -29,7 +29,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-07D"
+M.VERSION = "v2026-01-09A"
 
 -- -------------------------
 -- Safe output helper
@@ -292,6 +292,22 @@ function M.run(opts)
     check("DWKit.test.run exists", okTestSurf, "DWKit.test.run=" .. _yesNo(okTestSurf))
     _lineCheck(okTestSurf, "DWKit.test.run exists", "DWKit.test.run=" .. _yesNo(okTestSurf))
 
+    local okServices = (hasGlobal and type(DW.services) == "table")
+    check("DWKit.services exists", okServices, "DWKit.services=" .. _yesNo(okServices))
+    _lineCheck(okServices, "DWKit.services exists", "DWKit.services=" .. _yesNo(okServices))
+
+    local okPresenceSvc = (okServices and type(DW.services.presenceService) == "table")
+    check("presenceService attached", okPresenceSvc, "presenceService=" .. _yesNo(okPresenceSvc))
+    _lineCheck(okPresenceSvc, "presenceService attached", "presenceService=" .. _yesNo(okPresenceSvc))
+
+    local okActionSvc = (okServices and type(DW.services.actionModelService) == "table")
+    check("actionModelService attached", okActionSvc, "actionModelService=" .. _yesNo(okActionSvc))
+    _lineCheck(okActionSvc, "actionModelService attached", "actionModelService=" .. _yesNo(okActionSvc))
+
+    local okSkillSvc = (okServices and type(DW.services.skillRegistryService) == "table")
+    check("skillRegistryService attached", okSkillSvc, "skillRegistryService=" .. _yesNo(okSkillSvc))
+    _lineCheck(okSkillSvc, "skillRegistryService attached", "skillRegistryService=" .. _yesNo(okSkillSvc))
+
     _out("")
 
     -- ------------------------------------------------------------
@@ -330,6 +346,28 @@ function M.run(opts)
         end
     else
         _lineCheck(false, "event registry present", "missing")
+    end
+
+    -- ------------------------------------------------------------
+    -- Registry required events (docs v1.6 mirror)
+    -- ------------------------------------------------------------
+    if ident and okEvReg and type(evReg.has) == "function" then
+        local prefix = tostring(ident.eventPrefix or "DWKit:")
+        local required = {
+            prefix .. "Boot:Ready",
+            prefix .. "Service:Presence:Updated",
+            prefix .. "Service:ActionModel:Updated",
+            prefix .. "Service:SkillRegistry:Updated",
+        }
+        for _, ev in ipairs(required) do
+            local okHas, hasOrErr = _safecall(evReg.has, ev)
+            local pass = (okHas and hasOrErr == true)
+            _lineCheck(pass, "event registered", tostring(ev))
+            check("event registered: " .. tostring(ev), pass, pass and "YES" or "NO")
+        end
+    else
+        _lineCheck(false, "required events check", "identity/evReg/evReg.has not available")
+        check("required events check", false, "identity/evReg/evReg.has not available")
     end
 
     local okCmdReg = (type(cmdReg) == "table")

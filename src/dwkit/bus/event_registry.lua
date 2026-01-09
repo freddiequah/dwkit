@@ -1,14 +1,15 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.event_registry
 -- Owner       : Bus
--- Version     : v2026-01-06H
+-- Version     : v2026-01-09A
 -- Purpose     :
 --   - Canonical registry for all DWKit events (code mirror of docs/Event_Registry_v1.0.md).
 --   - No events are emitted here. Registry only.
 --   - Runtime-only registration helper for development (NOT persisted).
 --
 -- Public API  :
---   - getRegistryVersion() -> string
+--   - getRegistryVersion() -> string   (docs registry version, e.g. v1.6)
+--   - getModuleVersion()   -> string   (code module version tag)
 --   - getAll() -> table copy (name -> def)
 --   - listAll(opts?) -> table list (sorted by name)
 --   - has(name) -> boolean
@@ -22,13 +23,18 @@
 -- Dependencies     : dwkit.core.identity
 -- #########################################################################
 
-local M = {}
+local M                          = {}
 
-M.VERSION = "v2026-01-06H"
+M.VERSION                        = "v2026-01-09A"
 
-local ID = require("dwkit.core.identity")
+local ID                         = require("dwkit.core.identity")
 
-local EV_BOOT_READY = tostring(ID.eventPrefix or "DWKit:") .. "Boot:Ready"
+local PREFIX                     = tostring(ID.eventPrefix or "DWKit:")
+
+local EV_BOOT_READY              = PREFIX .. "Boot:Ready"
+local EV_SVC_PRESENCE_UPDATED    = PREFIX .. "Service:Presence:Updated"
+local EV_SVC_ACTIONMODEL_UPDATED = PREFIX .. "Service:ActionModel:Updated"
+local EV_SVC_SKILLREG_UPDATED    = PREFIX .. "Service:SkillRegistry:Updated"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -46,9 +52,13 @@ end
 
 -- -------------------------
 -- Registry (single source of truth)
+-- Notes:
+-- - REG.version mirrors docs/Event_Registry_v1.0.md "## Version"
+-- - M.VERSION is the code module version tag (calendar style)
 -- -------------------------
 local REG = {
-  version = M.VERSION,
+  version = "v1.6",
+  moduleVersion = M.VERSION,
   events = {
     [EV_BOOT_READY] = {
       name = EV_BOOT_READY,
@@ -66,6 +76,69 @@ local REG = {
         "SAFE internal event (no gameplay commands).",
         "Manual-only: emitted only when loader.init() is invoked.",
         "Docs-first: registered in docs/Event_Registry_v1.0.md, mirrored here.",
+      },
+    },
+
+    [EV_SVC_PRESENCE_UPDATED] = {
+      name = EV_SVC_PRESENCE_UPDATED,
+      description = "Emitted when PresenceService updates its state (SAFE; no gameplay sends).",
+      payloadSchema = {
+        ts = "number",
+        state = "table",
+        delta = "table (optional)",
+        source = "string (optional)",
+      },
+      producers = {
+        "dwkit.services.presence_service",
+      },
+      consumers = {
+        "internal (ui/tests/integrations)",
+      },
+      notes = {
+        "SAFE internal event (no gameplay commands).",
+        "Manual-only: emitted only when service API is invoked.",
+      },
+    },
+
+    [EV_SVC_ACTIONMODEL_UPDATED] = {
+      name = EV_SVC_ACTIONMODEL_UPDATED,
+      description = "Emitted when ActionModelService updates the action model (SAFE; data only).",
+      payloadSchema = {
+        ts = "number",
+        model = "table",
+        changed = "table (optional)",
+        source = "string (optional)",
+      },
+      producers = {
+        "dwkit.services.action_model_service",
+      },
+      consumers = {
+        "internal (ui/tests)",
+      },
+      notes = {
+        "SAFE internal event (no gameplay commands).",
+        "Manual-only: emitted only when service API is invoked.",
+      },
+    },
+
+    [EV_SVC_SKILLREG_UPDATED] = {
+      name = EV_SVC_SKILLREG_UPDATED,
+      description = "Emitted when SkillRegistryService updates skill/spell registry data (SAFE; data only).",
+      payloadSchema = {
+        ts = "number",
+        registry = "table",
+        changed = "table (optional)",
+        source = "string (optional)",
+      },
+      producers = {
+        "dwkit.services.skill_registry_service",
+      },
+      consumers = {
+        "internal (ui/tests)",
+      },
+      notes = {
+        "SAFE internal event (no gameplay commands).",
+        "Manual-only: emitted only when service API is invoked.",
       },
     },
   }
@@ -89,15 +162,12 @@ local function _validateDef(def)
   end
   if not _isNonEmptyString(def.description) then return false, "missing/invalid: description" end
 
-  -- payloadSchema is a contract surface (can be empty table)
   if def.payloadSchema ~= nil and type(def.payloadSchema) ~= "table" then
     return false, "invalid: payloadSchema must be a table if provided"
   end
-
   if def.producers ~= nil and type(def.producers) ~= "table" then
     return false, "invalid: producers must be a table if provided"
   end
-
   if def.consumers ~= nil and type(def.consumers) ~= "table" then
     return false, "invalid: consumers must be a table if provided"
   end
@@ -115,7 +185,7 @@ local function _shallowCopy(t)
 end
 
 local function _copyDef(def)
-  local c = _shallowCopy(def)
+  local c         = _shallowCopy(def)
   c.payloadSchema = _shallowCopy(def.payloadSchema or {})
   c.producers     = _shallowCopy(def.producers or {})
   c.consumers     = _shallowCopy(def.consumers or {})
@@ -137,6 +207,10 @@ end
 -- -------------------------
 function M.getRegistryVersion()
   return tostring(REG.version or "unknown")
+end
+
+function M.getModuleVersion()
+  return tostring(M.VERSION or "unknown")
 end
 
 function M.getAll()
@@ -184,7 +258,8 @@ function M.help(name, opts)
   local c = _copyDef(def)
 
   if not opts.quiet then
-    _out("[DWKit Event Help] " .. tostring(c.name) .. " (source: dwkit.bus.event_registry " .. tostring(REG.version) .. ")")
+    _out("[DWKit Event Help] " ..
+      tostring(c.name) .. " (source: dwkit.bus.event_registry " .. tostring(REG.version) .. ")")
     _out("  Desc     : " .. tostring(c.description))
     _out("  Producers: " .. ((c.producers and #c.producers > 0) and table.concat(c.producers, ", ") or "(unknown)"))
     _out("  Consumers: " .. ((c.consumers and #c.consumers > 0) and table.concat(c.consumers, ", ") or "(unknown)"))
