@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-07B
+-- Version     : v2026-01-09B
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -26,7 +26,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-07B"
+M.VERSION = "v2026-01-09B"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -46,7 +46,7 @@ end
 -- Registry (single source of truth)
 -- -------------------------
 local REG = {
-    version = "v2026-01-07B",
+    version = "v2026-01-09B",
     commands = {
         dwid = {
             command     = "dwid",
@@ -90,7 +90,8 @@ local REG = {
             aliases     = {},
             ownerModule = "dwkit.tests.self_test_runner",
             description = "Runs DWKit self-test runner (smoke checks + compatibility baseline output).",
-            syntax      = "dwtest  (or: lua DWKit.test.run())  (quiet: lua local T=require(\"dwkit.tests.self_test_runner\"); T.run({quiet=true}))",
+            syntax      =
+            "dwtest  (or: lua DWKit.test.run())  (quiet: lua local T=require(\"dwkit.tests.self_test_runner\"); T.run({quiet=true}))",
             examples    = {
                 "dwtest",
                 "lua DWKit.test.run()",
@@ -179,6 +180,79 @@ local REG = {
                 "Typed alias implemented by dwkit.services.command_aliases.",
                 "Reports which DWKit surfaces are attached and any loader/init load errors.",
                 "Does not emit gameplay commands.",
+            },
+        },
+
+        -- NEW (SAFE): service inspection commands
+        dwservices = {
+            command     = "dwservices",
+            aliases     = {},
+            ownerModule = "dwkit.services.command_aliases",
+            description = "Lists attached DWKit services + versions + load errors (SAFE diagnostics).",
+            syntax      = "dwservices",
+            examples    = {
+                "dwservices",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Implemented as a Mudlet alias (local only).",
+                "Inspection only; no gameplay output; no automation.",
+            },
+        },
+
+        dwpresence = {
+            command     = "dwpresence",
+            aliases     = {},
+            ownerModule = "dwkit.services.command_aliases",
+            description = "Prints PresenceService snapshot (best-effort, SAFE).",
+            syntax      = "dwpresence",
+            examples    = {
+                "dwpresence",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Implemented as a Mudlet alias (local only).",
+                "Prefers PresenceService.getState() if available; otherwise prints available API keys.",
+            },
+        },
+
+        dwactions = {
+            command     = "dwactions",
+            aliases     = {},
+            ownerModule = "dwkit.services.command_aliases",
+            description = "Prints ActionModelService snapshot (best-effort, SAFE).",
+            syntax      = "dwactions",
+            examples    = {
+                "dwactions",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Implemented as a Mudlet alias (local only).",
+                "Prefers ActionModelService.getState() if available; otherwise prints available API keys.",
+            },
+        },
+
+        dwskills = {
+            command     = "dwskills",
+            aliases     = {},
+            ownerModule = "dwkit.services.command_aliases",
+            description = "Prints SkillRegistryService snapshot (best-effort, SAFE).",
+            syntax      = "dwskills",
+            examples    = {
+                "dwskills",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Implemented as a Mudlet alias (local only).",
+                "Prefers SkillRegistryService.getState() or getAll() if available; otherwise prints available API keys.",
             },
         },
 

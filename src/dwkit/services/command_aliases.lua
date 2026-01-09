@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-07A
+-- Version     : v2026-01-09B
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game]
@@ -13,8 +13,12 @@
 --       * dwevents
 --       * dwevent <EventName>
 --       * dwboot
+--       * dwservices
+--       * dwpresence
+--       * dwactions
+--       * dwskills
 --   - Calls into DWKit.cmd (dwkit.bus.command_registry), DWKit.test, runtimeBaseline, identity,
---     and event registry surface.
+--     event registry surface, and SAFE spine services (presence/action/skills).
 --   - DOES NOT send gameplay commands.
 --   - DOES NOT start timers or automation.
 --
@@ -36,24 +40,30 @@
 --   - DWKit.core.identity (attached by loader.init)
 --   - DWKit.bus.eventRegistry (attached by loader.init)
 --   - DWKit.bus.eventBus (attached by loader.init)
+--   - DWKit.services.* (presence/actionModel/skillRegistry) (attached by loader.init)
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-07A"
+M.VERSION = "v2026-01-09B"
 
 local STATE = {
     installed = false,
     aliasIds = {
         dwcommands = nil,
-        dwhelp = nil,
-        dwtest = nil,
-        dwinfo = nil,
-        dwid = nil,
-        dwversion = nil,
-        dwevents = nil,
-        dwevent = nil,
-        dwboot = nil,
+        dwhelp     = nil,
+        dwtest     = nil,
+        dwinfo     = nil,
+        dwid       = nil,
+        dwversion  = nil,
+        dwevents   = nil,
+        dwevent    = nil,
+        dwboot     = nil,
+
+        dwservices = nil,
+        dwpresence = nil,
+        dwactions  = nil,
+        dwskills   = nil,
     },
     lastError = nil,
 }
@@ -113,6 +123,125 @@ local function _hasEventBus()
     return type(_G.DWKit) == "table"
         and type(_G.DWKit.bus) == "table"
         and type(_G.DWKit.bus.eventBus) == "table"
+end
+
+local function _hasServices()
+    return type(_G.DWKit) == "table"
+        and type(_G.DWKit.services) == "table"
+end
+
+local function _getService(name)
+    if not _hasServices() then return nil end
+    local s = _G.DWKit.services[name]
+    if type(s) == "table" then return s end
+    return nil
+end
+
+local function _sortedKeys(t)
+    local keys = {}
+    if type(t) ~= "table" then return keys end
+    for k, _ in pairs(t) do keys[#keys + 1] = k end
+    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    return keys
+end
+
+local function _isArrayLike(t)
+    if type(t) ~= "table" then return false end
+    local n = #t
+    if n == 0 then return false end
+    for i = 1, n do
+        if t[i] == nil then return false end
+    end
+    return true
+end
+
+local function _countAnyTable(t)
+    if type(t) ~= "table" then return 0 end
+    if _isArrayLike(t) then return #t end
+    local n = 0
+    for _ in pairs(t) do n = n + 1 end
+    return n
+end
+
+local function _ppValue(v)
+    local tv = type(v)
+    if tv == "string" then
+        local s = v
+        if #s > 120 then s = s:sub(1, 120) .. "..." end
+        return string.format("%q", s)
+    elseif tv == "number" or tv == "boolean" then
+        return tostring(v)
+    elseif tv == "nil" then
+        return "nil"
+    elseif tv == "table" then
+        return "{...}"
+    else
+        return "<" .. tv .. ">"
+    end
+end
+
+-- Pretty-print (SAFE, bounded output)
+local function _ppTable(t, opts)
+    opts = opts or {}
+    local maxDepth = (type(opts.maxDepth) == "number") and opts.maxDepth or 2
+    local maxItems = (type(opts.maxItems) == "number") and opts.maxItems or 30
+
+    local seen = {}
+
+    local function walk(x, depth, prefix)
+        if type(x) ~= "table" then
+            _out(prefix .. _ppValue(x))
+            return
+        end
+        if seen[x] then
+            _out(prefix .. "{<cycle>}")
+            return
+        end
+        seen[x] = true
+
+        local count = _countAnyTable(x)
+        _out(prefix .. "{ table, count=" .. tostring(count) .. " }")
+
+        if depth >= maxDepth then
+            return
+        end
+
+        if _isArrayLike(x) then
+            local n = #x
+            local limit = math.min(n, maxItems)
+            for i = 1, limit do
+                local v = x[i]
+                if type(v) == "table" then
+                    _out(prefix .. "  [" .. tostring(i) .. "] =")
+                    walk(v, depth + 1, prefix .. "    ")
+                else
+                    _out(prefix .. "  [" .. tostring(i) .. "] = " .. _ppValue(v))
+                end
+            end
+            if n > limit then
+                _out(prefix .. "  ... (" .. tostring(n - limit) .. " more)")
+            end
+            return
+        end
+
+        local keys = _sortedKeys(x)
+        local limit = math.min(#keys, maxItems)
+        for i = 1, limit do
+            local k = keys[i]
+            local v = x[k]
+            if type(v) == "table" then
+                _out(prefix .. "  " .. tostring(k) .. " =")
+                walk(v, depth + 1, prefix .. "    ")
+            else
+                _out(prefix .. "  " .. tostring(k) .. " = " .. _ppValue(v))
+            end
+        end
+        if #keys > limit then
+            _out(prefix .. "  ... (" .. tostring(#keys - limit) .. " more keys)")
+        end
+    end
+
+    walk(t, 0, "")
 end
 
 local function _printIdentity()
@@ -293,6 +422,11 @@ local function _printBootHealth()
     showErr("_eventRegistryLoadError", kit._eventRegistryLoadError)
     showErr("_eventBusLoadError", kit._eventBusLoadError)
     showErr("_commandAliasesLoadError", kit._commandAliasesLoadError)
+
+    showErr("_presenceServiceLoadError", kit._presenceServiceLoadError)
+    showErr("_actionModelServiceLoadError", kit._actionModelServiceLoadError)
+    showErr("_skillRegistryServiceLoadError", kit._skillRegistryServiceLoadError)
+
     if type(kit.test) == "table" then
         showErr("test._selfTestLoadError", kit.test._selfTestLoadError)
     end
@@ -319,6 +453,81 @@ local function _printBootHealth()
     _out("    lua local L=require(\"dwkit.loader.init\"); L.init()")
 end
 
+local function _printServicesHealth()
+    _out("[DWKit Services] Health summary (dwservices)")
+    _out("")
+
+    if type(_G.DWKit) ~= "table" then
+        _out("  DWKit global: MISSING")
+        _out("  Next step: lua local L=require(\"dwkit.loader.init\"); L.init()")
+        return
+    end
+
+    local kit = _G.DWKit
+    if type(kit.services) ~= "table" then
+        _out("  DWKit.services: MISSING")
+        return
+    end
+
+    local function showSvc(fieldName, errKey)
+        local svc = kit.services[fieldName]
+        local ok = (type(svc) == "table")
+        local v = ok and tostring(svc.VERSION or "unknown") or "unknown"
+        _out("  " .. fieldName .. " : " .. (ok and "OK" or "MISSING") .. "  version=" .. v)
+
+        local errVal = kit[errKey]
+        if errVal ~= nil and tostring(errVal) ~= "" then
+            _out("    loadError: " .. tostring(errVal))
+        end
+    end
+
+    showSvc("presenceService", "_presenceServiceLoadError")
+    showSvc("actionModelService", "_actionModelServiceLoadError")
+    showSvc("skillRegistryService", "_skillRegistryServiceLoadError")
+end
+
+local function _printServiceSnapshot(label, svcName)
+    _out("[DWKit Service] " .. tostring(label))
+    local svc = _getService(svcName)
+    if not svc then
+        _err("DWKit.services." .. tostring(svcName) .. " not available. Run loader.init() first.")
+        return
+    end
+
+    _out("  version=" .. tostring(svc.VERSION or "unknown"))
+
+    -- Best-effort snapshot: prefer getState(), else getAll(), else dump keys
+    if type(svc.getState) == "function" then
+        local ok, state = pcall(svc.getState)
+        if ok then
+            _out("  getState(): OK")
+            _ppTable(state, { maxDepth = 2, maxItems = 30 })
+            return
+        end
+        _out("  getState(): ERROR")
+    end
+
+    if type(svc.getAll) == "function" then
+        local ok, state = pcall(svc.getAll)
+        if ok then
+            _out("  getAll(): OK")
+            _ppTable(state, { maxDepth = 2, maxItems = 30 })
+            return
+        end
+        _out("  getAll(): ERROR")
+    end
+
+    local keys = _sortedKeys(svc)
+    _out("  APIs available (keys on service table): count=" .. tostring(#keys))
+    local limit = math.min(#keys, 40)
+    for i = 1, limit do
+        _out("    - " .. tostring(keys[i]))
+    end
+    if #keys > limit then
+        _out("    ... (" .. tostring(#keys - limit) .. " more)")
+    end
+end
+
 function M.isInstalled()
     return STATE.installed and true or false
 end
@@ -336,6 +545,11 @@ function M.getState()
             dwevents = STATE.aliasIds.dwevents,
             dwevent = STATE.aliasIds.dwevent,
             dwboot = STATE.aliasIds.dwboot,
+
+            dwservices = STATE.aliasIds.dwservices,
+            dwpresence = STATE.aliasIds.dwpresence,
+            dwactions = STATE.aliasIds.dwactions,
+            dwskills = STATE.aliasIds.dwskills,
         },
         lastError = STATE.lastError,
     }
@@ -351,56 +565,28 @@ function M.uninstall()
         return false, STATE.lastError
     end
 
-    local ok1, ok2, ok3, ok4, ok5, ok6, ok7, ok8, ok9 = true, true, true, true, true, true, true, true, true
+    local ids = STATE.aliasIds
+    local allIds = {
+        ids.dwcommands, ids.dwhelp, ids.dwtest, ids.dwinfo, ids.dwid, ids.dwversion,
+        ids.dwevents, ids.dwevent, ids.dwboot,
+        ids.dwservices, ids.dwpresence, ids.dwactions, ids.dwskills,
+    }
 
-    if STATE.aliasIds.dwcommands then
-        ok1 = pcall(killAlias, STATE.aliasIds.dwcommands)
-        STATE.aliasIds.dwcommands = nil
+    local allOk = true
+    for _, id in ipairs(allIds) do
+        if id then
+            local ok = pcall(killAlias, id)
+            if not ok then allOk = false end
+        end
     end
 
-    if STATE.aliasIds.dwhelp then
-        ok2 = pcall(killAlias, STATE.aliasIds.dwhelp)
-        STATE.aliasIds.dwhelp = nil
-    end
-
-    if STATE.aliasIds.dwtest then
-        ok3 = pcall(killAlias, STATE.aliasIds.dwtest)
-        STATE.aliasIds.dwtest = nil
-    end
-
-    if STATE.aliasIds.dwinfo then
-        ok4 = pcall(killAlias, STATE.aliasIds.dwinfo)
-        STATE.aliasIds.dwinfo = nil
-    end
-
-    if STATE.aliasIds.dwid then
-        ok5 = pcall(killAlias, STATE.aliasIds.dwid)
-        STATE.aliasIds.dwid = nil
-    end
-
-    if STATE.aliasIds.dwversion then
-        ok6 = pcall(killAlias, STATE.aliasIds.dwversion)
-        STATE.aliasIds.dwversion = nil
-    end
-
-    if STATE.aliasIds.dwevents then
-        ok7 = pcall(killAlias, STATE.aliasIds.dwevents)
-        STATE.aliasIds.dwevents = nil
-    end
-
-    if STATE.aliasIds.dwevent then
-        ok8 = pcall(killAlias, STATE.aliasIds.dwevent)
-        STATE.aliasIds.dwevent = nil
-    end
-
-    if STATE.aliasIds.dwboot then
-        ok9 = pcall(killAlias, STATE.aliasIds.dwboot)
-        STATE.aliasIds.dwboot = nil
+    for k, _ in pairs(STATE.aliasIds) do
+        STATE.aliasIds[k] = nil
     end
 
     STATE.installed = false
 
-    if not ok1 or not ok2 or not ok3 or not ok4 or not ok5 or not ok6 or not ok7 or not ok8 or not ok9 then
+    if not allOk then
         STATE.lastError = "One or more aliases failed to uninstall"
         return false, STATE.lastError
     end
@@ -527,36 +713,64 @@ function M.install(opts)
         _printBootHealth()
     end)
 
-    if not id1 or not id2 or not id3 or not id4 or not id5 or not id6 or not id7 or not id8 or not id9 then
-        STATE.lastError = "Failed to create one or more aliases"
-        if type(killAlias) == "function" then
-            if id1 then pcall(killAlias, id1) end
-            if id2 then pcall(killAlias, id2) end
-            if id3 then pcall(killAlias, id3) end
-            if id4 then pcall(killAlias, id4) end
-            if id5 then pcall(killAlias, id5) end
-            if id6 then pcall(killAlias, id6) end
-            if id7 then pcall(killAlias, id7) end
-            if id8 then pcall(killAlias, id8) end
-            if id9 then pcall(killAlias, id9) end
+    -- Alias 10: dwservices
+    local dwservicesPattern = [[^dwservices\s*$]]
+    local id10 = tempAlias(dwservicesPattern, function()
+        _printServicesHealth()
+    end)
+
+    -- Alias 11: dwpresence
+    local dwpresencePattern = [[^dwpresence\s*$]]
+    local id11 = tempAlias(dwpresencePattern, function()
+        _printServiceSnapshot("PresenceService", "presenceService")
+    end)
+
+    -- Alias 12: dwactions
+    local dwactionsPattern = [[^dwactions\s*$]]
+    local id12 = tempAlias(dwactionsPattern, function()
+        _printServiceSnapshot("ActionModelService", "actionModelService")
+    end)
+
+    -- Alias 13: dwskills
+    local dwskillsPattern = [[^dwskills\s*$]]
+    local id13 = tempAlias(dwskillsPattern, function()
+        _printServiceSnapshot("SkillRegistryService", "skillRegistryService")
+    end)
+
+    local all = { id1, id2, id3, id4, id5, id6, id7, id8, id9, id10, id11, id12, id13 }
+    for _, id in ipairs(all) do
+        if not id then
+            STATE.lastError = "Failed to create one or more aliases"
+            if type(killAlias) == "function" then
+                for _, xid in ipairs(all) do
+                    if xid then pcall(killAlias, xid) end
+                end
+            end
+            return false, STATE.lastError
         end
-        return false, STATE.lastError
     end
 
     STATE.aliasIds.dwcommands = id1
-    STATE.aliasIds.dwhelp = id2
-    STATE.aliasIds.dwtest = id3
-    STATE.aliasIds.dwinfo = id4
-    STATE.aliasIds.dwid = id5
-    STATE.aliasIds.dwversion = id6
-    STATE.aliasIds.dwevents = id7
-    STATE.aliasIds.dwevent = id8
-    STATE.aliasIds.dwboot = id9
-    STATE.installed = true
-    STATE.lastError = nil
+    STATE.aliasIds.dwhelp     = id2
+    STATE.aliasIds.dwtest     = id3
+    STATE.aliasIds.dwinfo     = id4
+    STATE.aliasIds.dwid       = id5
+    STATE.aliasIds.dwversion  = id6
+    STATE.aliasIds.dwevents   = id7
+    STATE.aliasIds.dwevent    = id8
+    STATE.aliasIds.dwboot     = id9
+
+    STATE.aliasIds.dwservices = id10
+    STATE.aliasIds.dwpresence = id11
+    STATE.aliasIds.dwactions  = id12
+    STATE.aliasIds.dwskills   = id13
+
+    STATE.installed           = true
+    STATE.lastError           = nil
 
     if not opts.quiet then
-        _out("[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion, dwevents, dwevent, dwboot")
+        _out(
+        "[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion, dwevents, dwevent, dwboot, dwservices, dwpresence, dwactions, dwskills")
     end
 
     return true, nil
