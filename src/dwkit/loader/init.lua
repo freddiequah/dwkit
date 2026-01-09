@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-01-07A
+-- Version     : v2026-01-09A
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -91,6 +91,38 @@ function Loader.init()
     else
         DWKit.services.commandAliases = nil
         DWKit._commandAliasesLoadError = tostring(aliasOrErr)
+    end
+
+    -- ---------------------------------------------------------------------
+    -- Attach SAFE spine services (data only). Guarded, no automation.
+    -- ---------------------------------------------------------------------
+    do
+        local okP, modOrErr = pcall(require, "dwkit.services.presence_service")
+        if okP and type(modOrErr) == "table" then
+            DWKit.services.presenceService = modOrErr
+            DWKit._presenceServiceLoadError = nil
+        else
+            DWKit.services.presenceService = nil
+            DWKit._presenceServiceLoadError = tostring(modOrErr)
+        end
+
+        local okA, modOrErr2 = pcall(require, "dwkit.services.action_model_service")
+        if okA and type(modOrErr2) == "table" then
+            DWKit.services.actionModelService = modOrErr2
+            DWKit._actionModelServiceLoadError = nil
+        else
+            DWKit.services.actionModelService = nil
+            DWKit._actionModelServiceLoadError = tostring(modOrErr2)
+        end
+
+        local okS, modOrErr3 = pcall(require, "dwkit.services.skill_registry_service")
+        if okS and type(modOrErr3) == "table" then
+            DWKit.services.skillRegistryService = modOrErr3
+            DWKit._skillRegistryServiceLoadError = nil
+        else
+            DWKit.services.skillRegistryService = nil
+            DWKit._skillRegistryServiceLoadError = tostring(modOrErr3)
+        end
     end
 
     -- Emit Boot:Ready (SAFE internal). Guarded and does not break init.
