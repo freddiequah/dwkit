@@ -1,6 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.tests.self_test_runner
 -- Owner       : Tests
+-- Version     : v2026-01-10B
 -- Purpose     :
 --   - Provide a SAFE, manual-only self-test runner.
 --   - Prints PASS/FAIL summary + compatibility baseline output.
@@ -29,7 +30,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-10A"
+M.VERSION = "v2026-01-10B"
 
 -- -------------------------
 -- Safe output helper
@@ -109,6 +110,38 @@ local function _getCountNoPrint(reg)
     end
 
     return false, "no count/getAll/listAll API"
+end
+
+local function _getCommandOwnerNoPrint(cmdReg, cmdName)
+    if type(cmdReg) ~= "table" then return false, "commandRegistry not table" end
+    if type(cmdName) ~= "string" or cmdName == "" then return false, "cmdName invalid" end
+
+    -- Best: getAll() (no prints)
+    if type(cmdReg.getAll) == "function" then
+        local okAll, all = _safecall(cmdReg.getAll)
+        if okAll and type(all) == "table" then
+            local def = all[cmdName]
+            if type(def) ~= "table" then
+                return false, "command not found: " .. tostring(cmdName)
+            end
+            return true, tostring(def.ownerModule or "")
+        end
+        return false, "getAll() error"
+    end
+
+    -- Fallback: help(name,{quiet=true}) (should not print)
+    if type(cmdReg.help) == "function" then
+        local okPcall, okHelp, cmdDef, errOrNil = pcall(cmdReg.help, cmdName, { quiet = true })
+        if not okPcall then
+            return false, tostring(okHelp) -- pcall error string
+        end
+        if okHelp and type(cmdDef) == "table" then
+            return true, tostring(cmdDef.ownerModule or "")
+        end
+        return false, tostring(errOrNil or "help() failed")
+    end
+
+    return false, "no getAll/help API"
 end
 
 -- -------------------------
@@ -403,6 +436,18 @@ function M.run(opts)
                 _lineCheck(false, "command registry listable", "listAll() missing")
                 check("command registry listable", false, "listAll() missing")
             end
+        end
+
+        -- Drift lock: ensure dwscorestore ownerModule stays aligned with typed alias surface.
+        local expectedOwner = "dwkit.services.command_aliases"
+        local okOwner, ownerOrErr = _getCommandOwnerNoPrint(cmdReg, "dwscorestore")
+        if okOwner then
+            local pass = (tostring(ownerOrErr) == expectedOwner)
+            _lineCheck(pass, "command owner locked", "dwscorestore owner=" .. tostring(ownerOrErr))
+            check("command owner locked :: dwscorestore", pass, "dwscorestore owner=" .. tostring(ownerOrErr))
+        else
+            _lineCheck(false, "command owner locked", tostring(ownerOrErr))
+            check("command owner locked :: dwscorestore", false, tostring(ownerOrErr))
         end
     else
         _lineCheck(false, "command registry present", "missing")
