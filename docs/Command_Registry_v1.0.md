@@ -1,7 +1,7 @@
 # Command Registry
 
 ## Version
-v2.4
+v2.5
 
 ## Purpose
 This document is the canonical registry of all user-facing commands.
@@ -273,7 +273,7 @@ If a command is not registered here, it does not exist.
 ### dwscorestore
 - Command: dwscorestore
 - Aliases: (none)
-- Owner Module: dwkit.services.score_store_service
+- Owner Module: dwkit.services.command_aliases
 - Description: Prints ScoreStoreService snapshot summary (best-effort, SAFE).
 - Syntax:
   - dwscorestore
@@ -286,7 +286,8 @@ If a command is not registered here, it does not exist.
 - Mode: manual
 - SendsToGame: NO
 - Notes:
-  - If the typed alias is not present in your environment, use the lua fallback above.
+  - Backed by dwkit.services.score_store_service (ScoreStoreService).
+  - In case the alias is stale/cached, you can use the lua fallback above after loader init.
   - Ingest is manual-only and does not send gameplay commands.
 
 ## Command Template (copy/paste)

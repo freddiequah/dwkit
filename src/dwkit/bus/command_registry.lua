@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-10A
+-- Version     : v2026-01-10B
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -26,7 +26,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-10A"
+M.VERSION = "v2026-01-10B"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -46,7 +46,7 @@ end
 -- Registry (single source of truth)
 -- -------------------------
 local REG = {
-    version = "v2026-01-10A",
+    version = "v2026-01-10B",
     commands = {
         dwid = {
             command     = "dwid",
@@ -260,7 +260,7 @@ local REG = {
         dwscorestore = {
             command     = "dwscorestore",
             aliases     = {},
-            ownerModule = "dwkit.services.score_store_service",
+            ownerModule = "dwkit.services.command_aliases",
             description = "Prints ScoreStoreService snapshot summary (best-effort, SAFE).",
             syntax      = "dwscorestore  (or: lua DWKit.services.scoreStoreService.printSummary())",
             examples    = {
@@ -272,7 +272,8 @@ local REG = {
             mode        = "manual",
             sendsToGame = false,
             notes       = {
-                "If the typed alias is not present, use the lua fallback shown in syntax/examples.",
+                "Backed by dwkit.services.score_store_service (ScoreStoreService).",
+                "In case the alias is stale/cached, you can use the lua fallback above after loader init.",
                 "Ingest is manual-only and does not send gameplay commands.",
             },
         },

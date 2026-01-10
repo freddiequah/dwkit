@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-10D
+-- Version     : v2026-01-10E
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game]
@@ -46,7 +46,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-10D"
+M.VERSION = "v2026-01-10E"
 
 local STATE = {
     installed = false,
@@ -767,9 +767,13 @@ function M.install(opts)
             _err("ScoreStoreService.printSummary not available.")
             return
         end
-        local ok = pcall(svc.printSummary)
+
+        -- NOTE: call as method if implemented with ':' (self expected)
+        local ok, err = pcall(function()
+            return svc.printSummary(svc)
+        end)
         if not ok then
-            _err("ScoreStoreService.printSummary failed (see console/log).")
+            _err("ScoreStoreService.printSummary failed: " .. tostring(err))
         end
     end)
 
