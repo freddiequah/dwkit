@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-09B
+-- Version     : v2026-01-10A
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -26,7 +26,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-09B"
+M.VERSION = "v2026-01-10A"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -46,7 +46,7 @@ end
 -- Registry (single source of truth)
 -- -------------------------
 local REG = {
-    version = "v2026-01-09B",
+    version = "v2026-01-10A",
     commands = {
         dwid = {
             command     = "dwid",
@@ -253,6 +253,27 @@ local REG = {
             notes       = {
                 "Implemented as a Mudlet alias (local only).",
                 "Prefers SkillRegistryService.getState() or getAll() if available; otherwise prints available API keys.",
+            },
+        },
+
+        -- NEW (SAFE): ScoreStore inspection
+        dwscorestore = {
+            command     = "dwscorestore",
+            aliases     = {},
+            ownerModule = "dwkit.services.score_store_service",
+            description = "Prints ScoreStoreService snapshot summary (best-effort, SAFE).",
+            syntax      = "dwscorestore  (or: lua DWKit.services.scoreStoreService.printSummary())",
+            examples    = {
+                "dwscorestore",
+                "lua DWKit.services.scoreStoreService.ingestFromText(\"SCORE TEST\",{source=\"manual\"})",
+                "lua DWKit.services.scoreStoreService.printSummary()",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "If the typed alias is not present, use the lua fallback shown in syntax/examples.",
+                "Ingest is manual-only and does not send gameplay commands.",
             },
         },
 

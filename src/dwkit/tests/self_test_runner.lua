@@ -29,7 +29,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-09A"
+M.VERSION = "v2026-01-10A"
 
 -- -------------------------
 -- Safe output helper
@@ -308,6 +308,10 @@ function M.run(opts)
     check("skillRegistryService attached", okSkillSvc, "skillRegistryService=" .. _yesNo(okSkillSvc))
     _lineCheck(okSkillSvc, "skillRegistryService attached", "skillRegistryService=" .. _yesNo(okSkillSvc))
 
+    local okScoreSvc = (okServices and type(DW.services.scoreStoreService) == "table")
+    check("scoreStoreService attached", okScoreSvc, "scoreStoreService=" .. _yesNo(okScoreSvc))
+    _lineCheck(okScoreSvc, "scoreStoreService attached", "scoreStoreService=" .. _yesNo(okScoreSvc))
+
     _out("")
 
     -- ------------------------------------------------------------
@@ -349,7 +353,7 @@ function M.run(opts)
     end
 
     -- ------------------------------------------------------------
-    -- Registry required events (docs v1.6 mirror)
+    -- Registry required events (docs v1.7 mirror)
     -- ------------------------------------------------------------
     if ident and okEvReg and type(evReg.has) == "function" then
         local prefix = tostring(ident.eventPrefix or "DWKit:")
@@ -358,6 +362,7 @@ function M.run(opts)
             prefix .. "Service:Presence:Updated",
             prefix .. "Service:ActionModel:Updated",
             prefix .. "Service:SkillRegistry:Updated",
+            prefix .. "Service:ScoreStore:Updated",
         }
         for _, ev in ipairs(required) do
             local okHas, hasOrErr = _safecall(evReg.has, ev)

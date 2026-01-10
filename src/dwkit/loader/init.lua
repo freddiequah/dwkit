@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-01-09A
+-- Version     : v2026-01-10A
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -122,6 +122,15 @@ function Loader.init()
         else
             DWKit.services.skillRegistryService = nil
             DWKit._skillRegistryServiceLoadError = tostring(modOrErr3)
+        end
+
+        local okScore, modOrErr4 = pcall(require, "dwkit.services.score_store_service")
+        if okScore and type(modOrErr4) == "table" then
+            DWKit.services.scoreStoreService = modOrErr4
+            DWKit._scoreStoreServiceLoadError = nil
+        else
+            DWKit.services.scoreStoreService = nil
+            DWKit._scoreStoreServiceLoadError = tostring(modOrErr4)
         end
     end
 
