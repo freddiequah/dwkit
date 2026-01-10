@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.tests.self_test_runner
 -- Owner       : Tests
--- Version     : v2026-01-10B
+-- Version     : v2026-01-10C
 -- Purpose     :
 --   - Provide a SAFE, manual-only self-test runner.
 --   - Prints PASS/FAIL summary + compatibility baseline output.
@@ -30,7 +30,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-10B"
+M.VERSION = "v2026-01-10C"
 
 -- -------------------------
 -- Safe output helper
@@ -438,16 +438,20 @@ function M.run(opts)
             end
         end
 
-        -- Drift lock: ensure dwscorestore ownerModule stays aligned with typed alias surface.
+        -- Drift locks: ensure typed alias commands remain owned by command_aliases.
         local expectedOwner = "dwkit.services.command_aliases"
-        local okOwner, ownerOrErr = _getCommandOwnerNoPrint(cmdReg, "dwscorestore")
-        if okOwner then
-            local pass = (tostring(ownerOrErr) == expectedOwner)
-            _lineCheck(pass, "command owner locked", "dwscorestore owner=" .. tostring(ownerOrErr))
-            check("command owner locked :: dwscorestore", pass, "dwscorestore owner=" .. tostring(ownerOrErr))
-        else
-            _lineCheck(false, "command owner locked", tostring(ownerOrErr))
-            check("command owner locked :: dwscorestore", false, tostring(ownerOrErr))
+        local lockCommands = { "dwservices", "dwpresence", "dwactions", "dwskills", "dwscorestore" }
+
+        for _, cmdName in ipairs(lockCommands) do
+            local okOwner, ownerOrErr = _getCommandOwnerNoPrint(cmdReg, cmdName)
+            if okOwner then
+                local pass = (tostring(ownerOrErr) == expectedOwner)
+                _lineCheck(pass, "command owner locked", cmdName .. " owner=" .. tostring(ownerOrErr))
+                check("command owner locked :: " .. cmdName, pass, cmdName .. " owner=" .. tostring(ownerOrErr))
+            else
+                _lineCheck(false, "command owner locked", cmdName .. " :: " .. tostring(ownerOrErr))
+                check("command owner locked :: " .. cmdName, false, tostring(ownerOrErr))
+            end
         end
     else
         _lineCheck(false, "command registry present", "missing")
