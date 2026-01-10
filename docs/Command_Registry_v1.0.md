@@ -1,7 +1,7 @@
 # Command Registry
 
 ## Version
-v2.3
+v2.4
 
 ## Purpose
 This document is the canonical registry of all user-facing commands.
@@ -42,6 +42,11 @@ If a command is not registered here, it does not exist.
 - dwevents
 - dwevent
 - dwboot
+- dwservices
+- dwpresence
+- dwactions
+- dwskills
+- dwscorestore
 
 ## Command Details
 
@@ -200,6 +205,89 @@ If a command is not registered here, it does not exist.
   - Typed alias implemented by dwkit.services.command_aliases.
   - Reports which DWKit surfaces are attached and any loader/init load errors.
   - Does not emit gameplay commands.
+
+### dwservices
+- Command: dwservices
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Lists attached DWKit services + versions + load errors (SAFE diagnostics).
+- Syntax:
+  - dwservices
+- Examples:
+  - dwservices
+- Safety: SAFE (no gameplay output sent)
+- Mode: manual
+- SendsToGame: NO
+- Notes:
+  - Implemented as a Mudlet alias (local only).
+  - Inspection only; no gameplay output; no automation.
+
+### dwpresence
+- Command: dwpresence
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Prints PresenceService snapshot (best-effort, SAFE).
+- Syntax:
+  - dwpresence
+- Examples:
+  - dwpresence
+- Safety: SAFE (no gameplay output sent)
+- Mode: manual
+- SendsToGame: NO
+- Notes:
+  - Implemented as a Mudlet alias (local only).
+  - Prefers PresenceService.getState() if available; otherwise prints available API keys.
+
+### dwactions
+- Command: dwactions
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Prints ActionModelService snapshot (best-effort, SAFE).
+- Syntax:
+  - dwactions
+- Examples:
+  - dwactions
+- Safety: SAFE (no gameplay output sent)
+- Mode: manual
+- SendsToGame: NO
+- Notes:
+  - Implemented as a Mudlet alias (local only).
+  - Prefers ActionModelService.getState() if available; otherwise prints available API keys.
+
+### dwskills
+- Command: dwskills
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Prints SkillRegistryService snapshot (best-effort, SAFE).
+- Syntax:
+  - dwskills
+- Examples:
+  - dwskills
+- Safety: SAFE (no gameplay output sent)
+- Mode: manual
+- SendsToGame: NO
+- Notes:
+  - Implemented as a Mudlet alias (local only).
+  - Prefers SkillRegistryService.getState() or getAll() if available; otherwise prints available API keys.
+
+### dwscorestore
+- Command: dwscorestore
+- Aliases: (none)
+- Owner Module: dwkit.services.score_store_service
+- Description: Prints ScoreStoreService snapshot summary (best-effort, SAFE).
+- Syntax:
+  - dwscorestore
+  - (or) lua DWKit.services.scoreStoreService.printSummary()
+- Examples:
+  - dwscorestore
+  - lua DWKit.services.scoreStoreService.ingestFromText("SCORE TEST",{source="manual"})
+  - lua DWKit.services.scoreStoreService.printSummary()
+- Safety: SAFE (no gameplay output sent)
+- Mode: manual
+- SendsToGame: NO
+- Notes:
+  - If the typed alias is not present in your environment, use the lua fallback above.
+  - Ingest is manual-only and does not send gameplay commands.
 
 ## Command Template (copy/paste)
 - Command:

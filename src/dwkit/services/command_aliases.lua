@@ -1,12 +1,12 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-09B
+-- Version     : v2026-01-10D
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game]
 --       * dwhelp <cmd>
---       * dwtest
+--       * dwtest [quiet]
 --       * dwinfo
 --       * dwid
 --       * dwversion
@@ -17,8 +17,9 @@
 --       * dwpresence
 --       * dwactions
 --       * dwskills
+--       * dwscorestore
 --   - Calls into DWKit.cmd (dwkit.bus.command_registry), DWKit.test, runtimeBaseline, identity,
---     event registry surface, and SAFE spine services (presence/action/skills).
+--     event registry surface, and SAFE spine services (presence/action/skills/scoreStore).
 --   - DOES NOT send gameplay commands.
 --   - DOES NOT start timers or automation.
 --
@@ -40,30 +41,31 @@
 --   - DWKit.core.identity (attached by loader.init)
 --   - DWKit.bus.eventRegistry (attached by loader.init)
 --   - DWKit.bus.eventBus (attached by loader.init)
---   - DWKit.services.* (presence/actionModel/skillRegistry) (attached by loader.init)
+--   - DWKit.services.* (presence/actionModel/skillRegistry/scoreStore) (attached by loader.init)
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-09B"
+M.VERSION = "v2026-01-10D"
 
 local STATE = {
     installed = false,
     aliasIds = {
-        dwcommands = nil,
-        dwhelp     = nil,
-        dwtest     = nil,
-        dwinfo     = nil,
-        dwid       = nil,
-        dwversion  = nil,
-        dwevents   = nil,
-        dwevent    = nil,
-        dwboot     = nil,
+        dwcommands   = nil,
+        dwhelp       = nil,
+        dwtest       = nil,
+        dwinfo       = nil,
+        dwid         = nil,
+        dwversion    = nil,
+        dwevents     = nil,
+        dwevent      = nil,
+        dwboot       = nil,
 
-        dwservices = nil,
-        dwpresence = nil,
-        dwactions  = nil,
-        dwskills   = nil,
+        dwservices   = nil,
+        dwpresence   = nil,
+        dwactions    = nil,
+        dwskills     = nil,
+        dwscorestore = nil,
     },
     lastError = nil,
 }
@@ -426,6 +428,7 @@ local function _printBootHealth()
     showErr("_presenceServiceLoadError", kit._presenceServiceLoadError)
     showErr("_actionModelServiceLoadError", kit._actionModelServiceLoadError)
     showErr("_skillRegistryServiceLoadError", kit._skillRegistryServiceLoadError)
+    showErr("_scoreStoreServiceLoadError", kit._scoreStoreServiceLoadError)
 
     if type(kit.test) == "table" then
         showErr("test._selfTestLoadError", kit.test._selfTestLoadError)
@@ -484,6 +487,7 @@ local function _printServicesHealth()
     showSvc("presenceService", "_presenceServiceLoadError")
     showSvc("actionModelService", "_actionModelServiceLoadError")
     showSvc("skillRegistryService", "_skillRegistryServiceLoadError")
+    showSvc("scoreStoreService", "_scoreStoreServiceLoadError")
 end
 
 local function _printServiceSnapshot(label, svcName)
@@ -528,6 +532,14 @@ local function _printServiceSnapshot(label, svcName)
     end
 end
 
+local function _getScoreStoreServiceBestEffort()
+    local svc = _getService("scoreStoreService")
+    if type(svc) == "table" then return svc end
+    local ok, mod = _safeRequire("dwkit.services.score_store_service")
+    if ok and type(mod) == "table" then return mod end
+    return nil
+end
+
 function M.isInstalled()
     return STATE.installed and true or false
 end
@@ -550,6 +562,7 @@ function M.getState()
             dwpresence = STATE.aliasIds.dwpresence,
             dwactions = STATE.aliasIds.dwactions,
             dwskills = STATE.aliasIds.dwskills,
+            dwscorestore = STATE.aliasIds.dwscorestore,
         },
         lastError = STATE.lastError,
     }
@@ -569,7 +582,7 @@ function M.uninstall()
     local allIds = {
         ids.dwcommands, ids.dwhelp, ids.dwtest, ids.dwinfo, ids.dwid, ids.dwversion,
         ids.dwevents, ids.dwevent, ids.dwboot,
-        ids.dwservices, ids.dwpresence, ids.dwactions, ids.dwskills,
+        ids.dwservices, ids.dwpresence, ids.dwactions, ids.dwskills, ids.dwscorestore,
     }
 
     local allOk = true
@@ -645,14 +658,19 @@ function M.install(opts)
         end
     end)
 
-    -- Alias 3: dwtest
-    local dwtestPattern = [[^dwtest\s*$]]
+    -- Alias 3: dwtest [quiet]
+    local dwtestPattern = [[^dwtest(?:\s+(quiet))?\s*$]]
     local id3 = tempAlias(dwtestPattern, function()
         if not _hasTest() then
             _err("DWKit.test.run not available. Run loader.init() first.")
             return
         end
-        DWKit.test.run()
+        local mode = (matches and matches[2]) and tostring(matches[2]) or ""
+        if mode == "quiet" then
+            DWKit.test.run({ quiet = true })
+        else
+            DWKit.test.run()
+        end
     end)
 
     -- Alias 4: dwinfo
@@ -737,7 +755,25 @@ function M.install(opts)
         _printServiceSnapshot("SkillRegistryService", "skillRegistryService")
     end)
 
-    local all = { id1, id2, id3, id4, id5, id6, id7, id8, id9, id10, id11, id12, id13 }
+    -- Alias 14: dwscorestore
+    local dwscorestorePattern = [[^dwscorestore\s*$]]
+    local id14 = tempAlias(dwscorestorePattern, function()
+        local svc = _getScoreStoreServiceBestEffort()
+        if type(svc) ~= "table" then
+            _err("ScoreStoreService not available. Run loader.init() first.")
+            return
+        end
+        if type(svc.printSummary) ~= "function" then
+            _err("ScoreStoreService.printSummary not available.")
+            return
+        end
+        local ok = pcall(svc.printSummary)
+        if not ok then
+            _err("ScoreStoreService.printSummary failed (see console/log).")
+        end
+    end)
+
+    local all = { id1, id2, id3, id4, id5, id6, id7, id8, id9, id10, id11, id12, id13, id14 }
     for _, id in ipairs(all) do
         if not id then
             STATE.lastError = "Failed to create one or more aliases"
@@ -750,27 +786,28 @@ function M.install(opts)
         end
     end
 
-    STATE.aliasIds.dwcommands = id1
-    STATE.aliasIds.dwhelp     = id2
-    STATE.aliasIds.dwtest     = id3
-    STATE.aliasIds.dwinfo     = id4
-    STATE.aliasIds.dwid       = id5
-    STATE.aliasIds.dwversion  = id6
-    STATE.aliasIds.dwevents   = id7
-    STATE.aliasIds.dwevent    = id8
-    STATE.aliasIds.dwboot     = id9
+    STATE.aliasIds.dwcommands   = id1
+    STATE.aliasIds.dwhelp       = id2
+    STATE.aliasIds.dwtest       = id3
+    STATE.aliasIds.dwinfo       = id4
+    STATE.aliasIds.dwid         = id5
+    STATE.aliasIds.dwversion    = id6
+    STATE.aliasIds.dwevents     = id7
+    STATE.aliasIds.dwevent      = id8
+    STATE.aliasIds.dwboot       = id9
 
-    STATE.aliasIds.dwservices = id10
-    STATE.aliasIds.dwpresence = id11
-    STATE.aliasIds.dwactions  = id12
-    STATE.aliasIds.dwskills   = id13
+    STATE.aliasIds.dwservices   = id10
+    STATE.aliasIds.dwpresence   = id11
+    STATE.aliasIds.dwactions    = id12
+    STATE.aliasIds.dwskills     = id13
+    STATE.aliasIds.dwscorestore = id14
 
-    STATE.installed           = true
-    STATE.lastError           = nil
+    STATE.installed             = true
+    STATE.lastError             = nil
 
     if not opts.quiet then
         _out(
-        "[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion, dwevents, dwevent, dwboot, dwservices, dwpresence, dwactions, dwskills")
+            "[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion, dwevents, dwevent, dwboot, dwservices, dwpresence, dwactions, dwskills, dwscorestore")
     end
 
     return true, nil

@@ -1,14 +1,14 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.event_registry
 -- Owner       : Bus
--- Version     : v2026-01-09A
+-- Version     : v2026-01-10A
 -- Purpose     :
 --   - Canonical registry for all DWKit events (code mirror of docs/Event_Registry_v1.0.md).
 --   - No events are emitted here. Registry only.
 --   - Runtime-only registration helper for development (NOT persisted).
 --
 -- Public API  :
---   - getRegistryVersion() -> string   (docs registry version, e.g. v1.6)
+--   - getRegistryVersion() -> string   (docs registry version, e.g. v1.7)
 --   - getModuleVersion()   -> string   (code module version tag)
 --   - getAll() -> table copy (name -> def)
 --   - listAll(opts?) -> table list (sorted by name)
@@ -25,7 +25,7 @@
 
 local M                          = {}
 
-M.VERSION                        = "v2026-01-09A"
+M.VERSION                        = "v2026-01-10A"
 
 local ID                         = require("dwkit.core.identity")
 
@@ -35,6 +35,7 @@ local EV_BOOT_READY              = PREFIX .. "Boot:Ready"
 local EV_SVC_PRESENCE_UPDATED    = PREFIX .. "Service:Presence:Updated"
 local EV_SVC_ACTIONMODEL_UPDATED = PREFIX .. "Service:ActionModel:Updated"
 local EV_SVC_SKILLREG_UPDATED    = PREFIX .. "Service:SkillRegistry:Updated"
+local EV_SVC_SCORESTORE_UPDATED  = PREFIX .. "Service:ScoreStore:Updated"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -57,7 +58,7 @@ end
 -- - M.VERSION is the code module version tag (calendar style)
 -- -------------------------
 local REG = {
-  version = "v1.6",
+  version = "v1.7",
   moduleVersion = M.VERSION,
   events = {
     [EV_BOOT_READY] = {
@@ -139,6 +140,27 @@ local REG = {
       notes = {
         "SAFE internal event (no gameplay commands).",
         "Manual-only: emitted only when service API is invoked.",
+      },
+    },
+
+    [EV_SVC_SCORESTORE_UPDATED] = {
+      name = EV_SVC_SCORESTORE_UPDATED,
+      description = "Emitted when ScoreStoreService ingests a score-like text snapshot (SAFE; no gameplay sends).",
+      payloadSchema = {
+        ts = "number",
+        snapshot = "table",
+        source = "string (optional)",
+      },
+      producers = {
+        "dwkit.services.score_store_service",
+      },
+      consumers = {
+        "internal (future ui/services/tests)",
+      },
+      notes = {
+        "SAFE internal event (no gameplay commands).",
+        "Manual-only: emitted only when service ingest API is invoked.",
+        "Parsing is optional; raw capture is the stable core contract.",
       },
     },
   }

@@ -1,7 +1,7 @@
 ﻿# Event Registry
 
 ## Version
-v1.6
+v1.7
 
 ## Purpose
 This document is the canonical registry of all project events.
@@ -99,6 +99,27 @@ If an event is not registered here first, it does not exist.
   - (none yet; future UI consumers may subscribe)
 - Notes:
   - Counts are used for sanity checks and UI summaries.
+
+### DWKit:Service:ScoreStore:Updated
+- Description:
+  - Emitted when ScoreStoreService ingests a score-like text snapshot (SAFE; no gameplay sends).
+  - Intended for future consumers (UI/services) that want to display or parse score snapshots.
+- PayloadSchema:
+  - ts: number (os.time() epoch seconds)
+  - snapshot: table
+    - schemaVersion: number (starts at 1)
+    - ts: number (os.time() epoch seconds)
+    - source: string ("manual" | "trigger" | "test")
+    - raw: string (captured text; stored as-is)
+    - parsed: table|nil (best-effort; optional)
+- Producers:
+  - dwkit.services.score_store_service
+- Consumers:
+  - (none yet; future UI consumers may subscribe)
+- Notes:
+  - SAFE internal event (no gameplay commands).
+  - Manual-only: emitted only when ingestFromText() is invoked.
+  - Parsing is optional; raw capture is the stable core contract.
 
 ## Notes
 - Registry and bus skeleton exist to enforce "docs-first" event introduction.
