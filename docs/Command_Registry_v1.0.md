@@ -1,7 +1,7 @@
 # Command Registry
 
 ## Version
-v2.7
+v2.8
 
 ## Purpose
 This document is the canonical registry of all user-facing commands.
@@ -33,7 +33,7 @@ If a command is not registered here, it does not exist.
   A) Kit Commands (SAFE diagnostics, config, UI control, tests)
   B) Gameplay Command Wrappers (send commands to the MUD; must be explicitly labeled)
 - Current status:
-  - Gameplay Command Wrappers: NONE (as of v2.7)
+  - Gameplay Command Wrappers: NONE (as of v2.8)
 - Any new gameplay wrapper MUST include the extra wrapper fields in the Command Template.
 
 ## Runtime Export (Docs Sync Helper) (SAFE)
@@ -53,12 +53,16 @@ Notes:
 These rules are enforced in runtime by the self-test runner in quiet mode (registry-only checks; no gameplay commands sent).
 
 ### SAFE command set (current expected set)
-- Expected SAFE commands (14):
+- Expected SAFE commands (18):
   - dwactions
   - dwboot
   - dwcommands
   - dwevent
   - dwevents
+  - dweventlog
+  - dweventsub
+  - dweventtap
+  - dweventunsub
   - dwhelp
   - dwid
   - dwinfo
@@ -115,6 +119,10 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 - dwversion
 - dwevents
 - dwevent
+- dweventtap
+- dweventsub
+- dweventunsub
+- dweventlog
 - dwboot
 - dwservices
 - dwpresence
@@ -272,6 +280,83 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
   - Typed alias implemented by dwkit.services.command_aliases.
   - Backed by DWKit.bus.eventRegistry.help(eventName).
   - EventName must be the full registered name (must start with DWKit:).
+
+### dweventtap
+- Command: dweventtap
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Controls a SAFE event bus tap (observe all events) and a bounded in-memory log (SAFE diagnostics).
+- Syntax:
+  - dweventtap [on|off|status|show|clear] [n]
+- Examples:
+  - dweventtap status
+  - dweventtap on
+  - dweventtap show 10
+  - dweventtap clear
+  - dweventtap off
+- Safety: SAFE (no gameplay output sent)
+- Mode: manual
+- SendsToGame: NO
+- Notes:
+  - Implemented as a Mudlet alias (local only).
+  - Backed by DWKit.bus.eventBus.tapOn/tapOff.
+  - Tap does not change delivery semantics for normal subscribers.
+  - Log output is bounded; default show prints last 10 entries.
+
+### dweventsub
+- Command: dweventsub
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Subscribes (SAFE) to one DWKit event and records occurrences into the bounded log (SAFE diagnostics).
+- Syntax:
+  - dweventsub <EventName>
+- Examples:
+  - dweventsub DWKit:Service:Presence:Updated
+  - dweventsub DWKit:Boot:Ready
+- Safety: SAFE (no gameplay output sent)
+- Mode: manual
+- SendsToGame: NO
+- Notes:
+  - Implemented as a Mudlet alias (local only).
+  - Backed by DWKit.bus.eventBus.on(eventName, fn).
+  - EventName must be registered and must start with DWKit:.
+  - Use dweventlog to inspect recorded payloads.
+
+### dweventunsub
+- Command: dweventunsub
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Unsubscribes (SAFE) from one DWKit event or all subscriptions (SAFE diagnostics).
+- Syntax:
+  - dweventunsub <EventName|all>
+- Examples:
+  - dweventunsub DWKit:Service:Presence:Updated
+  - dweventunsub all
+- Safety: SAFE (no gameplay output sent)
+- Mode: manual
+- SendsToGame: NO
+- Notes:
+  - Implemented as a Mudlet alias (local only).
+  - Backed by DWKit.bus.eventBus.off(token).
+  - Does not affect event tap; use dweventtap off for that.
+
+### dweventlog
+- Command: dweventlog
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Prints the bounded event diagnostics log (SAFE).
+- Syntax:
+  - dweventlog [n]
+- Examples:
+  - dweventlog
+  - dweventlog 25
+- Safety: SAFE (no gameplay output sent)
+- Mode: manual
+- SendsToGame: NO
+- Notes:
+  - Implemented as a Mudlet alias (local only).
+  - Prints the last n log entries (default 10, capped at 50).
+  - Log includes entries from both tap and per-event subscriptions.
 
 ### dwboot
 - Command: dwboot

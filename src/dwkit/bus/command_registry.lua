@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-11D
+-- Version     : v2026-01-11E
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -31,7 +31,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-11D"
+M.VERSION = "v2026-01-11E"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -51,7 +51,7 @@ end
 -- Registry (single source of truth)
 -- -------------------------
 local REG = {
-    version = "v2026-01-11D",
+    version = "v2026-01-11E",
     commands = {
         dwid = {
             command     = "dwid",
@@ -62,8 +62,8 @@ local REG = {
             examples    = {
                 "dwid",
             },
-            safety      = "SAFE",   -- SAFE | COMBAT-SAFE | NOT SAFE
-            mode        = "manual", -- manual | opt-in | auto
+            safety      = "SAFE",
+            mode        = "manual",
             sendsToGame = false,
             notes       = {
                 "Typed alias implemented by dwkit.services.command_aliases.",
@@ -81,8 +81,8 @@ local REG = {
                 "dwinfo",
                 "lua DWKit.core.runtimeBaseline.printInfo()",
             },
-            safety      = "SAFE",   -- SAFE | COMBAT-SAFE | NOT SAFE
-            mode        = "manual", -- manual | opt-in | auto
+            safety      = "SAFE",
+            mode        = "manual",
             sendsToGame = false,
             notes       = {
                 "Typed alias implemented by dwkit.services.command_aliases.",
@@ -171,6 +171,91 @@ local REG = {
             },
         },
 
+        dweventtap = {
+            command     = "dweventtap",
+            aliases     = {},
+            ownerModule = "dwkit.services.command_aliases",
+            description = "Controls a SAFE event bus tap (observe all events) and a bounded in-memory log (SAFE diagnostics).",
+            syntax      = "dweventtap [on|off|status|show|clear] [n]",
+            examples    = {
+                "dweventtap status",
+                "dweventtap on",
+                "dweventtap show 10",
+                "dweventtap clear",
+                "dweventtap off",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Implemented as a Mudlet alias (local only).",
+                "Backed by DWKit.bus.eventBus.tapOn/tapOff (best-effort, SAFE).",
+                "Tap does not change delivery semantics for normal subscribers.",
+                "Log output is bounded; default show prints last 10 entries.",
+            },
+        },
+
+        dweventsub = {
+            command     = "dweventsub",
+            aliases     = {},
+            ownerModule = "dwkit.services.command_aliases",
+            description = "Subscribes (SAFE) to one DWKit event and records occurrences into the bounded log (SAFE diagnostics).",
+            syntax      = "dweventsub <EventName>",
+            examples    = {
+                "dweventsub DWKit:Service:Presence:Updated",
+                "dweventsub DWKit:Boot:Ready",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Implemented as a Mudlet alias (local only).",
+                "Backed by DWKit.bus.eventBus.on(eventName, fn).",
+                "EventName must be registered and must start with DWKit:.",
+                "Use dweventlog to inspect recorded payloads.",
+            },
+        },
+
+        dweventunsub = {
+            command     = "dweventunsub",
+            aliases     = {},
+            ownerModule = "dwkit.services.command_aliases",
+            description = "Unsubscribes (SAFE) from one DWKit event or all subscriptions (SAFE diagnostics).",
+            syntax      = "dweventunsub <EventName|all>",
+            examples    = {
+                "dweventunsub DWKit:Service:Presence:Updated",
+                "dweventunsub all",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Implemented as a Mudlet alias (local only).",
+                "Backed by DWKit.bus.eventBus.off(token).",
+                "Does not affect event tap; use dweventtap off for that.",
+            },
+        },
+
+        dweventlog = {
+            command     = "dweventlog",
+            aliases     = {},
+            ownerModule = "dwkit.services.command_aliases",
+            description = "Prints the bounded event diagnostics log (SAFE).",
+            syntax      = "dweventlog [n]",
+            examples    = {
+                "dweventlog",
+                "dweventlog 25",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Implemented as a Mudlet alias (local only).",
+                "Prints the last n log entries (default 10, capped at 50).",
+                "Log includes entries from both tap and per-event subscriptions.",
+            },
+        },
+
         dwboot = {
             command     = "dwboot",
             aliases     = {},
@@ -190,7 +275,6 @@ local REG = {
             },
         },
 
-        -- NEW (SAFE): service inspection commands
         dwservices = {
             command     = "dwservices",
             aliases     = {},
@@ -263,7 +347,6 @@ local REG = {
             },
         },
 
-        -- NEW (SAFE): ScoreStore inspection
         dwscorestore = {
             command     = "dwscorestore",
             aliases     = {},
@@ -359,9 +442,6 @@ local function _validateDef(def)
 
     if type(def.sendsToGame) ~= "boolean" then return false, "invalid: sendsToGame must be boolean" end
 
-    -- Locked taxonomy mapping:
-    -- - SAFE means no gameplay commands sent (sendsToGame=false)
-    -- - COMBAT-SAFE / NOT SAFE are gameplay wrappers (sendsToGame=true)
     if def.sendsToGame then
         if def.safety == "SAFE" then
             return false, "invalid: safety must be COMBAT-SAFE or NOT SAFE when sendsToGame=true"

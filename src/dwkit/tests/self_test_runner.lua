@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.tests.self_test_runner
 -- Owner       : Tests
--- Version     : v2026-01-11B
+-- Version     : v2026-01-11C
 -- Purpose     :
 --   - Provide a SAFE, manual-only self-test runner.
 --   - Prints PASS/FAIL summary + compatibility baseline output.
@@ -30,7 +30,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-11B"
+M.VERSION = "v2026-01-11C"
 
 -- -------------------------
 -- Safe output helper
@@ -534,12 +534,17 @@ function M.run(opts)
         end
 
         -- Drift locks: SAFE command set must exist and remain SAFE (registry-only checks; no list spam).
+        -- NOTE: Must match docs/Command_Registry_v1.0.md SAFE set.
         local expectedSafe = {
             "dwactions",
             "dwboot",
             "dwcommands",
             "dwevent",
             "dwevents",
+            "dweventlog",
+            "dweventsub",
+            "dweventtap",
+            "dweventunsub",
             "dwhelp",
             "dwid",
             "dwinfo",

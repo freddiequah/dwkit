@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-11A
+-- Version     : v2026-01-11B
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -18,6 +18,10 @@
 --       * dwactions
 --       * dwskills
 --       * dwscorestore
+--       * dweventtap [on|off|status|show|clear] [n]
+--       * dweventsub <EventName>
+--       * dweventunsub <EventName|all>
+--       * dweventlog [n]
 --   - Calls into DWKit.cmd (dwkit.bus.command_registry), DWKit.test, runtimeBaseline, identity,
 --     event registry surface, and SAFE spine services (presence/action/skills/scoreStore).
 --   - DOES NOT send gameplay commands.
@@ -46,7 +50,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-11A"
+M.VERSION = "v2026-01-11B"
 
 local STATE = {
     installed = false,
@@ -66,8 +70,21 @@ local STATE = {
         dwactions    = nil,
         dwskills     = nil,
         dwscorestore = nil,
+
+        dweventtap    = nil,
+        dweventsub    = nil,
+        dweventunsub  = nil,
+        dweventlog    = nil,
     },
     lastError = nil,
+
+    -- Event diagnostics harness (SAFE; manual)
+    eventDiag = {
+        maxLog = 50,
+        log = {},                 -- ring buffer (simple trim)
+        tapToken = nil,           -- token from eventBus.tapOn
+        subs = {},                -- eventName -> token (from eventBus.on)
+    },
 }
 
 local function _out(line)
@@ -443,11 +460,13 @@ local function _printBootHealth()
         if okS and type(stats) == "table" then
             _out("")
             _out("  eventBus stats:")
-            _out("    version      : " .. tostring(stats.version or "unknown"))
-            _out("    subscribers  : " .. tostring(stats.subscribers or 0))
-            _out("    emitted      : " .. tostring(stats.emitted or 0))
-            _out("    delivered    : " .. tostring(stats.delivered or 0))
-            _out("    handlerErrors: " .. tostring(stats.handlerErrors or 0))
+            _out("    version          : " .. tostring(stats.version or "unknown"))
+            _out("    subscribers      : " .. tostring(stats.subscribers or 0))
+            _out("    tapSubscribers   : " .. tostring(stats.tapSubscribers or 0))
+            _out("    emitted          : " .. tostring(stats.emitted or 0))
+            _out("    delivered        : " .. tostring(stats.delivered or 0))
+            _out("    handlerErrors    : " .. tostring(stats.handlerErrors or 0))
+            _out("    tapErrors        : " .. tostring(stats.tapErrors or 0))
         end
     end
 
@@ -540,11 +559,248 @@ local function _getScoreStoreServiceBestEffort()
     return nil
 end
 
+-- -------------------------
+-- Event diagnostics harness (SAFE)
+-- -------------------------
+local function _diag()
+    return STATE.eventDiag
+end
+
+local function _pushEventLog(kind, eventName, payload)
+    local d = _diag()
+    local rec = {
+        ts = os.time(),
+        kind = tostring(kind or "unknown"),
+        event = tostring(eventName or "unknown"),
+        payload = payload,
+    }
+    d.log[#d.log + 1] = rec
+
+    local maxLog = (type(d.maxLog) == "number" and d.maxLog > 0) and d.maxLog or 50
+    while #d.log > maxLog do
+        table.remove(d.log, 1)
+    end
+end
+
+local function _printEventDiagStatus()
+    if not _hasEventBus() then
+        _err("DWKit.bus.eventBus not available. Run loader.init() first.")
+        return
+    end
+
+    local d = _diag()
+    local tapOn = (type(d.tapToken) == "number")
+    local subCount = 0
+    for _ in pairs(d.subs) do subCount = subCount + 1 end
+
+    local stats = {}
+    if type(DWKit.bus.eventBus.getStats) == "function" then
+        local okS, s = pcall(DWKit.bus.eventBus.getStats)
+        if okS and type(s) == "table" then stats = s end
+    end
+
+    _out("[DWKit EventDiag] status")
+    _out("  tapEnabled     : " .. tostring(tapOn))
+    _out("  tapToken       : " .. tostring(d.tapToken))
+    _out("  subsCount      : " .. tostring(subCount))
+    _out("  logCount       : " .. tostring(#d.log))
+    _out("  maxLog         : " .. tostring(d.maxLog))
+    _out("  eventBus.emitted       : " .. tostring(stats.emitted or 0))
+    _out("  eventBus.delivered     : " .. tostring(stats.delivered or 0))
+    _out("  eventBus.handlerErrors : " .. tostring(stats.handlerErrors or 0))
+    _out("  eventBus.tapSubscribers: " .. tostring(stats.tapSubscribers or 0))
+    _out("  eventBus.tapErrors     : " .. tostring(stats.tapErrors or 0))
+end
+
+local function _printEventLog(n)
+    local d = _diag()
+    local total = #d.log
+    if total == 0 then
+        _out("[DWKit EventDiag] log is empty")
+        return
+    end
+
+    local limit = tonumber(n or "") or 10
+    if limit < 1 then limit = 10 end
+    if limit > 50 then limit = 50 end
+
+    local start = math.max(1, total - limit + 1)
+
+    _out("[DWKit EventDiag] last " .. tostring(total - start + 1) .. " events (most recent last)")
+    for i = start, total do
+        local rec = d.log[i]
+        _out("")
+        _out("  [" .. tostring(i) .. "] ts=" .. tostring(rec.ts) .. " kind=" .. tostring(rec.kind) .. " event=" .. tostring(rec.event))
+        if type(rec.payload) == "table" then
+            _out("    payload=")
+            _ppTable(rec.payload, { maxDepth = 2, maxItems = 25 })
+        else
+            _out("    payload=" .. _ppValue(rec.payload))
+        end
+    end
+end
+
+local function _tapOn()
+    if not _hasEventBus() then
+        _err("DWKit.bus.eventBus not available. Run loader.init() first.")
+        return
+    end
+    local d = _diag()
+    if type(d.tapToken) == "number" then
+        _out("[DWKit EventDiag] tap already enabled token=" .. tostring(d.tapToken))
+        return
+    end
+
+    if type(DWKit.bus.eventBus.tapOn) ~= "function" then
+        _err("eventBus.tapOn not available. Update dwkit.bus.event_bus first.")
+        return
+    end
+
+    local ok, token, err = DWKit.bus.eventBus.tapOn(function(payload, eventName)
+        _pushEventLog("tap", eventName, payload)
+    end)
+    if not ok then
+        _err(err or "tapOn failed")
+        return
+    end
+
+    d.tapToken = token
+    _out("[DWKit EventDiag] tap enabled token=" .. tostring(token))
+end
+
+local function _tapOff()
+    if not _hasEventBus() then
+        _err("DWKit.bus.eventBus not available. Run loader.init() first.")
+        return
+    end
+    local d = _diag()
+    if type(d.tapToken) ~= "number" then
+        _out("[DWKit EventDiag] tap already off")
+        return
+    end
+
+    if type(DWKit.bus.eventBus.tapOff) ~= "function" then
+        _err("eventBus.tapOff not available. Update dwkit.bus.event_bus first.")
+        return
+    end
+
+    local tok = d.tapToken
+    local ok, err = DWKit.bus.eventBus.tapOff(tok)
+    if not ok then
+        _err(err or "tapOff failed")
+        return
+    end
+
+    d.tapToken = nil
+    _out("[DWKit EventDiag] tap disabled token=" .. tostring(tok))
+end
+
+local function _subOn(eventName)
+    if not _hasEventBus() then
+        _err("DWKit.bus.eventBus not available. Run loader.init() first.")
+        return
+    end
+    if not _hasEventRegistry() then
+        _err("DWKit.bus.eventRegistry not available. Run loader.init() first.")
+        return
+    end
+
+    eventName = tostring(eventName or "")
+    if eventName == "" then
+        _err("Usage: dweventsub <EventName>")
+        return
+    end
+
+    if type(DWKit.bus.eventRegistry.has) == "function" then
+        local okHas, exists = pcall(DWKit.bus.eventRegistry.has, eventName)
+        if okHas and not exists then
+            _err("event not registered: " .. tostring(eventName))
+            return
+        end
+    end
+
+    local d = _diag()
+    if type(d.subs[eventName]) == "number" then
+        _out("[DWKit EventDiag] already subscribed: " .. tostring(eventName) .. " token=" .. tostring(d.subs[eventName]))
+        return
+    end
+
+    if type(DWKit.bus.eventBus.on) ~= "function" then
+        _err("eventBus.on not available.")
+        return
+    end
+
+    local ok, token, err = DWKit.bus.eventBus.on(eventName, function(payload, ev)
+        _pushEventLog("sub", ev, payload)
+    end)
+    if not ok then
+        _err(err or "subscribe failed")
+        return
+    end
+
+    d.subs[eventName] = token
+    _out("[DWKit EventDiag] subscribed: " .. tostring(eventName) .. " token=" .. tostring(token))
+end
+
+local function _subOff(eventName)
+    if not _hasEventBus() then
+        _err("DWKit.bus.eventBus not available. Run loader.init() first.")
+        return
+    end
+
+    local d = _diag()
+    eventName = tostring(eventName or "")
+
+    if eventName == "" then
+        _err("Usage: dweventunsub <EventName|all>")
+        return
+    end
+
+    if eventName == "all" then
+        local any = false
+        for ev, tok in pairs(d.subs) do
+            any = true
+            pcall(DWKit.bus.eventBus.off, tok)
+            d.subs[ev] = nil
+        end
+        _out("[DWKit EventDiag] unsubscribed: all (" .. tostring(any and "some" or "none") .. ")")
+        return
+    end
+
+    local tok = d.subs[eventName]
+    if type(tok) ~= "number" then
+        _out("[DWKit EventDiag] not subscribed: " .. tostring(eventName))
+        return
+    end
+
+    local ok, err = DWKit.bus.eventBus.off(tok)
+    if not ok then
+        _err(err or "unsubscribe failed")
+        return
+    end
+
+    d.subs[eventName] = nil
+    _out("[DWKit EventDiag] unsubscribed: " .. tostring(eventName))
+end
+
+local function _logClear()
+    local d = _diag()
+    d.log = {}
+    _out("[DWKit EventDiag] log cleared")
+end
+
+-- -------------------------
+-- Service public API
+-- -------------------------
 function M.isInstalled()
     return STATE.installed and true or false
 end
 
 function M.getState()
+    local d = _diag()
+    local subCount = 0
+    for _ in pairs(d.subs) do subCount = subCount + 1 end
+
     return {
         installed = STATE.installed and true or false,
         aliasIds = {
@@ -563,6 +819,17 @@ function M.getState()
             dwactions = STATE.aliasIds.dwactions,
             dwskills = STATE.aliasIds.dwskills,
             dwscorestore = STATE.aliasIds.dwscorestore,
+
+            dweventtap = STATE.aliasIds.dweventtap,
+            dweventsub = STATE.aliasIds.dweventsub,
+            dweventunsub = STATE.aliasIds.dweventunsub,
+            dweventlog = STATE.aliasIds.dweventlog,
+        },
+        eventDiag = {
+            maxLog = d.maxLog,
+            logCount = #d.log,
+            tapToken = d.tapToken,
+            subsCount = subCount,
         },
         lastError = STATE.lastError,
     }
@@ -571,6 +838,21 @@ end
 function M.uninstall()
     if not STATE.installed then
         return true, nil
+    end
+
+    -- Best-effort: disable tap + clear subscriptions
+    if _hasEventBus() then
+        local d = _diag()
+        if type(d.tapToken) == "number" and type(DWKit.bus.eventBus.tapOff) == "function" then
+            pcall(DWKit.bus.eventBus.tapOff, d.tapToken)
+            d.tapToken = nil
+        end
+        if type(DWKit.bus.eventBus.off) == "function" then
+            for ev, tok in pairs(d.subs) do
+                pcall(DWKit.bus.eventBus.off, tok)
+                d.subs[ev] = nil
+            end
+        end
     end
 
     if type(killAlias) ~= "function" then
@@ -583,6 +865,7 @@ function M.uninstall()
         ids.dwcommands, ids.dwhelp, ids.dwtest, ids.dwinfo, ids.dwid, ids.dwversion,
         ids.dwevents, ids.dwevent, ids.dwboot,
         ids.dwservices, ids.dwpresence, ids.dwactions, ids.dwskills, ids.dwscorestore,
+        ids.dweventtap, ids.dweventsub, ids.dweventunsub, ids.dweventlog,
     }
 
     local allOk = true
@@ -804,7 +1087,58 @@ function M.install(opts)
         end
     end)
 
-    local all = { id1, id2, id3, id4, id5, id6, id7, id8, id9, id10, id11, id12, id13, id14 }
+    -- Alias 15: dweventtap [on|off|status|show|clear] [n]
+    local dweventtapPattern = [[^dweventtap(?:\s+(on|off|status|show|clear))?(?:\s+(\d+))?\s*$]]
+    local id15 = tempAlias(dweventtapPattern, function()
+        local mode = (matches and matches[2]) and tostring(matches[2]) or ""
+        local n = (matches and matches[3]) and tostring(matches[3]) or ""
+
+        if mode == "" or mode == "status" then
+            _printEventDiagStatus()
+            return
+        end
+        if mode == "on" then
+            _tapOn()
+            return
+        end
+        if mode == "off" then
+            _tapOff()
+            return
+        end
+        if mode == "show" then
+            _printEventLog(n)
+            return
+        end
+        if mode == "clear" then
+            _logClear()
+            return
+        end
+
+        _err("Usage: dweventtap [on|off|status|show|clear] [n]")
+    end)
+
+    -- Alias 16: dweventsub <EventName>
+    local dweventsubPattern = [[^dweventsub\s+(\S+)\s*$]]
+    local id16 = tempAlias(dweventsubPattern, function()
+        local evName = (matches and matches[2]) and tostring(matches[2]) or ""
+        _subOn(evName)
+    end)
+
+    -- Alias 17: dweventunsub <EventName|all>
+    local dweventunsubPattern = [[^dweventunsub\s+(\S+)\s*$]]
+    local id17 = tempAlias(dweventunsubPattern, function()
+        local evName = (matches and matches[2]) and tostring(matches[2]) or ""
+        _subOff(evName)
+    end)
+
+    -- Alias 18: dweventlog [n]
+    local dweventlogPattern = [[^dweventlog(?:\s+(\d+))?\s*$]]
+    local id18 = tempAlias(dweventlogPattern, function()
+        local n = (matches and matches[2]) and tostring(matches[2]) or ""
+        _printEventLog(n)
+    end)
+
+    local all = { id1, id2, id3, id4, id5, id6, id7, id8, id9, id10, id11, id12, id13, id14, id15, id16, id17, id18 }
     for _, id in ipairs(all) do
         if not id then
             STATE.lastError = "Failed to create one or more aliases"
@@ -817,28 +1151,32 @@ function M.install(opts)
         end
     end
 
-    STATE.aliasIds.dwcommands   = id1
-    STATE.aliasIds.dwhelp       = id2
-    STATE.aliasIds.dwtest       = id3
-    STATE.aliasIds.dwinfo       = id4
-    STATE.aliasIds.dwid         = id5
-    STATE.aliasIds.dwversion    = id6
-    STATE.aliasIds.dwevents     = id7
-    STATE.aliasIds.dwevent      = id8
-    STATE.aliasIds.dwboot       = id9
+    STATE.aliasIds.dwcommands    = id1
+    STATE.aliasIds.dwhelp        = id2
+    STATE.aliasIds.dwtest        = id3
+    STATE.aliasIds.dwinfo        = id4
+    STATE.aliasIds.dwid          = id5
+    STATE.aliasIds.dwversion     = id6
+    STATE.aliasIds.dwevents      = id7
+    STATE.aliasIds.dwevent       = id8
+    STATE.aliasIds.dwboot        = id9
 
-    STATE.aliasIds.dwservices   = id10
-    STATE.aliasIds.dwpresence   = id11
-    STATE.aliasIds.dwactions    = id12
-    STATE.aliasIds.dwskills     = id13
-    STATE.aliasIds.dwscorestore = id14
+    STATE.aliasIds.dwservices    = id10
+    STATE.aliasIds.dwpresence    = id11
+    STATE.aliasIds.dwactions     = id12
+    STATE.aliasIds.dwskills      = id13
+    STATE.aliasIds.dwscorestore  = id14
 
-    STATE.installed             = true
-    STATE.lastError             = nil
+    STATE.aliasIds.dweventtap    = id15
+    STATE.aliasIds.dweventsub    = id16
+    STATE.aliasIds.dweventunsub  = id17
+    STATE.aliasIds.dweventlog    = id18
+
+    STATE.installed              = true
+    STATE.lastError              = nil
 
     if not opts.quiet then
-        _out(
-            "[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion, dwevents, dwevent, dwboot, dwservices, dwpresence, dwactions, dwskills, dwscorestore")
+        _out("[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion, dwevents, dwevent, dwboot, dwservices, dwpresence, dwactions, dwskills, dwscorestore, dweventtap, dweventsub, dweventunsub, dweventlog")
     end
 
     return true, nil

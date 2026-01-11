@@ -1,16 +1,20 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.event_bus
 -- Owner       : Bus
--- Version     : v2026-01-06H
+-- Version     : v2026-01-11A
 -- Purpose     :
---   - SAFE internal event bus skeleton (in-process publish/subscribe).
+--   - SAFE internal event bus (in-process publish/subscribe).
 --   - Enforces: events MUST be registered in dwkit.bus.event_registry first.
 --   - No Mudlet raiseEvent / tempTrigger / automation. Pure Lua dispatch.
+--   - Adds SAFE "tap" subscribers (observe every emit) to support diagnostics harness
+--     without changing runtime behavior for normal consumers.
 --
 -- Public API  :
 --   - on(eventName, handlerFn) -> boolean ok, number|nil token, string|nil err
 --   - off(token) -> boolean ok, string|nil err
 --   - emit(eventName, payload) -> boolean ok, number deliveredCount, table errors
+--   - tapOn(handlerFn) -> boolean ok, number|nil token, string|nil err
+--   - tapOff(token) -> boolean ok, string|nil err
 --   - getStats() -> table
 --
 -- Events Emitted   : None (this is the emitter)
@@ -22,7 +26,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-06H"
+M.VERSION = "v2026-01-11A"
 
 local ID  = require("dwkit.core.identity")
 local REG = require("dwkit.bus.event_registry")
@@ -36,10 +40,18 @@ end
 
 local STATE = {
   nextToken   = 1,
+
+  -- Per-event subscriptions
   subsByToken = {},    -- token -> { eventName=..., fn=... }
   subsByEvent = {},    -- eventName -> { [token]=fn, ... }
-  emitted     = 0,
-  delivered   = 0,
+
+  -- Tap subscriptions (observe every emitted registered event)
+  tapByToken  = {},    -- token -> fn(payload, eventName, token)
+  tapErrors   = 0,
+
+  -- Stats
+  emitted       = 0,
+  delivered     = 0,
   handlerErrors = 0,
 }
 
@@ -56,6 +68,12 @@ local function _validateEventName(eventName)
   return true, nil
 end
 
+local function _nextToken()
+  local token = STATE.nextToken
+  STATE.nextToken = STATE.nextToken + 1
+  return token
+end
+
 function M.on(eventName, handlerFn)
   local ok, err = _validateEventName(eventName)
   if not ok then return false, nil, err end
@@ -64,8 +82,7 @@ function M.on(eventName, handlerFn)
     return false, nil, "handlerFn must be a function"
   end
 
-  local token = STATE.nextToken
-  STATE.nextToken = STATE.nextToken + 1
+  local token = _nextToken()
 
   STATE.subsByToken[token] = { eventName = eventName, fn = handlerFn }
   STATE.subsByEvent[eventName] = STATE.subsByEvent[eventName] or {}
@@ -101,6 +118,51 @@ function M.off(token)
   return true, nil
 end
 
+-- Tap API: observe every emitted (validated) event.
+-- This does NOT change delivery semantics; tap runs best-effort and is isolated via pcall.
+function M.tapOn(handlerFn)
+  if type(handlerFn) ~= "function" then
+    return false, nil, "handlerFn must be a function"
+  end
+
+  local token = _nextToken()
+  STATE.tapByToken[token] = handlerFn
+  return true, token, nil
+end
+
+function M.tapOff(token)
+  if type(token) ~= "number" then
+    return false, "token must be a number"
+  end
+
+  if not STATE.tapByToken[token] then
+    return false, "unknown token: " .. tostring(token)
+  end
+
+  STATE.tapByToken[token] = nil
+  return true, nil
+end
+
+local function _snapshotTap()
+  local snap = {}
+  for token, fn in pairs(STATE.tapByToken) do
+    if type(fn) == "function" then
+      snap[#snap + 1] = { token = token, fn = fn }
+    end
+  end
+  return snap
+end
+
+local function _snapshotBucket(bucket)
+  local snap = {}
+  for token, fn in pairs(bucket) do
+    if type(fn) == "function" then
+      snap[#snap + 1] = { token = token, fn = fn }
+    end
+  end
+  return snap
+end
+
 function M.emit(eventName, payload)
   local ok, err = _validateEventName(eventName)
   if not ok then
@@ -112,6 +174,20 @@ function M.emit(eventName, payload)
   local delivered = 0
   local errors = {}
 
+  -- 1) Tap handlers (observe all emits). Best-effort; failures do not block.
+  local tapSnap = _snapshotTap()
+  for _, rec in ipairs(tapSnap) do
+    local token = rec.token
+    local fn    = rec.fn
+    local okTap, tapErr = pcall(fn, payload, eventName, token)
+    if not okTap then
+      STATE.tapErrors = STATE.tapErrors + 1
+      -- Keep tap errors out of the main errors list to avoid changing emitter semantics.
+      -- Tap is diagnostics-only; emit() result should remain about core delivery.
+    end
+  end
+
+  -- 2) Normal per-event subscribers
   local bucket = STATE.subsByEvent[eventName]
   if not bucket then
     return true, 0, errors
@@ -119,12 +195,7 @@ function M.emit(eventName, payload)
 
   -- Snapshot subscribers first (best practice):
   -- avoids undefined iteration behavior if handlers call off() during emit().
-  local snapshot = {}
-  for token, fn in pairs(bucket) do
-    if type(fn) == "function" then
-      table.insert(snapshot, { token = token, fn = fn })
-    end
-  end
+  local snapshot = _snapshotBucket(bucket)
 
   for _, rec in ipairs(snapshot) do
     local token = rec.token
@@ -150,13 +221,18 @@ function M.getStats()
   local eventsWithSubs = 0
   for _ in pairs(STATE.subsByEvent) do eventsWithSubs = eventsWithSubs + 1 end
 
+  local taps = 0
+  for _ in pairs(STATE.tapByToken) do taps = taps + 1 end
+
   return {
     version = M.VERSION,
     emitted = STATE.emitted,
     delivered = STATE.delivered,
     handlerErrors = STATE.handlerErrors,
+    tapErrors = STATE.tapErrors,
     subscribers = subs,
     eventsWithSubscribers = eventsWithSubs,
+    tapSubscribers = taps,
   }
 end
 
