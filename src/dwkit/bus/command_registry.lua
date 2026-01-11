@@ -1,10 +1,11 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-11C
+-- Version     : v2026-01-11D
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
+--   - Provides Markdown export derived from the same registry data (docs sync helper).
 --   - DOES NOT send gameplay commands (registry only).
 --   - DOES NOT start timers or automation.
 --   - Gameplay wrappers (sendsToGame=true) MUST declare:
@@ -19,6 +20,7 @@
 --   - register(def) -> boolean ok, string|nil errOrNil   (runtime-only, not persisted)
 --   - getAll() -> table copy (name -> def)
 --   - getRegistryVersion() -> string
+--   - toMarkdown(opts?) -> string   (docs copy helper; SAFE)
 --
 -- Events Emitted   : None
 -- Events Consumed  : None
@@ -29,7 +31,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-11C"
+M.VERSION = "v2026-01-11D"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -49,7 +51,7 @@ end
 -- Registry (single source of truth)
 -- -------------------------
 local REG = {
-    version = "v2026-01-11C",
+    version = "v2026-01-11D",
     commands = {
         dwid = {
             command     = "dwid",
@@ -134,10 +136,11 @@ local REG = {
             command     = "dwevents",
             aliases     = {},
             ownerModule = "dwkit.services.command_aliases",
-            description = "Lists registered DWKit events (SAFE).",
-            syntax      = "dwevents",
+            description = "Lists registered DWKit events (SAFE) or prints Markdown export (SAFE).",
+            syntax      = "dwevents [md]",
             examples    = {
                 "dwevents",
+                "dwevents md",
             },
             safety      = "SAFE",
             mode        = "manual",
@@ -145,6 +148,7 @@ local REG = {
             notes       = {
                 "Typed alias implemented by dwkit.services.command_aliases.",
                 "Backed by DWKit.bus.eventRegistry.listAll().",
+                "Markdown export is backed by DWKit.bus.eventRegistry.toMarkdown().",
             },
         },
 
@@ -285,12 +289,13 @@ local REG = {
             command     = "dwcommands",
             aliases     = {},
             ownerModule = "dwkit.services.command_aliases",
-            description = "Lists registered DWKit commands (ALL, SAFE, or GAME).",
-            syntax      = "dwcommands [safe|game]",
+            description = "Lists registered DWKit commands (ALL, SAFE, GAME) or prints Markdown export (SAFE).",
+            syntax      = "dwcommands [safe|game|md]",
             examples    = {
                 "dwcommands",
                 "dwcommands safe",
                 "dwcommands game",
+                "dwcommands md",
             },
             safety      = "SAFE",
             mode        = "manual",
@@ -300,6 +305,7 @@ local REG = {
                 "Backed by DWKit.cmd.listAll/listSafe/listGame.",
                 "dwcommands safe uses registry filter: sendsToGame == false.",
                 "dwcommands game uses registry filter: sendsToGame == true.",
+                "Markdown export is backed by DWKit.cmd.toMarkdown().",
             },
         },
 
@@ -401,6 +407,116 @@ local function _collectList(filterFn)
     end
     table.sort(list, function(a, b) return tostring(a.command) < tostring(b.command) end)
     return list
+end
+
+-- -------------------------
+-- Markdown export (docs helper; SAFE)
+-- -------------------------
+local function _mdEscape(s)
+    s = tostring(s or "")
+    s = s:gsub("\r\n", "\n")
+    s = s:gsub("\r", "\n")
+    return s
+end
+
+local function _mdLine(lines, s)
+    lines[#lines + 1] = tostring(s or "")
+end
+
+local function _mdBullet(lines, s)
+    _mdLine(lines, "- " .. _mdEscape(s))
+end
+
+local function _mdIndentBullet(lines, s)
+    _mdLine(lines, "  - " .. _mdEscape(s))
+end
+
+local function _mdSection(lines, title)
+    _mdLine(lines, "")
+    _mdLine(lines, "### " .. _mdEscape(title))
+end
+
+local function _mdValueLine(lines, label, value)
+    _mdLine(lines, "- " .. _mdEscape(label) .. ": " .. _mdEscape(value))
+end
+
+function M.toMarkdown(opts)
+    opts = opts or {}
+    local includeGame = (opts.includeGame == nil) and true or (opts.includeGame == true)
+    local includeSafe = (opts.includeSafe == nil) and true or (opts.includeSafe == true)
+
+    local lines = {}
+    _mdLine(lines, "# Command Registry (Runtime Export)")
+    _mdLine(lines, "")
+    _mdLine(lines, "## Source")
+    _mdBullet(lines, "Generated from code registry: dwkit.bus.command_registry " .. tostring(REG.version or "unknown"))
+    _mdBullet(lines, "Generated at ts: " .. tostring(os.time()))
+    _mdLine(lines, "")
+    _mdLine(lines, "## Notes")
+    _mdBullet(lines, "This is a copy/paste helper. It does not change runtime behavior.")
+    _mdBullet(lines, "For filtering views, use: dwcommands / dwcommands safe / dwcommands game.")
+    _mdLine(lines, "")
+    _mdLine(lines, "## Commands")
+
+    local all = _collectList(nil)
+
+    for _, def in ipairs(all) do
+        if def.sendsToGame and not includeGame then
+            -- skip
+        elseif (def.sendsToGame == false) and not includeSafe then
+            -- skip
+        else
+            _mdSection(lines, def.command)
+
+            _mdValueLine(lines, "Command", tostring(def.command))
+            if def.aliases and #def.aliases > 0 then
+                _mdValueLine(lines, "Aliases", table.concat(def.aliases, ", "))
+            else
+                _mdValueLine(lines, "Aliases", "(none)")
+            end
+            _mdValueLine(lines, "Owner Module", tostring(def.ownerModule))
+            _mdValueLine(lines, "Description", tostring(def.description))
+            _mdValueLine(lines, "Syntax", tostring(def.syntax))
+            _mdValueLine(lines, "Safety", tostring(def.safety))
+            _mdValueLine(lines, "Mode", tostring(def.mode))
+            _mdValueLine(lines, "SendsToGame", def.sendsToGame and "YES" or "NO")
+
+            if def.examples and #def.examples > 0 then
+                _mdLine(lines, "- Examples:")
+                for _, ex in ipairs(def.examples) do
+                    _mdIndentBullet(lines, tostring(ex))
+                end
+            else
+                _mdLine(lines, "- Examples: (none)")
+            end
+
+            if def.sendsToGame then
+                if type(def.underlyingGameCommand) == "string" and def.underlyingGameCommand ~= "" then
+                    _mdValueLine(lines, "underlyingGameCommand", def.underlyingGameCommand)
+                end
+                if type(def.sideEffects) == "string" and def.sideEffects ~= "" then
+                    _mdValueLine(lines, "sideEffects", def.sideEffects)
+                end
+                if type(def.rateLimit) == "string" and def.rateLimit ~= "" then
+                    _mdValueLine(lines, "rateLimit", def.rateLimit)
+                end
+                if type(def.wrapperOf) == "string" and def.wrapperOf ~= "" then
+                    _mdValueLine(lines, "wrapperOf", def.wrapperOf)
+                end
+            end
+
+            if def.notes and #def.notes > 0 then
+                _mdLine(lines, "- Notes:")
+                for _, n in ipairs(def.notes) do
+                    _mdIndentBullet(lines, tostring(n))
+                end
+            else
+                _mdLine(lines, "- Notes: (none)")
+            end
+        end
+    end
+
+    return table.concat(lines, "\n")
 end
 
 -- -------------------------

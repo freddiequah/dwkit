@@ -1,7 +1,7 @@
 # Command Registry
 
 ## Version
-v2.6
+v2.7
 
 ## Purpose
 This document is the canonical registry of all user-facing commands.
@@ -33,8 +33,21 @@ If a command is not registered here, it does not exist.
   A) Kit Commands (SAFE diagnostics, config, UI control, tests)
   B) Gameplay Command Wrappers (send commands to the MUD; must be explicitly labeled)
 - Current status:
-  - Gameplay Command Wrappers: NONE (as of v2.6)
+  - Gameplay Command Wrappers: NONE (as of v2.7)
 - Any new gameplay wrapper MUST include the extra wrapper fields in the Command Template.
+
+## Runtime Export (Docs Sync Helper) (SAFE)
+The runtime can print a Markdown export derived from the same command registry data.
+
+- Export full command registry Markdown:
+  - dwcommands md
+
+Notes:
+- This is a copy/paste helper for maintaining docs sync. It does not change runtime behavior.
+- Filtering views remain:
+  - dwcommands
+  - dwcommands safe
+  - dwcommands game
 
 ## Drift-Lock Rules (Enforced by dwtest quiet)
 These rules are enforced in runtime by the self-test runner in quiet mode (registry-only checks; no gameplay commands sent).
@@ -116,11 +129,12 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 - Aliases: (none)
 - Owner Module: dwkit.services.command_aliases
 - Description: Lists registered DWKit commands (ALL, SAFE, or GAME).
-- Syntax: dwcommands [safe|game]
+- Syntax: dwcommands [safe|game|md]
 - Examples:
   - dwcommands
   - dwcommands safe
   - dwcommands game
+  - dwcommands md
 - Safety: SAFE (no gameplay output sent)
 - Mode: manual
 - SendsToGame: NO
@@ -129,6 +143,7 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
   - Backed by DWKit.cmd.listAll/listSafe/listGame.
   - dwcommands safe uses registry filter: SendsToGame == NO.
   - dwcommands game uses registry filter: SendsToGame == YES.
+  - dwcommands md prints a Markdown export derived from DWKit.cmd.toMarkdown().
 
 ### dwhelp
 - Command: dwhelp
@@ -229,14 +244,17 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 - Description: Lists registered DWKit events (SAFE).
 - Syntax:
   - dwevents
+  - dwevents md
 - Examples:
   - dwevents
+  - dwevents md
 - Safety: SAFE (no gameplay output sent)
 - Mode: manual
 - SendsToGame: NO
 - Notes:
   - Typed alias implemented by dwkit.services.command_aliases.
   - Backed by DWKit.bus.eventRegistry.listAll().
+  - dwevents md prints a Markdown export derived from DWKit.bus.eventRegistry.toMarkdown().
 
 ### dwevent
 - Command: dwevent

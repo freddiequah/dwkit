@@ -1,7 +1,7 @@
 ﻿# Event Registry
 
 ## Version
-v1.7
+v1.8
 
 ## Purpose
 This document is the canonical registry of all project events.
@@ -24,6 +24,18 @@ If an event is not registered here first, it does not exist.
 - Event bus skeleton (internal only):
   - src/dwkit/bus/event_bus.lua
   - Enforces: events must be registered in the registry before subscription or emit.
+
+## Runtime Export (Docs Sync Helper) (SAFE)
+The runtime can print a Markdown export derived from the same event registry data.
+
+- Export full event registry Markdown:
+  - dwevents md
+
+Notes:
+- This is a copy/paste helper for maintaining docs sync. It does not emit events.
+- Normal list and help remain:
+  - dwevents
+  - dwevent <EventName>
 
 ## Events
 

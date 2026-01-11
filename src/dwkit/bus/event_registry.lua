@@ -1,20 +1,22 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.event_registry
 -- Owner       : Bus
--- Version     : v2026-01-10A
+-- Version     : v2026-01-11A
 -- Purpose     :
 --   - Canonical registry for all DWKit events (code mirror of docs/Event_Registry_v1.0.md).
 --   - No events are emitted here. Registry only.
 --   - Runtime-only registration helper for development (NOT persisted).
+--   - Markdown export derived from the same registry data (docs sync helper).
 --
 -- Public API  :
---   - getRegistryVersion() -> string   (docs registry version, e.g. v1.7)
+--   - getRegistryVersion() -> string   (docs registry version, e.g. v1.8)
 --   - getModuleVersion()   -> string   (code module version tag)
 --   - getAll() -> table copy (name -> def)
 --   - listAll(opts?) -> table list (sorted by name)
 --   - has(name) -> boolean
 --   - help(name, opts?) -> boolean ok, table|nil defOrNil, string|nil err
 --   - register(def) -> boolean ok, string|nil err   (runtime-only)
+--   - toMarkdown(opts?) -> string   (docs copy helper; SAFE)
 --
 -- Events Emitted   : None
 -- Events Consumed  : None
@@ -25,7 +27,7 @@
 
 local M                          = {}
 
-M.VERSION                        = "v2026-01-10A"
+M.VERSION                        = "v2026-01-11A"
 
 local ID                         = require("dwkit.core.identity")
 
@@ -58,7 +60,7 @@ end
 -- - M.VERSION is the code module version tag (calendar style)
 -- -------------------------
 local REG = {
-  version = "v1.7",
+  version = "v1.8",
   moduleVersion = M.VERSION,
   events = {
     [EV_BOOT_READY] = {
@@ -222,6 +224,96 @@ local function _collectList()
   end
   table.sort(list, function(a, b) return tostring(a.name) < tostring(b.name) end)
   return list
+end
+
+-- -------------------------
+-- Markdown export (docs helper; SAFE)
+-- -------------------------
+local function _mdEscape(s)
+  s = tostring(s or "")
+  s = s:gsub("\r\n", "\n")
+  s = s:gsub("\r", "\n")
+  return s
+end
+
+local function _mdLine(lines, s)
+  lines[#lines + 1] = tostring(s or "")
+end
+
+local function _mdBullet(lines, s)
+  _mdLine(lines, "- " .. _mdEscape(s))
+end
+
+local function _mdIndentBullet(lines, s)
+  _mdLine(lines, "  - " .. _mdEscape(s))
+end
+
+local function _mdSection(lines, title)
+  _mdLine(lines, "")
+  _mdLine(lines, "### " .. _mdEscape(title))
+end
+
+local function _mdValueLine(lines, label, value)
+  _mdLine(lines, "- " .. _mdEscape(label) .. ": " .. _mdEscape(value))
+end
+
+function M.toMarkdown(opts)
+  opts = opts or {}
+
+  local lines = {}
+  _mdLine(lines, "# Event Registry (Runtime Export)")
+  _mdLine(lines, "")
+  _mdLine(lines, "## Source")
+  _mdBullet(lines, "Generated from code registry mirror: dwkit.bus.event_registry " .. tostring(M.VERSION or "unknown"))
+  _mdBullet(lines, "Registry version (docs): " .. tostring(REG.version or "unknown"))
+  _mdBullet(lines, "Generated at ts: " .. tostring(os.time()))
+  _mdLine(lines, "")
+  _mdLine(lines, "## Notes")
+  _mdBullet(lines, "This is a copy/paste helper. It does not emit events or change runtime behavior.")
+  _mdBullet(lines, "For list view, use: dwevents. For details, use: dwevent <EventName>.")
+  _mdLine(lines, "")
+  _mdLine(lines, "## Events")
+
+  local list = _collectList()
+  for _, def in ipairs(list) do
+    _mdSection(lines, def.name)
+
+    _mdValueLine(lines, "Description", tostring(def.description or ""))
+    if def.payloadSchema and next(def.payloadSchema) ~= nil then
+      _mdLine(lines, "- PayloadSchema:")
+      local keys = {}
+      for k, _ in pairs(def.payloadSchema) do keys[#keys + 1] = tostring(k) end
+      table.sort(keys)
+      for _, k in ipairs(keys) do
+        _mdIndentBullet(lines, k .. ": " .. tostring(def.payloadSchema[k]))
+      end
+    else
+      _mdLine(lines, "- PayloadSchema: (none)")
+    end
+
+    if def.producers and #def.producers > 0 then
+      _mdLine(lines, "- Producers:")
+      for _, p in ipairs(def.producers) do _mdIndentBullet(lines, tostring(p)) end
+    else
+      _mdLine(lines, "- Producers: (unknown)")
+    end
+
+    if def.consumers and #def.consumers > 0 then
+      _mdLine(lines, "- Consumers:")
+      for _, c in ipairs(def.consumers) do _mdIndentBullet(lines, tostring(c)) end
+    else
+      _mdLine(lines, "- Consumers: (unknown)")
+    end
+
+    if def.notes and #def.notes > 0 then
+      _mdLine(lines, "- Notes:")
+      for _, n in ipairs(def.notes) do _mdIndentBullet(lines, tostring(n)) end
+    else
+      _mdLine(lines, "- Notes: (none)")
+    end
+  end
+
+  return table.concat(lines, "\n")
 end
 
 -- -------------------------

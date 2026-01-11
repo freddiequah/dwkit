@@ -1,16 +1,16 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-10E
+-- Version     : v2026-01-11A
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
---       * dwcommands [safe|game]
+--       * dwcommands [safe|game|md]
 --       * dwhelp <cmd>
 --       * dwtest [quiet]
 --       * dwinfo
 --       * dwid
 --       * dwversion
---       * dwevents
+--       * dwevents [md]
 --       * dwevent <EventName>
 --       * dwboot
 --       * dwservices
@@ -46,7 +46,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-10E"
+M.VERSION = "v2026-01-11A"
 
 local STATE = {
     installed = false,
@@ -620,8 +620,8 @@ function M.install(opts)
         return false, STATE.lastError
     end
 
-    -- Alias 1: dwcommands [safe|game]
-    local dwcommandsPattern = [[^dwcommands(?:\s+(safe|game))?\s*$]]
+    -- Alias 1: dwcommands [safe|game|md]
+    local dwcommandsPattern = [[^dwcommands(?:\s+(safe|game|md))?\s*$]]
     local id1 = tempAlias(dwcommandsPattern, function()
         if not _hasCmd() then
             _err("DWKit.cmd not available. Run loader.init() first.")
@@ -633,6 +633,17 @@ function M.install(opts)
             DWKit.cmd.listSafe()
         elseif mode == "game" then
             DWKit.cmd.listGame()
+        elseif mode == "md" then
+            if type(DWKit.cmd.toMarkdown) ~= "function" then
+                _err("DWKit.cmd.toMarkdown not available.")
+                return
+            end
+            local ok, md = pcall(DWKit.cmd.toMarkdown, {})
+            if not ok then
+                _err("dwcommands md failed: " .. tostring(md))
+                return
+            end
+            _out(tostring(md))
         else
             DWKit.cmd.listAll()
         end
@@ -695,13 +706,29 @@ function M.install(opts)
         _printVersionSummary()
     end)
 
-    -- Alias 7: dwevents
-    local dweventsPattern = [[^dwevents\s*$]]
+    -- Alias 7: dwevents [md]
+    local dweventsPattern = [[^dwevents(?:\s+(md))?\s*$]]
     local id7 = tempAlias(dweventsPattern, function()
         if not _hasEventRegistry() then
             _err("DWKit.bus.eventRegistry not available. Run loader.init() first.")
             return
         end
+
+        local mode = (matches and matches[2]) and tostring(matches[2]) or ""
+        if mode == "md" then
+            if type(DWKit.bus.eventRegistry.toMarkdown) ~= "function" then
+                _err("DWKit.bus.eventRegistry.toMarkdown not available.")
+                return
+            end
+            local ok, md = pcall(DWKit.bus.eventRegistry.toMarkdown, {})
+            if not ok then
+                _err("dwevents md failed: " .. tostring(md))
+                return
+            end
+            _out(tostring(md))
+            return
+        end
+
         DWKit.bus.eventRegistry.listAll()
     end)
 
