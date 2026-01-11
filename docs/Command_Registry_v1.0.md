@@ -1,7 +1,7 @@
 # Command Registry
 
 ## Version
-v2.5
+v2.6
 
 ## Purpose
 This document is the canonical registry of all user-facing commands.
@@ -15,10 +15,14 @@ If a command is not registered here, it does not exist.
   - Source of truth (code): dwkit.bus.command_registry
   - Runtime surface: DWKit.cmd (after loader init)
 - Docs/runtime sync rule (required):
-  - Any invocation variants, syntax, examples, or behavioral notes recorded in this document MUST be mirrored in dwkit.bus.command_registry in the same change set (no drift).
+  - Any invocation variants, syntax, examples, safety/mode classification, SendsToGame flag, or behavioral notes recorded in this document MUST be mirrored in dwkit.bus.command_registry in the same change set (no drift).
 - Naming scheme (locked):
   - Typed commands are prefixed with "dw" to avoid collisions with the MUD's own commands.
   - The canonical discovery surface is: dwcommands + dwhelp.
+- Safety taxonomy (locked):
+  - SAFE: no gameplay commands sent to the MUD
+  - COMBAT-SAFE: sends to game, designed to be safe in combat, but still has side effects
+  - NOT SAFE: sends to game and may have stronger side effects/spam risk
 
 ## Canonical Identity (Authoritative)
 - Source of truth: docs/PACKAGE_IDENTITY.md
@@ -29,8 +33,65 @@ If a command is not registered here, it does not exist.
   A) Kit Commands (SAFE diagnostics, config, UI control, tests)
   B) Gameplay Command Wrappers (send commands to the MUD; must be explicitly labeled)
 - Current status:
-  - Gameplay Command Wrappers: NONE (as of v2.0)
+  - Gameplay Command Wrappers: NONE (as of v2.6)
 - Any new gameplay wrapper MUST include the extra wrapper fields in the Command Template.
+
+## Drift-Lock Rules (Enforced by dwtest quiet)
+These rules are enforced in runtime by the self-test runner in quiet mode (registry-only checks; no gameplay commands sent).
+
+### SAFE command set (current expected set)
+- Expected SAFE commands (14):
+  - dwactions
+  - dwboot
+  - dwcommands
+  - dwevent
+  - dwevents
+  - dwhelp
+  - dwid
+  - dwinfo
+  - dwpresence
+  - dwscorestore
+  - dwservices
+  - dwskills
+  - dwtest
+  - dwversion
+
+### SAFE command contract (required fields)
+For each command in the SAFE set above, the command definition in dwkit.bus.command_registry MUST satisfy:
+- command exists in registry
+- SendsToGame == NO
+- Safety == SAFE
+- Mode is non-empty
+- Owner Module is non-empty
+- Syntax is non-empty
+- Description is non-empty
+
+Notes:
+- dwtest quiet enforces this per-command contract and will FAIL if any are missing/incorrect.
+- dwcommands safe output MUST be consistent with registry filtering (SendsToGame == NO).
+
+### GAME wrapper drift-lock framework (even if empty today)
+The registry supports gameplay wrapper commands (SendsToGame == YES). Even if the GAME list is empty today, the framework rules are locked:
+
+1) GAME list queryable:
+- dwcommands game MUST run and list the current registry-filtered GAME set (SendsToGame == YES)
+- When empty, it must print "(none)" and self-test must PASS.
+
+2) GAME list consistency:
+- The GAME list derived from dwcommands game MUST match the registry filter for SendsToGame == YES.
+- If they differ, dwtest quiet MUST FAIL.
+
+3) GAME wrapper contract (required when a wrapper exists)
+For each command where SendsToGame == YES, the command definition MUST satisfy:
+- command exists in registry
+- SendsToGame == YES
+- Safety is NOT "SAFE" (must be COMBAT-SAFE or NOT SAFE)
+- underlyingGameCommand is non-empty
+- sideEffects is non-empty
+- Mode is non-empty
+- Owner Module is non-empty
+- Syntax is non-empty
+- Description is non-empty
 
 ## Command List
 - dwcommands
@@ -66,6 +127,8 @@ If a command is not registered here, it does not exist.
 - Notes:
   - Implemented as a Mudlet alias (local only).
   - Backed by DWKit.cmd.listAll/listSafe/listGame.
+  - dwcommands safe uses registry filter: SendsToGame == NO.
+  - dwcommands game uses registry filter: SendsToGame == YES.
 
 ### dwhelp
 - Command: dwhelp
@@ -137,6 +200,9 @@ If a command is not registered here, it does not exist.
   - Requires loader init to have run (so DWKit.test.run is attached). If missing, check DWKit.test._selfTestLoadError.
   - Required output sections + PASS/FAIL criteria are specified in: docs/Self_Test_Runner_v1.0.md
   - Quiet mode MUST avoid full registry listing output and prefer count-only registry checks.
+  - dwtest quiet enforces:
+    - SAFE command set presence and per-command contract fields
+    - GAME wrapper drift-lock framework (even when empty)
   - Docs/runtime sync reminder: the dwtest syntax/examples/notes in this document must match dwkit.bus.command_registry.
 
 ### dwversion
