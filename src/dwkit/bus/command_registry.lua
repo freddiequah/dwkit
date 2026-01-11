@@ -1,12 +1,15 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-10B
+-- Version     : v2026-01-11C
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
 --   - DOES NOT send gameplay commands (registry only).
 --   - DOES NOT start timers or automation.
+--   - Gameplay wrappers (sendsToGame=true) MUST declare:
+--       - underlyingGameCommand
+--       - sideEffects
 --
 -- Public API  :
 --   - listAll(opts?)  -> table list
@@ -26,7 +29,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-10B"
+M.VERSION = "v2026-01-11C"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -46,7 +49,7 @@ end
 -- Registry (single source of truth)
 -- -------------------------
 local REG = {
-    version = "v2026-01-10B",
+    version = "v2026-01-11C",
     commands = {
         dwid = {
             command     = "dwid",
@@ -295,6 +298,8 @@ local REG = {
             notes       = {
                 "Implemented as a Mudlet alias (local only).",
                 "Backed by DWKit.cmd.listAll/listSafe/listGame.",
+                "dwcommands safe uses registry filter: sendsToGame == false.",
+                "dwcommands game uses registry filter: sendsToGame == true.",
             },
         },
 
@@ -324,6 +329,14 @@ local REG = {
 -- -------------------------
 local function _isNonEmptyString(s) return type(s) == "string" and s ~= "" end
 
+local function _isAllowedSafety(s)
+    return s == "SAFE" or s == "COMBAT-SAFE" or s == "NOT SAFE"
+end
+
+local function _isAllowedMode(s)
+    return s == "manual" or s == "opt-in" or s == "auto"
+end
+
 local function _validateDef(def)
     if type(def) ~= "table" then return false, "def must be a table" end
     if not _isNonEmptyString(def.command) then return false, "missing/invalid: command" end
@@ -331,18 +344,31 @@ local function _validateDef(def)
     if not _isNonEmptyString(def.description) then return false, "missing/invalid: description" end
     if not _isNonEmptyString(def.syntax) then return false, "missing/invalid: syntax" end
     if not _isNonEmptyString(def.safety) then return false, "missing/invalid: safety" end
+    if not _isAllowedSafety(def.safety) then return false, "invalid: safety must be SAFE|COMBAT-SAFE|NOT SAFE" end
     if not _isNonEmptyString(def.mode) then return false, "missing/invalid: mode" end
+    if not _isAllowedMode(def.mode) then return false, "invalid: mode must be manual|opt-in|auto" end
 
     if type(def.aliases) ~= "table" then return false, "invalid: aliases must be a table" end
     if type(def.examples) ~= "table" then return false, "invalid: examples must be a table" end
 
     if type(def.sendsToGame) ~= "boolean" then return false, "invalid: sendsToGame must be boolean" end
+
+    -- Locked taxonomy mapping:
+    -- - SAFE means no gameplay commands sent (sendsToGame=false)
+    -- - COMBAT-SAFE / NOT SAFE are gameplay wrappers (sendsToGame=true)
     if def.sendsToGame then
+        if def.safety == "SAFE" then
+            return false, "invalid: safety must be COMBAT-SAFE or NOT SAFE when sendsToGame=true"
+        end
         if not _isNonEmptyString(def.underlyingGameCommand) then
             return false, "missing/invalid: underlyingGameCommand (required when sendsToGame=true)"
         end
         if not _isNonEmptyString(def.sideEffects) then
             return false, "missing/invalid: sideEffects (required when sendsToGame=true)"
+        end
+    else
+        if def.safety ~= "SAFE" then
+            return false, "invalid: safety must be SAFE when sendsToGame=false"
         end
     end
 
