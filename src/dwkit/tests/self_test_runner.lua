@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.tests.self_test_runner
 -- Owner       : Tests
--- Version     : v2026-01-10C
+-- Version     : v2026-01-11B
 -- Purpose     :
 --   - Provide a SAFE, manual-only self-test runner.
 --   - Prints PASS/FAIL summary + compatibility baseline output.
@@ -30,7 +30,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-10C"
+M.VERSION = "v2026-01-11B"
 
 -- -------------------------
 -- Safe output helper
@@ -47,6 +47,7 @@ local function _out(line)
 end
 
 local function _yesNo(v) return v and "YES" or "NO" end
+local function _isNonEmptyString(s) return type(s) == "string" and s ~= "" end
 
 local function _safeRequire(modName)
     local ok, mod = pcall(require, modName)
@@ -142,6 +143,100 @@ local function _getCommandOwnerNoPrint(cmdReg, cmdName)
     end
 
     return false, "no getAll/help API"
+end
+
+local function _getAllCommandsNoPrint(cmdReg)
+    if type(cmdReg) ~= "table" then return false, nil, "commandRegistry not table" end
+
+    if type(cmdReg.getAll) == "function" then
+        local okAll, all = _safecall(cmdReg.getAll)
+        if okAll and type(all) == "table" then
+            return true, all, nil
+        end
+        return false, nil, "getAll() error"
+    end
+
+    return false, nil, "getAll() missing"
+end
+
+local function _getGameListNoPrint(cmdReg)
+    if type(cmdReg) ~= "table" then return false, nil, "commandRegistry not table" end
+    if type(cmdReg.listGame) ~= "function" then return false, nil, "listGame() missing" end
+
+    local okList, list = _safecall(cmdReg.listGame, { quiet = true })
+    if okList and type(list) == "table" then
+        return true, list, nil
+    end
+    return false, nil, "listGame() error"
+end
+
+local function _validateSafeCommandDef(def)
+    if type(def) ~= "table" then return false, "def not table" end
+
+    if def.sendsToGame ~= false then
+        return false, "sendsToGame must be false"
+    end
+
+    if tostring(def.safety or "") ~= "SAFE" then
+        return false, "safety must be SAFE"
+    end
+
+    if not _isNonEmptyString(def.mode) then
+        return false, "mode must be non-empty"
+    end
+
+    if not _isNonEmptyString(def.ownerModule) then
+        return false, "ownerModule must be non-empty"
+    end
+
+    if not _isNonEmptyString(def.syntax) then
+        return false, "syntax must be non-empty"
+    end
+
+    if not _isNonEmptyString(def.description) then
+        return false, "description must be non-empty"
+    end
+
+    return true, nil
+end
+
+local function _validateGameWrapperDef(def)
+    if type(def) ~= "table" then return false, "def not table" end
+
+    if def.sendsToGame ~= true then
+        return false, "sendsToGame must be true"
+    end
+
+    local safety = tostring(def.safety or "")
+    if safety ~= "COMBAT-SAFE" and safety ~= "NOT SAFE" then
+        return false, "safety must be COMBAT-SAFE or NOT SAFE"
+    end
+
+    if not _isNonEmptyString(def.underlyingGameCommand) then
+        return false, "underlyingGameCommand must be non-empty"
+    end
+
+    if not _isNonEmptyString(def.sideEffects) then
+        return false, "sideEffects must be non-empty"
+    end
+
+    if not _isNonEmptyString(def.mode) then
+        return false, "mode must be non-empty"
+    end
+
+    if not _isNonEmptyString(def.ownerModule) then
+        return false, "ownerModule must be non-empty"
+    end
+
+    if not _isNonEmptyString(def.syntax) then
+        return false, "syntax must be non-empty"
+    end
+
+    if not _isNonEmptyString(def.description) then
+        return false, "description must be non-empty"
+    end
+
+    return true, nil
 end
 
 -- -------------------------
@@ -319,7 +414,7 @@ function M.run(opts)
 
     local okCmdSurf = (hasGlobal and type(DW.cmd) == "table")
     check("DWKit.cmd (runtime surface) exists", okCmdSurf, "DWKit.cmd=" .. _yesNo(okCmdSurf))
-    _lineCheck(okCmdSurf, "DWKit.cmd (runtime surface) exists", "DWKit.cmd=" .. _yesNo(okCmdSurf))
+    _lineCheck(okCmdSurf, "DWKit.cmd (runtime surface) exists", "DWKit.cmd (runtime surface)=" .. _yesNo(okCmdSurf))
 
     local okTestSurf = (hasGlobal and type(DW.test) == "table" and type(DW.test.run) == "function")
     check("DWKit.test.run exists", okTestSurf, "DWKit.test.run=" .. _yesNo(okTestSurf))
@@ -436,6 +531,149 @@ function M.run(opts)
                 _lineCheck(false, "command registry listable", "listAll() missing")
                 check("command registry listable", false, "listAll() missing")
             end
+        end
+
+        -- Drift locks: SAFE command set must exist and remain SAFE (registry-only checks; no list spam).
+        local expectedSafe = {
+            "dwactions",
+            "dwboot",
+            "dwcommands",
+            "dwevent",
+            "dwevents",
+            "dwhelp",
+            "dwid",
+            "dwinfo",
+            "dwpresence",
+            "dwscorestore",
+            "dwservices",
+            "dwskills",
+            "dwtest",
+            "dwversion",
+        }
+
+        local okAll, allCmds, allErr = _getAllCommandsNoPrint(cmdReg)
+        if okAll and type(allCmds) == "table" then
+            -- Check SAFE set presence
+            local found = 0
+            local missing = {}
+            for _, name in ipairs(expectedSafe) do
+                if type(allCmds[name]) == "table" then
+                    found = found + 1
+                else
+                    table.insert(missing, name)
+                end
+            end
+
+            local setPass = (found == #expectedSafe)
+            if setPass then
+                _lineCheck(true, "SAFE command set present", "expected=" .. tostring(#expectedSafe) .. " found=" .. tostring(found))
+                check("SAFE command set present", true,
+                    "expected=" .. tostring(#expectedSafe) .. " found=" .. tostring(found))
+            else
+                _lineCheck(false, "SAFE command set present",
+                    "expected=" .. tostring(#expectedSafe) .. " found=" .. tostring(found) ..
+                    " missing=" .. table.concat(missing, ", "))
+                check("SAFE command set present", false,
+                    "missing=" .. table.concat(missing, ", "))
+            end
+
+            -- Validate each expected SAFE command contract fields
+            for _, name in ipairs(expectedSafe) do
+                local def = allCmds[name]
+                if type(def) ~= "table" then
+                    _lineCheck(false, "SAFE command contract", name .. " :: missing")
+                    check("SAFE command contract :: " .. name, false, "missing")
+                else
+                    local pass, err = _validateSafeCommandDef(def)
+                    if pass then
+                        _lineCheck(true, "SAFE command contract", name)
+                        check("SAFE command contract :: " .. name, true, "OK")
+                    else
+                        _lineCheck(false, "SAFE command contract", name .. " :: " .. tostring(err))
+                        check("SAFE command contract :: " .. name, false, tostring(err))
+                    end
+                end
+            end
+
+            -- Drift lock framework: GAME wrappers (sendsToGame=true)
+            local gameNames = {}
+            for name, def in pairs(allCmds) do
+                if type(def) == "table" and def.sendsToGame == true then
+                    table.insert(gameNames, tostring(name))
+                end
+            end
+            table.sort(gameNames)
+
+            local okGameList, gameList, gameErr = _getGameListNoPrint(cmdReg)
+            if okGameList and type(gameList) == "table" then
+                local listCount = _countAnyTable(gameList)
+                _lineCheck(true, "game command list queryable", "count=" .. tostring(listCount))
+                check("game command list queryable", true, "count=" .. tostring(listCount))
+
+                -- Compare listGame() output vs getAll() sendsToGame filter
+                local mapList = {}
+                for _, d in ipairs(gameList) do
+                    if type(d) == "table" and _isNonEmptyString(d.command) then
+                        mapList[tostring(d.command)] = true
+                    end
+                end
+
+                local mapAll = {}
+                for _, name in ipairs(gameNames) do mapAll[name] = true end
+
+                local missingInList = {}
+                for name, _ in pairs(mapAll) do
+                    if not mapList[name] then table.insert(missingInList, name) end
+                end
+                table.sort(missingInList)
+
+                local extraInList = {}
+                for name, _ in pairs(mapList) do
+                    if not mapAll[name] then table.insert(extraInList, name) end
+                end
+                table.sort(extraInList)
+
+                local consistent = (#missingInList == 0 and #extraInList == 0)
+                if consistent then
+                    _lineCheck(true, "GAME command list consistent", "count=" .. tostring(#gameNames))
+                    check("GAME command list consistent", true, "count=" .. tostring(#gameNames))
+                else
+                    _lineCheck(false, "GAME command list consistent",
+                        "missingInList=" .. table.concat(missingInList, ", ") ..
+                        " extraInList=" .. table.concat(extraInList, ", "))
+                    check("GAME command list consistent", false,
+                        "missingInList=" .. table.concat(missingInList, ", ") ..
+                        " extraInList=" .. table.concat(extraInList, ", "))
+                end
+
+                if #gameNames == 0 then
+                    _lineCheck(true, "GAME wrapper drift lock", "none")
+                    check("GAME wrapper drift lock", true, "none")
+                else
+                    for _, name in ipairs(gameNames) do
+                        local def = allCmds[name]
+                        if type(def) ~= "table" then
+                            _lineCheck(false, "GAME wrapper contract", name .. " :: missing")
+                            check("GAME wrapper contract :: " .. name, false, "missing")
+                        else
+                            local pass, err = _validateGameWrapperDef(def)
+                            if pass then
+                                _lineCheck(true, "GAME wrapper contract", name)
+                                check("GAME wrapper contract :: " .. name, true, "OK")
+                            else
+                                _lineCheck(false, "GAME wrapper contract", name .. " :: " .. tostring(err))
+                                check("GAME wrapper contract :: " .. name, false, tostring(err))
+                            end
+                        end
+                    end
+                end
+            else
+                _lineCheck(false, "GAME wrapper drift lock", tostring(gameErr or "listGame() unavailable"))
+                check("GAME wrapper drift lock", false, tostring(gameErr or "listGame() unavailable"))
+            end
+        else
+            _lineCheck(false, "SAFE command drift lock", tostring(allErr or "getAll() unavailable"))
+            check("SAFE command drift lock", false, tostring(allErr or "getAll() unavailable"))
         end
 
         -- Drift locks: ensure typed alias commands remain owned by command_aliases.
