@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-11E
+-- Version     : v2026-01-12D
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -19,7 +19,8 @@
 --   - help(name, opts?) -> boolean ok, table|nil cmdOrNil, string|nil errOrNil
 --   - register(def) -> boolean ok, string|nil errOrNil   (runtime-only, not persisted)
 --   - getAll() -> table copy (name -> def)
---   - getRegistryVersion() -> string
+--   - getRegistryVersion() -> string   (docs registry version, e.g. v2.8)
+--   - getModuleVersion()   -> string   (code module version tag)
 --   - toMarkdown(opts?) -> string   (docs copy helper; SAFE)
 --
 -- Events Emitted   : None
@@ -31,7 +32,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-11E"
+M.VERSION = "v2026-01-12D"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -49,9 +50,13 @@ end
 
 -- -------------------------
 -- Registry (single source of truth)
+-- Notes:
+-- - REG.version mirrors docs/Command_Registry_v1.0.md "## Version"
+-- - M.VERSION is the code module version tag (calendar style)
 -- -------------------------
 local REG = {
-    version = "v2026-01-11E",
+    version = "v2.8",
+    moduleVersion = M.VERSION,
     commands = {
         dwid = {
             command     = "dwid",
@@ -175,7 +180,8 @@ local REG = {
             command     = "dweventtap",
             aliases     = {},
             ownerModule = "dwkit.services.command_aliases",
-            description = "Controls a SAFE event bus tap (observe all events) and a bounded in-memory log (SAFE diagnostics).",
+            description =
+            "Controls a SAFE event bus tap (observe all events) and a bounded in-memory log (SAFE diagnostics).",
             syntax      = "dweventtap [on|off|status|show|clear] [n]",
             examples    = {
                 "dweventtap status",
@@ -199,7 +205,8 @@ local REG = {
             command     = "dweventsub",
             aliases     = {},
             ownerModule = "dwkit.services.command_aliases",
-            description = "Subscribes (SAFE) to one DWKit event and records occurrences into the bounded log (SAFE diagnostics).",
+            description =
+            "Subscribes (SAFE) to one DWKit event and records occurrences into the bounded log (SAFE diagnostics).",
             syntax      = "dweventsub <EventName>",
             examples    = {
                 "dweventsub DWKit:Service:Presence:Updated",
@@ -529,7 +536,9 @@ function M.toMarkdown(opts)
     _mdLine(lines, "# Command Registry (Runtime Export)")
     _mdLine(lines, "")
     _mdLine(lines, "## Source")
-    _mdBullet(lines, "Generated from code registry: dwkit.bus.command_registry " .. tostring(REG.version or "unknown"))
+    _mdBullet(lines,
+        "Generated from code registry mirror: dwkit.bus.command_registry " .. tostring(M.VERSION or "unknown"))
+    _mdBullet(lines, "Registry version (docs): " .. tostring(REG.version or "unknown"))
     _mdBullet(lines, "Generated at ts: " .. tostring(os.time()))
     _mdLine(lines, "")
     _mdLine(lines, "## Notes")
@@ -606,6 +615,10 @@ function M.getRegistryVersion()
     return tostring(REG.version or "unknown")
 end
 
+function M.getModuleVersion()
+    return tostring(M.VERSION or "unknown")
+end
+
 function M.getAll()
     local out = {}
     for name, def in pairs(REG.commands) do
@@ -615,7 +628,10 @@ function M.getAll()
 end
 
 local function _printList(title, list)
-    _out("[DWKit Commands] " .. title .. " (source: dwkit.bus.command_registry " .. REG.version .. ")")
+    _out("[DWKit Commands] " .. title ..
+        " (source: dwkit.bus.command_registry " ..
+        tostring(REG.version or "unknown") ..
+        " / " .. tostring(M.VERSION or "unknown") .. ")")
     if #list == 0 then
         _out("  (none)")
         return
@@ -665,7 +681,11 @@ function M.help(name, opts)
     local c = _copyDef(def)
 
     if not opts.quiet then
-        _out("[DWKit Help] " .. tostring(c.command) .. " (source: dwkit.bus.command_registry " .. REG.version .. ")")
+        _out("[DWKit Help] " ..
+            tostring(c.command) ..
+            " (source: dwkit.bus.command_registry " ..
+            tostring(REG.version or "unknown") ..
+            " / " .. tostring(M.VERSION or "unknown") .. ")")
         _out("  Owner   : " .. tostring(c.ownerModule))
         _out("  Safety  : " .. tostring(c.safety))
         _out("  Mode    : " .. tostring(c.mode))

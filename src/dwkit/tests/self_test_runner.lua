@@ -1,12 +1,14 @@
 -- #########################################################################
 -- Module Name : dwkit.tests.self_test_runner
 -- Owner       : Tests
--- Version     : v2026-01-11C
+-- Version     : v2026-01-12D
 -- Purpose     :
 --   - Provide a SAFE, manual-only self-test runner.
 --   - Prints PASS/FAIL summary + compatibility baseline output.
 --   - Prints canonical identity info (packageId/eventPrefix/dataFolderName/versionTagStyle).
 --   - Prints core surfaces + registries + loader/boot wiring checks.
+--   - Validates Event Registry contract (SAFE) to detect registry drift early.
+--   - Detects docs vs runtime registry version drift early (Objective D1).
 --   - DOES NOT send gameplay commands.
 --   - DOES NOT start timers or automation.
 --
@@ -30,7 +32,16 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-11C"
+M.VERSION = "v2026-01-12D"
+
+-- -------------------------
+-- Objective D1: Registry version drift locks
+-- -------------------------
+-- MUST match docs/Event_Registry_v1.0.md "## Version"
+local EXPECTED_EVENT_REGISTRY_VERSION = "v1.8"
+
+-- MUST match docs/Command_Registry_v1.0.md "## Version"
+local EXPECTED_COMMAND_REGISTRY_VERSION = "v2.8"
 
 -- -------------------------
 -- Safe output helper
@@ -476,12 +487,88 @@ function M.run(opts)
                 check("event registry listable", false, "listAll() missing")
             end
         end
+
+        -- ------------------------------------------------------------
+        -- Objective D1: Docs registry version drift lock (SAFE)
+        -- ------------------------------------------------------------
+        if type(evReg.getRegistryVersion) == "function" then
+            local okVer, actual = _safecall(evReg.getRegistryVersion)
+            if okVer and _isNonEmptyString(actual) then
+                local pass = (tostring(actual) == tostring(EXPECTED_EVENT_REGISTRY_VERSION))
+                _lineCheck(pass, "event registry version locked",
+                    "expected=" .. tostring(EXPECTED_EVENT_REGISTRY_VERSION) .. " actual=" .. tostring(actual))
+                check("event registry version locked", pass,
+                    "expected=" .. tostring(EXPECTED_EVENT_REGISTRY_VERSION) .. " actual=" .. tostring(actual))
+            else
+                _lineCheck(false, "event registry version locked", "getRegistryVersion() error/empty")
+                check("event registry version locked", false, "getRegistryVersion() error/empty")
+            end
+        else
+            _lineCheck(false, "event registry version locked", "getRegistryVersion() missing")
+            check("event registry version locked", false, "getRegistryVersion() missing")
+        end
+
+        -- Optional sanity: module version tag non-empty (do NOT hard lock; code tag changes frequently)
+        if type(evReg.getModuleVersion) == "function" then
+            local okMv, mv = _safecall(evReg.getModuleVersion)
+            local pass = (okMv and _isNonEmptyString(mv))
+            _lineCheck(pass, "event registry module version present",
+                pass and ("moduleVersion=" .. tostring(mv)) or "getModuleVersion() error/empty")
+            check("event registry module version present", pass,
+                pass and ("moduleVersion=" .. tostring(mv)) or "getModuleVersion() error/empty")
+        else
+            _lineCheck(false, "event registry module version present", "getModuleVersion() missing")
+            check("event registry module version present", false, "getModuleVersion() missing")
+        end
     else
         _lineCheck(false, "event registry present", "missing")
     end
 
     -- ------------------------------------------------------------
-    -- Registry required events (docs v1.7 mirror)
+    -- Event Registry contract validator (Objective C)
+    -- ------------------------------------------------------------
+    if okEvReg and type(evReg.validateAll) == "function" then
+        local okV, passOrErr = _safecall(evReg.validateAll, { strict = true })
+        if okV then
+            local pass = (passOrErr == true)
+            if pass then
+                _lineCheck(true, "event registry contract valid", "validateAll(strict)=PASS")
+                check("event registry contract valid", true, "validateAll(strict)=PASS")
+            else
+                -- If validateAll returns false, we must retrieve issues in a second call? No: API returns (pass, issues).
+                -- So we call directly (non-safecall) via pcall pattern to obtain both returns.
+                local ok2, p, issues = pcall(evReg.validateAll, { strict = true })
+                if ok2 and p == false and type(issues) == "table" then
+                    _lineCheck(false, "event registry contract valid",
+                        "validateAll(strict)=FAIL issues=" .. tostring(#issues))
+                    check("event registry contract valid", false, "issues=" .. tostring(#issues))
+                    if not quiet then
+                        _out("  details:")
+                        for _, it in ipairs(issues) do
+                            local n = tostring((type(it) == "table" and it.name) or "")
+                            local e = tostring((type(it) == "table" and it.error) or "")
+                            if n ~= "" or e ~= "" then
+                                _out("    - " ..
+                                    (n ~= "" and n or "(unknown)") .. " :: " .. (e ~= "" and e or "(no error)"))
+                            end
+                        end
+                    end
+                else
+                    _lineCheck(false, "event registry contract valid", "validateAll(strict)=FAIL (issues unavailable)")
+                    check("event registry contract valid", false, "issues unavailable")
+                end
+            end
+        else
+            _lineCheck(false, "event registry contract valid", "validateAll() error: " .. tostring(passOrErr))
+            check("event registry contract valid", false, "validateAll() error: " .. tostring(passOrErr))
+        end
+    else
+        _lineCheck(false, "event registry contract validator available", "validateAll() missing")
+        check("event registry contract validator available", false, "validateAll() missing")
+    end
+
+    -- ------------------------------------------------------------
+    -- Registry required events (minimum set drift lock)
     -- ------------------------------------------------------------
     if ident and okEvReg and type(evReg.has) == "function" then
         local prefix = tostring(ident.eventPrefix or "DWKit:")
@@ -533,6 +620,39 @@ function M.run(opts)
             end
         end
 
+        -- ------------------------------------------------------------
+        -- Objective D1: Command Registry docs version drift lock (SAFE)
+        -- ------------------------------------------------------------
+        if type(cmdReg.getRegistryVersion) == "function" then
+            local okVer, actual = _safecall(cmdReg.getRegistryVersion)
+            if okVer and _isNonEmptyString(actual) then
+                local pass = (tostring(actual) == tostring(EXPECTED_COMMAND_REGISTRY_VERSION))
+                _lineCheck(pass, "command registry version locked",
+                    "expected=" .. tostring(EXPECTED_COMMAND_REGISTRY_VERSION) .. " actual=" .. tostring(actual))
+                check("command registry version locked", pass,
+                    "expected=" .. tostring(EXPECTED_COMMAND_REGISTRY_VERSION) .. " actual=" .. tostring(actual))
+            else
+                _lineCheck(false, "command registry version locked", "getRegistryVersion() error/empty")
+                check("command registry version locked", false, "getRegistryVersion() error/empty")
+            end
+        else
+            _lineCheck(false, "command registry version locked", "getRegistryVersion() missing")
+            check("command registry version locked", false, "getRegistryVersion() missing")
+        end
+
+        -- Optional sanity: module version tag non-empty (do NOT hard lock; code tag changes frequently)
+        if type(cmdReg.getModuleVersion) == "function" then
+            local okMv, mv = _safecall(cmdReg.getModuleVersion)
+            local pass = (okMv and _isNonEmptyString(mv))
+            _lineCheck(pass, "command registry module version present",
+                pass and ("moduleVersion=" .. tostring(mv)) or "getModuleVersion() error/empty")
+            check("command registry module version present", pass,
+                pass and ("moduleVersion=" .. tostring(mv)) or "getModuleVersion() error/empty")
+        else
+            _lineCheck(false, "command registry module version present", "getModuleVersion() missing")
+            check("command registry module version present", false, "getModuleVersion() missing")
+        end
+
         -- Drift locks: SAFE command set must exist and remain SAFE (registry-only checks; no list spam).
         -- NOTE: Must match docs/Command_Registry_v1.0.md SAFE set.
         local expectedSafe = {
@@ -571,7 +691,8 @@ function M.run(opts)
 
             local setPass = (found == #expectedSafe)
             if setPass then
-                _lineCheck(true, "SAFE command set present", "expected=" .. tostring(#expectedSafe) .. " found=" .. tostring(found))
+                _lineCheck(true, "SAFE command set present",
+                    "expected=" .. tostring(#expectedSafe) .. " found=" .. tostring(found))
                 check("SAFE command set present", true,
                     "expected=" .. tostring(#expectedSafe) .. " found=" .. tostring(found))
             else

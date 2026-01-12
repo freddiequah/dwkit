@@ -1,12 +1,13 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.event_registry
 -- Owner       : Bus
--- Version     : v2026-01-11A
+-- Version     : v2026-01-12B
 -- Purpose     :
 --   - Canonical registry for all DWKit events (code mirror of docs/Event_Registry_v1.0.md).
 --   - No events are emitted here. Registry only.
 --   - Runtime-only registration helper for development (NOT persisted).
 --   - Markdown export derived from the same registry data (docs sync helper).
+--   - Provides SAFE contract validation to detect registry drift (no printing by default).
 --
 -- Public API  :
 --   - getRegistryVersion() -> string   (docs registry version, e.g. v1.8)
@@ -17,6 +18,11 @@
 --   - help(name, opts?) -> boolean ok, table|nil defOrNil, string|nil err
 --   - register(def) -> boolean ok, string|nil err   (runtime-only)
 --   - toMarkdown(opts?) -> string   (docs copy helper; SAFE)
+--   - validateAll(opts?) -> boolean pass, table issues
+--     opts:
+--       - strict: boolean (default true). When strict, producers must be non-empty.
+--       - requireProducers: boolean (default follows strict).
+--       - requireDescription: boolean (default true).
 --
 -- Events Emitted   : None
 -- Events Consumed  : None
@@ -27,7 +33,7 @@
 
 local M                          = {}
 
-M.VERSION                        = "v2026-01-11A"
+M.VERSION                        = "v2026-01-12B"
 
 local ID                         = require("dwkit.core.identity")
 
@@ -41,6 +47,7 @@ local EV_SVC_SCORESTORE_UPDATED  = PREFIX .. "Service:ScoreStore:Updated"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
+-- NOTE: Validator functions do not print by default.
 -- -------------------------
 local function _out(line)
   line = tostring(line or "")
@@ -169,7 +176,7 @@ local REG = {
 }
 
 -- -------------------------
--- Validation (minimal, strict)
+-- Validation helpers
 -- -------------------------
 local function _isNonEmptyString(s) return type(s) == "string" and s ~= "" end
 
@@ -178,25 +185,89 @@ local function _startsWith(s, prefix)
   return s:sub(1, #prefix) == prefix
 end
 
-local function _validateDef(def)
+local function _isArrayLike(t)
+  if type(t) ~= "table" then return false end
+  local n = #t
+  if n == 0 then
+    -- could be empty list; treat as array-like if no non-numeric keys
+    for k, _ in pairs(t) do
+      if type(k) ~= "number" then return false end
+    end
+    return true
+  end
+  for i = 1, n do
+    if t[i] == nil then return false end
+  end
+  -- Ensure no obvious non-numeric keys
+  for k, _ in pairs(t) do
+    if type(k) ~= "number" then return false end
+  end
+  return true
+end
+
+local function _validateStringArray(fieldName, t, allowEmpty)
+  if t == nil then
+    return true, nil
+  end
+  if type(t) ~= "table" then
+    return false, fieldName .. " must be a table (array)"
+  end
+  if not _isArrayLike(t) then
+    return false, fieldName .. " must be an array-like table"
+  end
+  if (not allowEmpty) and (#t == 0) then
+    return false, fieldName .. " must be non-empty"
+  end
+  for i, v in ipairs(t) do
+    if not _isNonEmptyString(v) then
+      return false, fieldName .. "[" .. tostring(i) .. "] must be a non-empty string"
+    end
+  end
+  return true, nil
+end
+
+local function _validatePayloadSchema(ps)
+  if ps == nil then return true, nil end
+  if type(ps) ~= "table" then return false, "payloadSchema must be a table if provided" end
+  for k, v in pairs(ps) do
+    if not _isNonEmptyString(k) then return false, "payloadSchema keys must be non-empty strings" end
+    if not _isNonEmptyString(v) then return false, "payloadSchema[" .. tostring(k) .. "] must be a non-empty string" end
+  end
+  return true, nil
+end
+
+local function _validateDef(def, opts)
+  opts = opts or {}
+  local requireDescription = (opts.requireDescription ~= false)
+
   if type(def) ~= "table" then return false, "def must be a table" end
   if not _isNonEmptyString(def.name) then return false, "missing/invalid: name" end
   if not _startsWith(def.name, ID.eventPrefix) then
     return false, "invalid: name must start with EventPrefix (" .. tostring(ID.eventPrefix) .. ")"
   end
-  if not _isNonEmptyString(def.description) then return false, "missing/invalid: description" end
-
-  if def.payloadSchema ~= nil and type(def.payloadSchema) ~= "table" then
-    return false, "invalid: payloadSchema must be a table if provided"
+  if requireDescription and (not _isNonEmptyString(def.description)) then
+    return false, "missing/invalid: description"
   end
+
+  local okPS, errPS = _validatePayloadSchema(def.payloadSchema)
+  if not okPS then return false, errPS end
+
+  -- producers/consumers/notes should be arrays if present; strictness applied by caller
   if def.producers ~= nil and type(def.producers) ~= "table" then
-    return false, "invalid: producers must be a table if provided"
+    return false,
+        "invalid: producers must be a table if provided"
   end
   if def.consumers ~= nil and type(def.consumers) ~= "table" then
-    return false, "invalid: consumers must be a table if provided"
+    return false,
+        "invalid: consumers must be a table if provided"
   end
+  if def.notes ~= nil and type(def.notes) ~= "table" then return false, "invalid: notes must be a table if provided" end
 
   return true, nil
+end
+
+local function _mkIssue(evName, message)
+  return { name = tostring(evName or ""), error = tostring(message or "") }
 end
 
 -- -------------------------
@@ -397,7 +468,7 @@ end
 
 -- Runtime-only registration (NOT persisted)
 function M.register(def)
-  local ok, err = _validateDef(def)
+  local ok, err = _validateDef(def, { requireDescription = true })
   if not ok then return false, err end
 
   local name = def.name
@@ -407,6 +478,52 @@ function M.register(def)
 
   REG.events[name] = _copyDef(def)
   return true, nil
+end
+
+-- SAFE validation for the static registry content (no printing by default).
+-- Returns pass, issues[] where each issue = {name=<eventName>, error=<string>}
+function M.validateAll(opts)
+  opts = opts or {}
+  local strict = (opts.strict ~= false)
+
+  local requireProducers = opts.requireProducers
+  if requireProducers == nil then requireProducers = strict end
+
+  local issues = {}
+
+  if not _isNonEmptyString(REG.version) then
+    table.insert(issues, _mkIssue("(registry)", "REG.version must be a non-empty string"))
+  end
+
+  if type(REG.events) ~= "table" then
+    table.insert(issues, _mkIssue("(registry)", "REG.events must be a table"))
+    return false, issues
+  end
+
+  for k, def in pairs(REG.events) do
+    local keyName = tostring(k or "")
+    local okDef, errDef = _validateDef(def, opts)
+    if not okDef then
+      table.insert(issues, _mkIssue(keyName, errDef))
+    else
+      local defName = tostring(def.name or "")
+      if keyName ~= defName then
+        table.insert(issues, _mkIssue(defName ~= "" and defName or keyName, "registry key must equal def.name"))
+      end
+
+      -- producers must be array-like (and non-empty if strict/requireProducers)
+      local okP, errP = _validateStringArray("producers", def.producers, not requireProducers)
+      if not okP then table.insert(issues, _mkIssue(defName, errP)) end
+
+      local okC, errC = _validateStringArray("consumers", def.consumers, true)
+      if not okC then table.insert(issues, _mkIssue(defName, errC)) end
+
+      local okN, errN = _validateStringArray("notes", def.notes, true)
+      if not okN then table.insert(issues, _mkIssue(defName, errN)) end
+    end
+  end
+
+  return (#issues == 0), issues
 end
 
 return M
