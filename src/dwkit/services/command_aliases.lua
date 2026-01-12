@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-12A
+-- Version     : v2026-01-12C
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -50,7 +50,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-12A"
+M.VERSION = "v2026-01-12C"
 
 local STATE = {
     installed = false,
@@ -428,6 +428,14 @@ local function _printBootHealth()
     if type(kit._bootReadyTs) == "number" then
         _out("  bootReadyTs                 : " .. tostring(kit._bootReadyTs))
     end
+
+    -- NEW (tiny, user-visible): expose epoch-ms bootReady timestamp if present
+    if type(kit._bootReadyTsMs) == "number" then
+        _out("  bootReadyTsMs               : " .. tostring(kit._bootReadyTsMs))
+    else
+        _out("  bootReadyTsMs               : (unknown)")
+    end
+
     if kit._bootReadyEmitError then
         _out("  bootReadyEmitError          : " .. tostring(kit._bootReadyEmitError))
     end
@@ -646,7 +654,7 @@ local function _printEventLog(n)
         _out("")
         _out("  [" ..
             tostring(i) ..
-            "] ts=" .. tostring(rec.ts) .. " kind=" .. tostring(rec.kind) .. " event=" .. tostring(rec.event))
+            "] ts=" .. tostring(rec.ts) .. " kind=tap event=" .. tostring(rec.event))
         if type(rec.payload) == "table" then
             _out("    payload=")
             _ppTable(rec.payload, { maxDepth = 2, maxItems = 25 })
