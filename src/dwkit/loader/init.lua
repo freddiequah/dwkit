@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-01-12E
+-- Version     : v2026-01-12F
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -17,6 +17,41 @@
 -- #########################################################################
 
 local Loader = {}
+
+-- Best-effort epoch-ms helper + monotonic guard
+local function _epochMsMonotonic()
+    local ms = nil
+
+    -- Mudlet provides getEpoch(); its unit can vary (seconds float vs ms int) depending on environment/version.
+    if type(getEpoch) == "function" then
+        local ok, v = pcall(getEpoch)
+        if ok and type(v) == "number" then
+            -- Heuristic:
+            -- - seconds epoch is ~1.7e9
+            -- - ms epoch is ~1.7e12
+            if v < 20000000000 then
+                -- treat as seconds (possibly float)
+                ms = math.floor((v * 1000) + 0.5)
+            else
+                -- treat as ms already
+                ms = math.floor(v)
+            end
+        end
+    end
+
+    if type(ms) ~= "number" then
+        ms = os.time() * 1000
+    end
+
+    -- Monotonic guard (per-process/session)
+    DWKit._bootReadyLastTsMs = tonumber(DWKit._bootReadyLastTsMs) or 0
+    if ms <= DWKit._bootReadyLastTsMs then
+        ms = DWKit._bootReadyLastTsMs + 1
+    end
+    DWKit._bootReadyLastTsMs = ms
+
+    return ms
+end
 
 function Loader.init()
     -- Only allowed global namespace: DWKit
@@ -163,16 +198,21 @@ function Loader.init()
 
         local eb = (DWKit.bus and DWKit.bus.eventBus) or nil
         if type(eb) == "table" and type(eb.emit) == "function" then
-            local payload = { ts = os.time() }
+            local payload = {
+                ts = os.time(),
+                tsMs = _epochMsMonotonic(),
+            }
 
             local okCall, ok, delivered, errs = pcall(eb.emit, evName, payload)
             if okCall and ok then
                 DWKit._bootReadyEmitted = true
                 DWKit._bootReadyEmitError = nil
                 DWKit._bootReadyTs = payload.ts
+                DWKit._bootReadyTsMs = payload.tsMs
             else
                 DWKit._bootReadyEmitted = false
                 DWKit._bootReadyTs = nil
+                DWKit._bootReadyTsMs = nil
                 if okCall then
                     local errCount = (type(errs) == "table") and #errs or 0
                     DWKit._bootReadyEmitError = "emit failed: ok=" .. tostring(ok)
@@ -185,6 +225,7 @@ function Loader.init()
         else
             DWKit._bootReadyEmitted = false
             DWKit._bootReadyTs = nil
+            DWKit._bootReadyTsMs = nil
             DWKit._bootReadyEmitError = "eventBus.emit not available"
         end
     end

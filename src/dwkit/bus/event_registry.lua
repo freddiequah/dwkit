@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.event_registry
 -- Owner       : Bus
--- Version     : v2026-01-12B
+-- Version     : v2026-01-12C
 -- Purpose     :
 --   - Canonical registry for all DWKit events (code mirror of docs/Event_Registry_v1.0.md).
 --   - No events are emitted here. Registry only.
@@ -33,7 +33,7 @@
 
 local M                          = {}
 
-M.VERSION                        = "v2026-01-12B"
+M.VERSION                        = "v2026-01-12C"
 
 local ID                         = require("dwkit.core.identity")
 
@@ -75,6 +75,7 @@ local REG = {
       description = "Emitted once after loader.init attaches DWKit surfaces; indicates kit is ready for manual use.",
       payloadSchema = {
         ts = "number",
+        tsMs = "number (epoch ms; monotonic)",
       },
       producers = {
         "dwkit.loader.init",
