@@ -41,10 +41,9 @@ Notes:
 
 ### DWKit:Boot:Ready
 - Description:
-  - Emitted once after loader.init attaches DWKit surfaces.
-  - Indicates the kit is ready for manual use.
+  - Emitted once after loader.init attaches DWKit surfaces; indicates kit is ready for manual use.
 - PayloadSchema:
-  - ts: number (os.time() epoch seconds)
+  - ts: number
 - Producers:
   - dwkit.loader.init
 - Consumers:
@@ -52,86 +51,71 @@ Notes:
 - Notes:
   - SAFE internal event (no gameplay commands).
   - Manual-only: emitted only when loader.init() is invoked.
-  - Docs-first: registered here first, then mirrored in code registry.
-
-## Service Spine Events (Gate 2)
-
-### DWKit:Service:Presence:Updated
-- Description:
-  - Emitted when PresenceService state is updated.
-  - SAFE-only; no gameplay commands.
-- PayloadSchema:
-  - ts: number (os.time() epoch seconds)
-  - source: string ("manual" | "integration" | "test")
-  - presence: table
-    - isOnline: boolean
-    - roomName: string|nil
-    - roomId: string|nil
-    - zone: string|nil
-    - partyCount: number|nil
-- Producers:
-  - dwkit.services.presence_service (future)
-- Consumers:
-  - (none yet; future UI consumers may subscribe)
-- Notes:
-  - Contract: payload fields above are stable.
-  - Any future additions must be additive or versioned.
+  - Docs-first: registered in docs/Event_Registry_v1.0.md, mirrored here.
 
 ### DWKit:Service:ActionModel:Updated
 - Description:
-  - Emitted when ActionModelService updates the action model snapshot.
-  - SAFE-only; no gameplay commands.
+  - Emitted when ActionModelService updates the action model (SAFE; data only).
 - PayloadSchema:
-  - ts: number (os.time() epoch seconds)
-  - source: string ("manual" | "test")
-  - actions: table (list)
-    - id: string
-    - label: string
-    - enabled: boolean
-    - cooldownSec: number|nil
+  - changed: table (optional)
+  - model: table
+  - source: string (optional)
+  - ts: number
 - Producers:
-  - dwkit.services.action_model_service (future)
+  - dwkit.services.action_model_service
 - Consumers:
-  - (none yet; future UI consumers may subscribe)
+  - internal (ui/tests)
 - Notes:
-  - Contract: this event represents a snapshot update.
+  - SAFE internal event (no gameplay commands).
+  - Manual-only: emitted only when service API is invoked.
 
-### DWKit:Service:SkillRegistry:Updated
+### DWKit:Service:Presence:Updated
 - Description:
-  - Emitted when SkillRegistryService updates the registry state (data loaded or modified).
-  - SAFE-only; no gameplay commands.
+  - Emitted when PresenceService updates its state (SAFE; no gameplay sends).
 - PayloadSchema:
-  - ts: number (os.time() epoch seconds)
-  - source: string ("manual" | "test")
-  - skillsCount: number
-  - classesCount: number
+  - delta: table (optional)
+  - source: string (optional)
+  - state: table
+  - ts: number
 - Producers:
-  - dwkit.services.skill_registry_service (future)
+  - dwkit.services.presence_service
 - Consumers:
-  - (none yet; future UI consumers may subscribe)
+  - internal (ui/tests/integrations)
 - Notes:
-  - Counts are used for sanity checks and UI summaries.
+  - SAFE internal event (no gameplay commands).
+  - Manual-only: emitted only when service API is invoked.
 
 ### DWKit:Service:ScoreStore:Updated
 - Description:
   - Emitted when ScoreStoreService ingests a score-like text snapshot (SAFE; no gameplay sends).
-  - Intended for future consumers (UI/services) that want to display or parse score snapshots.
 - PayloadSchema:
-  - ts: number (os.time() epoch seconds)
   - snapshot: table
-    - schemaVersion: number (starts at 1)
-    - ts: number (os.time() epoch seconds)
-    - source: string ("manual" | "trigger" | "test")
-    - raw: string (captured text; stored as-is)
-    - parsed: table|nil (best-effort; optional)
+  - source: string (optional)
+  - ts: number
 - Producers:
   - dwkit.services.score_store_service
 - Consumers:
-  - (none yet; future UI consumers may subscribe)
+  - internal (future ui/services/tests)
 - Notes:
   - SAFE internal event (no gameplay commands).
-  - Manual-only: emitted only when ingestFromText() is invoked.
+  - Manual-only: emitted only when service ingest API is invoked.
   - Parsing is optional; raw capture is the stable core contract.
+
+### DWKit:Service:SkillRegistry:Updated
+- Description:
+  - Emitted when SkillRegistryService updates skill/spell registry data (SAFE; data only).
+- PayloadSchema:
+  - changed: table (optional)
+  - registry: table
+  - source: string (optional)
+  - ts: number
+- Producers:
+  - dwkit.services.skill_registry_service
+- Consumers:
+  - internal (ui/tests)
+- Notes:
+  - SAFE internal event (no gameplay commands).
+  - Manual-only: emitted only when service API is invoked.
 
 ## Notes
 - Registry and bus skeleton exist to enforce "docs-first" event introduction.

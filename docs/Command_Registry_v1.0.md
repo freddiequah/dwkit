@@ -132,26 +132,163 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 
 ## Command Details
 
+### dwactions
+- Command: dwactions
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Prints ActionModelService snapshot (best-effort, SAFE).
+- Syntax: dwactions
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dwactions
+- Notes:
+  - Implemented as a Mudlet alias (local only).
+  - Prefers ActionModelService.getState() if available; otherwise prints available API keys.
+
+### dwboot
+- Command: dwboot
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Prints DWKit boot wiring/health status (SAFE diagnostics).
+- Syntax: dwboot
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dwboot
+- Notes:
+  - Typed alias implemented by dwkit.services.command_aliases.
+  - Reports which DWKit surfaces are attached and any loader/init load errors.
+  - Does not emit gameplay commands.
+
 ### dwcommands
 - Command: dwcommands
 - Aliases: (none)
 - Owner Module: dwkit.services.command_aliases
-- Description: Lists registered DWKit commands (ALL, SAFE, or GAME).
+- Description: Lists registered DWKit commands (ALL, SAFE, GAME) or prints Markdown export (SAFE).
 - Syntax: dwcommands [safe|game|md]
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
 - Examples:
   - dwcommands
   - dwcommands safe
   - dwcommands game
   - dwcommands md
-- Safety: SAFE (no gameplay output sent)
-- Mode: manual
-- SendsToGame: NO
 - Notes:
   - Implemented as a Mudlet alias (local only).
   - Backed by DWKit.cmd.listAll/listSafe/listGame.
-  - dwcommands safe uses registry filter: SendsToGame == NO.
-  - dwcommands game uses registry filter: SendsToGame == YES.
-  - dwcommands md prints a Markdown export derived from DWKit.cmd.toMarkdown().
+  - dwcommands safe uses registry filter: sendsToGame == false.
+  - dwcommands game uses registry filter: sendsToGame == true.
+  - Markdown export is backed by DWKit.cmd.toMarkdown().
+
+### dwevent
+- Command: dwevent
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Shows detailed help for one DWKit event (SAFE).
+- Syntax: dwevent <EventName>
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dwevent DWKit:Boot:Ready
+- Notes:
+  - Typed alias implemented by dwkit.services.command_aliases.
+  - Backed by DWKit.bus.eventRegistry.help(eventName).
+  - EventName must be the full registered name (must start with DWKit:).
+
+### dweventlog
+- Command: dweventlog
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Prints the bounded event diagnostics log (SAFE).
+- Syntax: dweventlog [n]
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dweventlog
+  - dweventlog 25
+- Notes:
+  - Implemented as a Mudlet alias (local only).
+  - Prints the last n log entries (default 10, capped at 50).
+  - Log includes entries from both tap and per-event subscriptions.
+
+### dwevents
+- Command: dwevents
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Lists registered DWKit events (SAFE) or prints Markdown export (SAFE).
+- Syntax: dwevents [md]
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dwevents
+  - dwevents md
+- Notes:
+  - Typed alias implemented by dwkit.services.command_aliases.
+  - Backed by DWKit.bus.eventRegistry.listAll().
+  - Markdown export is backed by DWKit.bus.eventRegistry.toMarkdown().
+
+### dweventsub
+- Command: dweventsub
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Subscribes (SAFE) to one DWKit event and records occurrences into the bounded log (SAFE diagnostics).
+- Syntax: dweventsub <EventName>
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dweventsub DWKit:Service:Presence:Updated
+  - dweventsub DWKit:Boot:Ready
+- Notes:
+  - Implemented as a Mudlet alias (local only).
+  - Backed by DWKit.bus.eventBus.on(eventName, fn).
+  - EventName must be registered and must start with DWKit:.
+  - Use dweventlog to inspect recorded payloads.
+
+### dweventtap
+- Command: dweventtap
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Controls a SAFE event bus tap (observe all events) and a bounded in-memory log (SAFE diagnostics).
+- Syntax: dweventtap [on|off|status|show|clear] [n]
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dweventtap status
+  - dweventtap on
+  - dweventtap show 10
+  - dweventtap clear
+  - dweventtap off
+- Notes:
+  - Implemented as a Mudlet alias (local only).
+  - Backed by DWKit.bus.eventBus.tapOn/tapOff (best-effort, SAFE).
+  - Tap does not change delivery semantics for normal subscribers.
+  - Log output is bounded; default show prints last 10 entries.
+
+### dweventunsub
+- Command: dweventunsub
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Unsubscribes (SAFE) from one DWKit event or all subscriptions (SAFE diagnostics).
+- Syntax: dweventunsub <EventName|all>
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dweventunsub DWKit:Service:Presence:Updated
+  - dweventunsub all
+- Notes:
+  - Implemented as a Mudlet alias (local only).
+  - Backed by DWKit.bus.eventBus.off(token).
+  - Does not affect event tap; use dweventtap off for that.
 
 ### dwhelp
 - Command: dwhelp
@@ -159,12 +296,12 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 - Owner Module: dwkit.services.command_aliases
 - Description: Shows detailed help for one DWKit command.
 - Syntax: dwhelp <cmd>
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
 - Examples:
   - dwhelp dwtest
   - dwhelp dwinfo
-- Safety: SAFE (no gameplay output sent)
-- Mode: manual
-- SendsToGame: NO
 - Notes:
   - Implemented as a Mudlet alias (local only).
   - Backed by DWKit.cmd.help(name).
@@ -174,13 +311,12 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 - Aliases: (none)
 - Owner Module: dwkit.core.identity
 - Description: Prints canonical DWKit identity (packageId/eventPrefix/data folder/tag style).
-- Syntax:
-  - dwid
-- Examples:
-  - dwid
-- Safety: SAFE (no gameplay output sent)
+- Syntax: dwid
+- Safety: SAFE
 - Mode: manual
 - SendsToGame: NO
+- Examples:
+  - dwid
 - Notes:
   - Typed alias implemented by dwkit.services.command_aliases.
   - Prints the same locked identity fields as shown in dwtest.
@@ -190,274 +326,114 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 - Aliases: (none)
 - Owner Module: dwkit.core.runtime_baseline
 - Description: Prints runtime baseline info (Lua + Mudlet version) for verification and support.
-- Syntax:
-  - dwinfo
-  - (or) lua DWKit.core.runtimeBaseline.printInfo()
+- Syntax: dwinfo  (or: lua DWKit.core.runtimeBaseline.printInfo())
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
 - Examples:
   - dwinfo
   - lua DWKit.core.runtimeBaseline.printInfo()
-- Safety: SAFE (no gameplay output sent)
-- Mode: manual
-- SendsToGame: NO
 - Notes:
   - Typed alias implemented by dwkit.services.command_aliases.
-
-### dwtest
-- Command: dwtest
-- Aliases: (none)
-- Owner Module: dwkit.tests.self_test_runner
-- Description: Runs DWKit self-test runner (smoke checks + compatibility baseline output).
-- Syntax:
-  - dwtest
-  - (or) lua DWKit.test.run()
-  - (quiet) lua local T=require("dwkit.tests.self_test_runner"); T.run({quiet=true})
-- Examples:
-  - dwtest
-  - lua DWKit.test.run()
-  - lua local T=require("dwkit.tests.self_test_runner"); T.run({quiet=true})
-- Safety: SAFE (no gameplay output sent)
-- Mode: manual
-- SendsToGame: NO
-- Notes:
-  - Typed alias implemented by dwkit.services.command_aliases.
-  - Requires loader init to have run (so DWKit.test.run is attached). If missing, check DWKit.test._selfTestLoadError.
-  - Required output sections + PASS/FAIL criteria are specified in: docs/Self_Test_Runner_v1.0.md
-  - Quiet mode MUST avoid full registry listing output and prefer count-only registry checks.
-  - dwtest quiet enforces:
-    - SAFE command set presence and per-command contract fields
-    - GAME wrapper drift-lock framework (even when empty)
-  - Docs/runtime sync reminder: the dwtest syntax/examples/notes in this document must match dwkit.bus.command_registry.
-
-### dwversion
-- Command: dwversion
-- Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
-- Description: Prints consolidated DWKit module versions + runtime baseline (SAFE diagnostics).
-- Syntax:
-  - dwversion
-- Examples:
-  - dwversion
-- Safety: SAFE (no gameplay output sent)
-- Mode: manual
-- SendsToGame: NO
-- Notes:
-  - Typed alias implemented by dwkit.services.command_aliases.
-  - Prints versions for identity/runtimeBaseline/self_test_runner/command registry where available.
-  - Also prints eventRegistry/eventBus versions when present.
-
-### dwevents
-- Command: dwevents
-- Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
-- Description: Lists registered DWKit events (SAFE).
-- Syntax:
-  - dwevents
-  - dwevents md
-- Examples:
-  - dwevents
-  - dwevents md
-- Safety: SAFE (no gameplay output sent)
-- Mode: manual
-- SendsToGame: NO
-- Notes:
-  - Typed alias implemented by dwkit.services.command_aliases.
-  - Backed by DWKit.bus.eventRegistry.listAll().
-  - dwevents md prints a Markdown export derived from DWKit.bus.eventRegistry.toMarkdown().
-
-### dwevent
-- Command: dwevent
-- Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
-- Description: Shows detailed help for one DWKit event (SAFE).
-- Syntax:
-  - dwevent <EventName>
-- Examples:
-  - dwevent DWKit:Boot:Ready
-- Safety: SAFE (no gameplay output sent)
-- Mode: manual
-- SendsToGame: NO
-- Notes:
-  - Typed alias implemented by dwkit.services.command_aliases.
-  - Backed by DWKit.bus.eventRegistry.help(eventName).
-  - EventName must be the full registered name (must start with DWKit:).
-
-### dweventtap
-- Command: dweventtap
-- Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
-- Description: Controls a SAFE event bus tap (observe all events) and a bounded in-memory log (SAFE diagnostics).
-- Syntax:
-  - dweventtap [on|off|status|show|clear] [n]
-- Examples:
-  - dweventtap status
-  - dweventtap on
-  - dweventtap show 10
-  - dweventtap clear
-  - dweventtap off
-- Safety: SAFE (no gameplay output sent)
-- Mode: manual
-- SendsToGame: NO
-- Notes:
-  - Implemented as a Mudlet alias (local only).
-  - Backed by DWKit.bus.eventBus.tapOn/tapOff.
-  - Tap does not change delivery semantics for normal subscribers.
-  - Log output is bounded; default show prints last 10 entries.
-
-### dweventsub
-- Command: dweventsub
-- Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
-- Description: Subscribes (SAFE) to one DWKit event and records occurrences into the bounded log (SAFE diagnostics).
-- Syntax:
-  - dweventsub <EventName>
-- Examples:
-  - dweventsub DWKit:Service:Presence:Updated
-  - dweventsub DWKit:Boot:Ready
-- Safety: SAFE (no gameplay output sent)
-- Mode: manual
-- SendsToGame: NO
-- Notes:
-  - Implemented as a Mudlet alias (local only).
-  - Backed by DWKit.bus.eventBus.on(eventName, fn).
-  - EventName must be registered and must start with DWKit:.
-  - Use dweventlog to inspect recorded payloads.
-
-### dweventunsub
-- Command: dweventunsub
-- Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
-- Description: Unsubscribes (SAFE) from one DWKit event or all subscriptions (SAFE diagnostics).
-- Syntax:
-  - dweventunsub <EventName|all>
-- Examples:
-  - dweventunsub DWKit:Service:Presence:Updated
-  - dweventunsub all
-- Safety: SAFE (no gameplay output sent)
-- Mode: manual
-- SendsToGame: NO
-- Notes:
-  - Implemented as a Mudlet alias (local only).
-  - Backed by DWKit.bus.eventBus.off(token).
-  - Does not affect event tap; use dweventtap off for that.
-
-### dweventlog
-- Command: dweventlog
-- Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
-- Description: Prints the bounded event diagnostics log (SAFE).
-- Syntax:
-  - dweventlog [n]
-- Examples:
-  - dweventlog
-  - dweventlog 25
-- Safety: SAFE (no gameplay output sent)
-- Mode: manual
-- SendsToGame: NO
-- Notes:
-  - Implemented as a Mudlet alias (local only).
-  - Prints the last n log entries (default 10, capped at 50).
-  - Log includes entries from both tap and per-event subscriptions.
-
-### dwboot
-- Command: dwboot
-- Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
-- Description: Prints DWKit boot wiring/health status (SAFE diagnostics).
-- Syntax:
-  - dwboot
-- Examples:
-  - dwboot
-- Safety: SAFE (no gameplay output sent)
-- Mode: manual
-- SendsToGame: NO
-- Notes:
-  - Typed alias implemented by dwkit.services.command_aliases.
-  - Reports which DWKit surfaces are attached and any loader/init load errors.
-  - Does not emit gameplay commands.
-
-### dwservices
-- Command: dwservices
-- Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
-- Description: Lists attached DWKit services + versions + load errors (SAFE diagnostics).
-- Syntax:
-  - dwservices
-- Examples:
-  - dwservices
-- Safety: SAFE (no gameplay output sent)
-- Mode: manual
-- SendsToGame: NO
-- Notes:
-  - Implemented as a Mudlet alias (local only).
-  - Inspection only; no gameplay output; no automation.
+  - Dev helper also works via Mudlet input line with lua prefix.
 
 ### dwpresence
 - Command: dwpresence
 - Aliases: (none)
 - Owner Module: dwkit.services.command_aliases
 - Description: Prints PresenceService snapshot (best-effort, SAFE).
-- Syntax:
-  - dwpresence
-- Examples:
-  - dwpresence
-- Safety: SAFE (no gameplay output sent)
+- Syntax: dwpresence
+- Safety: SAFE
 - Mode: manual
 - SendsToGame: NO
+- Examples:
+  - dwpresence
 - Notes:
   - Implemented as a Mudlet alias (local only).
   - Prefers PresenceService.getState() if available; otherwise prints available API keys.
-
-### dwactions
-- Command: dwactions
-- Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
-- Description: Prints ActionModelService snapshot (best-effort, SAFE).
-- Syntax:
-  - dwactions
-- Examples:
-  - dwactions
-- Safety: SAFE (no gameplay output sent)
-- Mode: manual
-- SendsToGame: NO
-- Notes:
-  - Implemented as a Mudlet alias (local only).
-  - Prefers ActionModelService.getState() if available; otherwise prints available API keys.
-
-### dwskills
-- Command: dwskills
-- Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
-- Description: Prints SkillRegistryService snapshot (best-effort, SAFE).
-- Syntax:
-  - dwskills
-- Examples:
-  - dwskills
-- Safety: SAFE (no gameplay output sent)
-- Mode: manual
-- SendsToGame: NO
-- Notes:
-  - Implemented as a Mudlet alias (local only).
-  - Prefers SkillRegistryService.getState() or getAll() if available; otherwise prints available API keys.
 
 ### dwscorestore
 - Command: dwscorestore
 - Aliases: (none)
 - Owner Module: dwkit.services.command_aliases
 - Description: Prints ScoreStoreService snapshot summary (best-effort, SAFE).
-- Syntax:
-  - dwscorestore
-  - (or) lua DWKit.services.scoreStoreService.printSummary()
+- Syntax: dwscorestore  (or: lua DWKit.services.scoreStoreService.printSummary())
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
 - Examples:
   - dwscorestore
   - lua DWKit.services.scoreStoreService.ingestFromText("SCORE TEST",{source="manual"})
   - lua DWKit.services.scoreStoreService.printSummary()
-- Safety: SAFE (no gameplay output sent)
-- Mode: manual
-- SendsToGame: NO
 - Notes:
   - Backed by dwkit.services.score_store_service (ScoreStoreService).
   - In case the alias is stale/cached, you can use the lua fallback above after loader init.
   - Ingest is manual-only and does not send gameplay commands.
+
+### dwservices
+- Command: dwservices
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Lists attached DWKit services + versions + load errors (SAFE diagnostics).
+- Syntax: dwservices
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dwservices
+- Notes:
+  - Implemented as a Mudlet alias (local only).
+  - Inspection only; no gameplay output; no automation.
+
+### dwskills
+- Command: dwskills
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Prints SkillRegistryService snapshot (best-effort, SAFE).
+- Syntax: dwskills
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dwskills
+- Notes:
+  - Implemented as a Mudlet alias (local only).
+  - Prefers SkillRegistryService.getState() or getAll() if available; otherwise prints available API keys.
+
+### dwtest
+- Command: dwtest
+- Aliases: (none)
+- Owner Module: dwkit.tests.self_test_runner
+- Description: Runs DWKit self-test runner (smoke checks + compatibility baseline output).
+- Syntax: dwtest  (or: lua DWKit.test.run())  (quiet: lua local T=require("dwkit.tests.self_test_runner"); T.run({quiet=true}))
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dwtest
+  - lua DWKit.test.run()
+  - lua local T=require("dwkit.tests.self_test_runner"); T.run({quiet=true})
+- Notes:
+  - Typed alias implemented by dwkit.services.command_aliases.
+  - Requires loader init to have run (so DWKit.test.run is attached).
+  - If missing, check DWKit.test._selfTestLoadError.
+  - Quiet mode MUST avoid full registry listing output and prefer count-only registry checks (no list spam).
+
+### dwversion
+- Command: dwversion
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Prints consolidated DWKit module versions + runtime baseline (SAFE diagnostics).
+- Syntax: dwversion
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dwversion
+- Notes:
+  - Typed alias implemented by dwkit.services.command_aliases.
+  - Prints identity/runtimeBaseline/self_test_runner/command registry versions where available.
+  - Also prints eventRegistry/eventBus versions when present.
 
 ## Command Template (copy/paste)
 - Command:
