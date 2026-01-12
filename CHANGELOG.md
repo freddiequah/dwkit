@@ -32,3 +32,35 @@ The format is based on Keep a Changelog, and versions follow the project's chose
 
 ### Fixed
 - None
+
+---
+
+## v2026-01-12A — 2026-01-12 (MYT)
+
+### Added
+- SAFE event diagnostics capability:
+  - EventBus tap subscribers (tapOn / tapOff) for observing emitted events without affecting delivery semantics
+- SAFE event diagnostics commands:
+  - dweventtap (on | off | status | show | clear)
+  - dweventsub <EventName>
+  - dweventunsub <EventName | all>
+  - dweventlog [n]
+
+### Changed
+- EventBus runtime statistics now include:
+  - tapSubscribers
+  - tapErrors
+
+### Fixed
+- None
+
+### Verified
+- Mudlet 4.19.1 + Lua 5.1 runtime verified
+- Manual verification executed:
+  - dwboot
+  - dwversion
+  - dwevents
+  - dweventtap on/off
+  - dweventlog
+- Tag applied and pushed:
+  - v2026-01-12A
