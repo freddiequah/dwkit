@@ -35,7 +35,73 @@ The format is based on Keep a Changelog, and versions follow the project's chose
 
 ---
 
-## v2026-01-12A — 2026-01-12 (MYT)
+## v2026-01-12D - 2026-01-12 (MYT)
+
+### Changed
+- Event diagnostics output now prints the correct record kind for `dweventtap show`:
+  - `kind=tap` for tap records
+  - `kind=sub` for subscription records
+
+### Fixed
+- `dweventtap show` no longer hardcodes `kind=tap`; it now renders `rec.kind` (tap vs sub).
+
+### Verified
+- Manual verification executed:
+  - dweventtap clear
+  - dweventtap on
+  - dweventsub DWKit:Boot:Ready
+  - loader init (re-emit Boot:Ready)
+  - dweventtap show (confirmed both tap + sub entries)
+- Tag applied and pushed:
+  - v2026-01-12D
+
+---
+
+## v2026-01-12C - 2026-01-12 (MYT)
+
+### Changed
+- `dwboot` health output now includes epoch-milliseconds timestamp for Boot:Ready when available:
+  - `bootReadyTsMs`
+
+### Verified
+- Manual verification executed:
+  - dwboot (confirmed bootReadyTsMs appears)
+  - dwversion
+  - dwtest quiet (PASS)
+- Tag applied and pushed:
+  - v2026-01-12C
+
+---
+
+## v2026-01-12B - 2026-01-12 (MYT)
+
+### Added
+- Persistence store helpers:
+  - persist paths + store modules
+  - enable manual ScoreStore persistence (SAFE; manual control)
+
+### Changed
+- Boot:Ready payload now includes a monotonic guard for `tsMs` to prevent non-increasing epoch-ms values across rapid emits.
+
+### Fixed
+- Self-test envelope load handling:
+  - `loadEnvelope` multi-return handling corrected
+- Persistence smoke checks added and passing for:
+  - saveEnvelope / loadEnvelope / delete
+
+### Verified
+- Mudlet 4.19.1 + Lua 5.1 runtime verified
+- Manual verification executed:
+  - dwboot
+  - dwversion
+  - dwtest quiet (PASS)
+  - dweventtap show (Boot:Ready payload includes ts + tsMs)
+- Tag applied and pushed:
+  - v2026-01-12B
+
+---
+
+## v2026-01-12A - 2026-01-12 (MYT)
 
 ### Added
 - SAFE event diagnostics capability:
