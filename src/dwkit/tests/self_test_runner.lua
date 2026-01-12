@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.tests.self_test_runner
 -- Owner       : Tests
--- Version     : v2026-01-12G
+-- Version     : v2026-01-12H
 -- Purpose     :
 --   - Provide a SAFE, manual-only self-test runner.
 --   - Prints PASS/FAIL summary + compatibility baseline output.
@@ -35,7 +35,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-12G"
+M.VERSION = "v2026-01-12H"
 
 -- -------------------------
 -- Objective D1: Registry version drift locks
@@ -893,8 +893,27 @@ function M.run(opts)
         _lineCheck(delPass, "persist delete()", delPass and ("path=" .. rel1) or ("err=" .. tostring(delErr2)))
         check("persist delete()", delPass, delPass and ("path=" .. rel1) or ("err=" .. tostring(delErr2)))
 
-        _lineCheck(true, "scoreStore persistence smoke (SAFE)", "SKIP (use manual dwscorestore persistence test)")
-        check("scoreStore persistence smoke (SAFE)", true, "SKIP")
+        -- ScoreStore service-level persistence smoke (SAFE)
+        local scoreSvc = nil
+        if hasGlobal and type(DW.services) == "table" and type(DW.services.scoreStoreService) == "table" then
+            scoreSvc = DW.services.scoreStoreService
+        else
+            local okReq, mod = _safeRequire("dwkit.services.score_store_service")
+            if okReq and type(mod) == "table" then
+                scoreSvc = mod
+            end
+        end
+
+        if type(scoreSvc) == "table" and type(scoreSvc.selfTestPersistenceSmoke) == "function" then
+            local okSmoke, smokeErr = scoreSvc.selfTestPersistenceSmoke({
+                relPath = "selftest/score_store_service_smoke.tbl",
+            })
+            _lineCheck(okSmoke, "scoreStore persistence smoke (SAFE)", okSmoke and "OK" or ("err=" .. tostring(smokeErr)))
+            check("scoreStore persistence smoke (SAFE)", okSmoke, okSmoke and "OK" or ("err=" .. tostring(smokeErr)))
+        else
+            _lineCheck(false, "scoreStore persistence smoke (SAFE)", "selfTestPersistenceSmoke() missing")
+            check("scoreStore persistence smoke (SAFE)", false, "missing API")
+        end
     end
 
     _out("")

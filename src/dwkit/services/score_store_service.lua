@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.score_store_service
 -- Owner       : Services
--- Version     : v2026-01-12D
+-- Version     : v2026-01-12F
 -- Purpose     :
 --   - Provide a SAFE, manual-only score text snapshot store (No-GMCP).
 --   - Ingest score-like text via explicit API calls (no send(), no timers).
@@ -23,6 +23,7 @@
 --   - ingestFromText(text, meta?) -> boolean ok, string|nil err
 --   - clear(meta?) -> boolean ok, string|nil err
 --   - printSummary() -> nil (SAFE helper output)
+--   - selfTestPersistenceSmoke(opts?) -> boolean ok, string|nil err (SAFE; test-only)
 --
 -- Events Emitted :
 --   - DWKit:Service:ScoreStore:Updated
@@ -43,7 +44,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-12D"
+M.VERSION = "v2026-01-12F"
 
 local ID = require("dwkit.core.identity")
 
@@ -384,6 +385,102 @@ function M.clear(meta)
 
     _emitUpdated({ schemaVersion = SCHEMA_VERSION, ts = os.time(), source = source, raw = "", parsed = nil }, source)
     return true, nil
+end
+
+-- SAFE, test-only:
+-- - Writes to a selftest relPath (default under selftest/*)
+-- - Uses configurePersistence + ingest + internal load to validate round-trip
+-- - Cleans up the file best-effort (if store.delete exists)
+-- - Restores ALL prior in-memory state + persistence config/status
+function M.selfTestPersistenceSmoke(opts)
+    opts = (type(opts) == "table") and opts or {}
+    local relPath = _isNonEmptyString(opts.relPath) and tostring(opts.relPath) or "selftest/score_store_service_smoke.tbl"
+
+    local okStore, store, err = _getPersistStore()
+    if not okStore then
+        return false, "persist store not available: " .. tostring(err)
+    end
+
+    local prevSnap = _copySnapshot(_snapshot)
+    local prevHist = _copyHistory(_history)
+    local prevPersist = {}
+    for k, v in pairs(_persist) do prevPersist[k] = v end
+
+    local function _restore()
+        _snapshot = (type(prevSnap) == "table") and _copySnapshot(prevSnap) or nil
+        _history = _copyHistory(prevHist)
+
+        -- restore all known keys
+        for k, _ in pairs(_persist) do
+            _persist[k] = prevPersist[k]
+        end
+        for k, v in pairs(prevPersist) do
+            _persist[k] = v
+        end
+    end
+
+    local ok, thrown = pcall(function()
+        -- best-effort clean start
+        if type(store.delete) == "function" then
+            pcall(store.delete, relPath)
+        end
+
+        local okCfg, cfgErr = M.configurePersistence({
+            enabled = true,
+            relPath = relPath,
+            maxEntries = 5,
+            loadExisting = false,
+        })
+        if not okCfg then
+            error("configurePersistence enable failed: " .. tostring(cfgErr))
+        end
+
+        local text = "SCORE_STORE_PERSIST_SMOKE"
+        local okIn, inErr = M.ingestFromText(text, { source = "self_test_runner" })
+        if not okIn then
+            error("ingestFromText failed: " .. tostring(inErr))
+        end
+
+        -- simulate "fresh session" by clearing memory then loading from disk
+        _snapshot = nil
+        _history = {}
+
+        local okLoad, loadErr = _persistLoad()
+        if not okLoad then
+            error("persist load failed: " .. tostring(loadErr))
+        end
+
+        if type(_snapshot) ~= "table" then
+            error("loaded snapshot missing")
+        end
+        if tostring(_snapshot.raw or "") ~= text then
+            error("loaded snapshot raw mismatch")
+        end
+        if tostring(_snapshot.source or "") ~= "self_test_runner" then
+            error("loaded snapshot source mismatch")
+        end
+        if type(_history) ~= "table" or #_history < 1 then
+            error("loaded history missing/empty")
+        end
+        local last = _history[#_history]
+        if type(last) ~= "table" or tostring(last.raw or "") ~= text then
+            error("loaded history last raw mismatch")
+        end
+
+        -- disable and cleanup (file removal best-effort)
+        M.configurePersistence({ enabled = false })
+
+        if type(store.delete) == "function" then
+            pcall(store.delete, relPath)
+        end
+    end)
+
+    _restore()
+
+    if ok then
+        return true, nil
+    end
+    return false, tostring(thrown)
 end
 
 function M.printSummary()
