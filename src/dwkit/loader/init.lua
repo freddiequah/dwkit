@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-01-10A
+-- Version     : v2026-01-12E
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -28,6 +28,27 @@ function Loader.init()
     DWKit.core = DWKit.core or {}
     DWKit.core.identity = require("dwkit.core.identity")
     DWKit.core.runtimeBaseline = require("dwkit.core.runtime_baseline")
+
+    -- Persist foundation (SAFE). Guarded. No writes unless manually invoked by a module/service/test.
+    DWKit.persist = DWKit.persist or {}
+
+    local okPaths, pathsOrErr = pcall(require, "dwkit.persist.paths")
+    if okPaths and type(pathsOrErr) == "table" then
+        DWKit.persist.paths = pathsOrErr
+        DWKit._persistPathsLoadError = nil
+    else
+        DWKit.persist.paths = nil
+        DWKit._persistPathsLoadError = tostring(pathsOrErr)
+    end
+
+    local okStore, storeOrErr = pcall(require, "dwkit.persist.store")
+    if okStore and type(storeOrErr) == "table" then
+        DWKit.persist.store = storeOrErr
+        DWKit._persistStoreLoadError = nil
+    else
+        DWKit.persist.store = nil
+        DWKit._persistStoreLoadError = tostring(storeOrErr)
+    end
 
     -- Attach test surface (SAFE, manual-only). Guarded to avoid hard failure.
     DWKit.test = DWKit.test or {}
