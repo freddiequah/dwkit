@@ -35,6 +35,38 @@ The format is based on Keep a Changelog, and versions follow the project's chose
 
 ---
 
+## v2026-01-12F - 2026-01-12 (MYT)
+
+### Changed
+- Self-test runner now executes the ScoreStore persistence smoke check (SAFE) instead of skipping it.
+
+### Added
+- SAFE ScoreStore persistence smoke check wiring:
+  - self_test_runner now performs a controlled, manual-only persistence enable/save/load/disable flow for ScoreStore (no gameplay commands, no timers).
+
+### Verified
+- Manual verification executed:
+  - loader init
+  - dwtest quiet (PASS)
+- Tag applied and pushed:
+  - v2026-01-12F
+
+---
+
+## v2026-01-12E - 2026-01-12 (MYT)
+
+### Changed
+- Changelog synchronized to include release notes for:
+  - v2026-01-12B
+  - v2026-01-12C
+  - v2026-01-12D
+
+### Verified
+- Tag applied and pushed:
+  - v2026-01-12E
+
+---
+
 ## v2026-01-12D - 2026-01-12 (MYT)
 
 ### Changed

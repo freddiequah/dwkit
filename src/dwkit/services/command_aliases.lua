@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-12D
+-- Version     : v2026-01-12E
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -50,7 +50,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-12D"
+M.VERSION = "v2026-01-12E"
 
 local STATE = {
     installed = false,
@@ -427,6 +427,14 @@ local function _printBootHealth()
     _out("  bootReadyEmitted            : " .. tostring(br == true))
     if type(kit._bootReadyTs) == "number" then
         _out("  bootReadyTs                 : " .. tostring(kit._bootReadyTs))
+
+        -- NEW (SAFE): local time string for bootReadyTs (os.date uses client local timezone)
+        local okD, s = pcall(os.date, "%Y-%m-%d %H:%M:%S", kit._bootReadyTs)
+        if okD and s then
+            _out("  bootReadyLocal              : " .. tostring(s))
+        else
+            _out("  bootReadyLocal              : (unavailable)")
+        end
     end
 
     -- NEW (tiny, user-visible): expose epoch-ms bootReady timestamp if present
