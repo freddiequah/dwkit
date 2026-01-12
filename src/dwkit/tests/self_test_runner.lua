@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.tests.self_test_runner
 -- Owner       : Tests
--- Version     : v2026-01-12D
+-- Version     : v2026-01-12G
 -- Purpose     :
 --   - Provide a SAFE, manual-only self-test runner.
 --   - Prints PASS/FAIL summary + compatibility baseline output.
@@ -9,6 +9,7 @@
 --   - Prints core surfaces + registries + loader/boot wiring checks.
 --   - Validates Event Registry contract (SAFE) to detect registry drift early.
 --   - Detects docs vs runtime registry version drift early (Objective D1).
+--   - Includes SAFE persistence smoke checks (selftest-only files; cleanup best-effort).
 --   - DOES NOT send gameplay commands.
 --   - DOES NOT start timers or automation.
 --
@@ -19,7 +20,7 @@
 --
 -- Events Emitted   : None
 -- Events Consumed  : None
--- Persistence      : None
+-- Persistence      : None (test writes to selftest/* only; best-effort cleanup)
 -- Automation Policy: Manual only
 -- Dependencies     :
 --   - Optional: DWKit surfaces (if loader already attached them)
@@ -28,11 +29,13 @@
 --       - require("dwkit.core.identity")
 --       - require("dwkit.bus.event_registry")
 --       - require("dwkit.bus.command_registry")
+--   - Optional (persistence smoke checks):
+--       - require("dwkit.persist.store")
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-12D"
+M.VERSION = "v2026-01-12G"
 
 -- -------------------------
 -- Objective D1: Registry version drift locks
@@ -251,6 +254,62 @@ local function _validateGameWrapperDef(def)
 end
 
 -- -------------------------
+-- Persistence smoke helpers (SAFE)
+-- -------------------------
+local function _isMissingFileErr(msg)
+    msg = tostring(msg or "")
+    if msg == "" then return false end
+    if msg == "file not found" then return true end
+    if msg:find("file not found", 1, true) ~= nil then return true end
+    if msg:find("no such file", 1, true) ~= nil then return true end
+    if msg:find("cannot open", 1, true) ~= nil and msg:find("No such", 1, true) ~= nil then return true end
+    return false
+end
+
+local function _getPersistStoreBestEffort()
+    local DW = (type(_G.DWKit) == "table") and _G.DWKit or nil
+    local s = (DW and type(DW.persist) == "table") and DW.persist.store or nil
+    if type(s) == "table"
+        and type(s.saveEnvelope) == "function"
+        and type(s.loadEnvelope) == "function"
+        and type(s.delete) == "function"
+    then
+        return true, s, nil
+    end
+
+    local ok, modOrErr = pcall(require, "dwkit.persist.store")
+    if ok and type(modOrErr) == "table"
+        and type(modOrErr.saveEnvelope) == "function"
+        and type(modOrErr.loadEnvelope) == "function"
+        and type(modOrErr.delete) == "function"
+    then
+        return true, modOrErr, nil
+    end
+
+    return false, nil, "persist store not available"
+end
+
+-- Call a persist store API that returns (ok, value?, err?)
+-- Returns: ok(boolean), value(any|nil), err(any|nil)
+local function _callStore(fn, ...)
+    local okP, okFlag, valueOrErr, errMaybe = pcall(fn, ...)
+    if not okP then
+        return false, nil, tostring(okFlag)
+    end
+
+    local ok = (okFlag == true)
+    if ok then
+        return true, valueOrErr, errMaybe
+    end
+
+    -- When okFlag==false, store may return (false, err) or (false, nil, err)
+    if errMaybe ~= nil then
+        return false, valueOrErr, errMaybe
+    end
+    return false, nil, valueOrErr
+end
+
+-- -------------------------
 -- Main runner
 -- -------------------------
 function M.run(opts)
@@ -370,10 +429,8 @@ function M.run(opts)
     -- ------------------------------------------------------------
     _out("[DWKit Test] Compatibility baseline:")
 
-    -- Always print Lua version string (spec requirement)
     _out("[DWKit] lua=" .. tostring(_VERSION or "unknown"))
 
-    -- Prefer the existing baseline printer (already used elsewhere)
     if rb and type(rb.printInfo) == "function" then
         local okPrint, err = pcall(rb.printInfo)
         check("runtimeBaseline.printInfo()", okPrint, okPrint and "Printed baseline" or ("Error: " .. tostring(err)))
@@ -488,9 +545,6 @@ function M.run(opts)
             end
         end
 
-        -- ------------------------------------------------------------
-        -- Objective D1: Docs registry version drift lock (SAFE)
-        -- ------------------------------------------------------------
         if type(evReg.getRegistryVersion) == "function" then
             local okVer, actual = _safecall(evReg.getRegistryVersion)
             if okVer and _isNonEmptyString(actual) then
@@ -508,7 +562,6 @@ function M.run(opts)
             check("event registry version locked", false, "getRegistryVersion() missing")
         end
 
-        -- Optional sanity: module version tag non-empty (do NOT hard lock; code tag changes frequently)
         if type(evReg.getModuleVersion) == "function" then
             local okMv, mv = _safecall(evReg.getModuleVersion)
             local pass = (okMv and _isNonEmptyString(mv))
@@ -524,9 +577,6 @@ function M.run(opts)
         _lineCheck(false, "event registry present", "missing")
     end
 
-    -- ------------------------------------------------------------
-    -- Event Registry contract validator (Objective C)
-    -- ------------------------------------------------------------
     if okEvReg and type(evReg.validateAll) == "function" then
         local okV, passOrErr = _safecall(evReg.validateAll, { strict = true })
         if okV then
@@ -535,8 +585,6 @@ function M.run(opts)
                 _lineCheck(true, "event registry contract valid", "validateAll(strict)=PASS")
                 check("event registry contract valid", true, "validateAll(strict)=PASS")
             else
-                -- If validateAll returns false, we must retrieve issues in a second call? No: API returns (pass, issues).
-                -- So we call directly (non-safecall) via pcall pattern to obtain both returns.
                 local ok2, p, issues = pcall(evReg.validateAll, { strict = true })
                 if ok2 and p == false and type(issues) == "table" then
                     _lineCheck(false, "event registry contract valid",
@@ -567,9 +615,6 @@ function M.run(opts)
         check("event registry contract validator available", false, "validateAll() missing")
     end
 
-    -- ------------------------------------------------------------
-    -- Registry required events (minimum set drift lock)
-    -- ------------------------------------------------------------
     if ident and okEvReg and type(evReg.has) == "function" then
         local prefix = tostring(ident.eventPrefix or "DWKit:")
         local required = {
@@ -620,9 +665,6 @@ function M.run(opts)
             end
         end
 
-        -- ------------------------------------------------------------
-        -- Objective D1: Command Registry docs version drift lock (SAFE)
-        -- ------------------------------------------------------------
         if type(cmdReg.getRegistryVersion) == "function" then
             local okVer, actual = _safecall(cmdReg.getRegistryVersion)
             if okVer and _isNonEmptyString(actual) then
@@ -640,7 +682,6 @@ function M.run(opts)
             check("command registry version locked", false, "getRegistryVersion() missing")
         end
 
-        -- Optional sanity: module version tag non-empty (do NOT hard lock; code tag changes frequently)
         if type(cmdReg.getModuleVersion) == "function" then
             local okMv, mv = _safecall(cmdReg.getModuleVersion)
             local pass = (okMv and _isNonEmptyString(mv))
@@ -653,8 +694,6 @@ function M.run(opts)
             check("command registry module version present", false, "getModuleVersion() missing")
         end
 
-        -- Drift locks: SAFE command set must exist and remain SAFE (registry-only checks; no list spam).
-        -- NOTE: Must match docs/Command_Registry_v1.0.md SAFE set.
         local expectedSafe = {
             "dwactions",
             "dwboot",
@@ -678,7 +717,6 @@ function M.run(opts)
 
         local okAll, allCmds, allErr = _getAllCommandsNoPrint(cmdReg)
         if okAll and type(allCmds) == "table" then
-            -- Check SAFE set presence
             local found = 0
             local missing = {}
             for _, name in ipairs(expectedSafe) do
@@ -703,7 +741,6 @@ function M.run(opts)
                     "missing=" .. table.concat(missing, ", "))
             end
 
-            -- Validate each expected SAFE command contract fields
             for _, name in ipairs(expectedSafe) do
                 local def = allCmds[name]
                 if type(def) ~= "table" then
@@ -721,7 +758,6 @@ function M.run(opts)
                 end
             end
 
-            -- Drift lock framework: GAME wrappers (sendsToGame=true)
             local gameNames = {}
             for name, def in pairs(allCmds) do
                 if type(def) == "table" and def.sendsToGame == true then
@@ -736,7 +772,6 @@ function M.run(opts)
                 _lineCheck(true, "game command list queryable", "count=" .. tostring(listCount))
                 check("game command list queryable", true, "count=" .. tostring(listCount))
 
-                -- Compare listGame() output vs getAll() sendsToGame filter
                 local mapList = {}
                 for _, d in ipairs(gameList) do
                     if type(d) == "table" and _isNonEmptyString(d.command) then
@@ -802,7 +837,6 @@ function M.run(opts)
             check("SAFE command drift lock", false, tostring(allErr or "getAll() unavailable"))
         end
 
-        -- Drift locks: ensure typed alias commands remain owned by command_aliases.
         local expectedOwner = "dwkit.services.command_aliases"
         local lockCommands = { "dwservices", "dwpresence", "dwactions", "dwskills", "dwscorestore" }
 
@@ -819,6 +853,48 @@ function M.run(opts)
         end
     else
         _lineCheck(false, "command registry present", "missing")
+    end
+
+    _out("")
+
+    -- ------------------------------------------------------------
+    -- 5b) Persistence Smoke Checks (SAFE; selftest-only paths)
+    -- ------------------------------------------------------------
+    _out("[DWKit Test] Persistence smoke checks:")
+
+    local okStore, store, storeErr = _getPersistStoreBestEffort()
+    _lineCheck(okStore, "persist store available", okStore and "dwkit.persist.store=OK" or tostring(storeErr))
+    check("persist store available", okStore, okStore and "OK" or tostring(storeErr))
+
+    if okStore then
+        local rel1 = "selftest/persist_smoke.tbl"
+        local schema1 = "v0.1"
+        local data1 = { ping = "pong" }
+        local meta1 = { source = "self_test_runner" }
+
+        do
+            local okDel, _, delErr = _callStore(store.delete, rel1)
+            if not okDel and not _isMissingFileErr(delErr) then
+                -- ignore (best-effort cleanup)
+            end
+        end
+
+        local okSave, _, saveErr = _callStore(store.saveEnvelope, rel1, schema1, data1, meta1)
+        _lineCheck(okSave, "persist saveEnvelope()", "path=" .. rel1 .. (okSave and "" or (" err=" .. tostring(saveErr))))
+        check("persist saveEnvelope()", okSave, okSave and ("path=" .. rel1) or ("err=" .. tostring(saveErr)))
+
+        local okLoad, envOrNil, loadErr = _callStore(store.loadEnvelope, rel1)
+        local pingOk = (okLoad and type(envOrNil) == "table" and type(envOrNil.data) == "table" and envOrNil.data.ping == "pong")
+        _lineCheck(pingOk, "persist loadEnvelope()", pingOk and "ping=pong" or ("err=" .. tostring(loadErr)))
+        check("persist loadEnvelope()", pingOk, pingOk and "ping=pong" or ("err=" .. tostring(loadErr)))
+
+        local okDel2, _, delErr2 = _callStore(store.delete, rel1)
+        local delPass = okDel2 or _isMissingFileErr(delErr2)
+        _lineCheck(delPass, "persist delete()", delPass and ("path=" .. rel1) or ("err=" .. tostring(delErr2)))
+        check("persist delete()", delPass, delPass and ("path=" .. rel1) or ("err=" .. tostring(delErr2)))
+
+        _lineCheck(true, "scoreStore persistence smoke (SAFE)", "SKIP (use manual dwscorestore persistence test)")
+        check("scoreStore persistence smoke (SAFE)", true, "SKIP")
     end
 
     _out("")
