@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.score_store_service
 -- Owner       : Services
--- Version     : v2026-01-13F
+-- Version     : v2026-01-13G
 -- Purpose     :
 --   - Provide a SAFE, manual-only score text snapshot store (No-GMCP).
 --   - Ingest score-like text via explicit API calls (no send(), no timers).
@@ -46,7 +46,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-13F"
+M.VERSION = "v2026-01-13G"
 
 local ID = require("dwkit.core.identity")
 
@@ -263,9 +263,9 @@ end
 -- -------------------------
 local FIXTURES = {
     basic = table.concat({
-        "[DWKit SCORE FIXTURE v1]",
-        "Name: Vzae",
-        "Class: Warrior",
+        "[DWKit SCORE FIXTURE v1 - GENERIC]",
+        "Name: Example",
+        "Class: ExampleClass",
         "Level: 50",
         "HP: 1234/5678",
         "Mana: 222/333",
