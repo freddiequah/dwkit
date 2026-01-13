@@ -1,14 +1,17 @@
 -- #########################################################################
 -- Module Name : dwkit.services.score_store_service
 -- Owner       : Services
--- Version     : v2026-01-13H
+-- Version     : v2026-01-13I
 -- Purpose     :
 --   - Provide a SAFE, manual-only score text snapshot store (No-GMCP).
 --   - Ingest score-like text via explicit API calls (no send(), no timers).
 --   - Store latest snapshot in memory.
 --   - Manual-only persistence using DWKit.persist.store (writes only on ingest/clear/wipe).
 --   - Emit a namespaced update event when snapshot changes.
---   - Provide deterministic fixtures + a simple parser for repeatable tests.
+--   - Provide deterministic fixtures + a parser that supports MUD score variants:
+--       * score (table short)
+--       * score -l (table long)
+--       * score -r (report text)
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -51,7 +54,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-13H"
+M.VERSION = "v2026-01-13I"
 
 local ID = require("dwkit.core.identity")
 
@@ -264,9 +267,11 @@ local function _persistLoad()
 end
 
 -- -------------------------
--- Deterministic fixture + parser
+-- Fixtures + Parser (supports 3 score variants)
 -- -------------------------
+
 local FIXTURES = {
+    -- Legacy fixture kept for backward compatibility tests
     basic = table.concat({
         "[DWKit SCORE FIXTURE v1 - GENERIC]",
         "Name: Example",
@@ -278,6 +283,70 @@ local FIXTURES = {
         "Gold: 98765",
         "Exp: 123456 (Next: 7890)",
     }, "\n"),
+
+    -- Table short (score)
+    score_table_short = table.concat({
+        "+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-+",
+        "| Name:              Vzae | Class:        Warrior | Sex: M    Level:   48 |",
+        "|-------------------------+-----------------------+-----------------------|",
+        "| Stats:   Current   Base | Armor Class:     -146 | HitRoll:           51 |",
+        "| Str:     18/100  18/100 | Alignment:         89 | DamRoll:           72 |",
+        "| Int:         18      18 | Deaths:            45 | Hit:     (716/716+13) |",
+        "| Wis:         18      18 | Kills:          11491 | Mana:     (100/100+3) |",
+        "| Dex:         18      18 | Hometown:     Asgaard | Move:       (82/82+6) |",
+        "| Con:         18      18 | Gold:         5437844 | Exp:         14333688 |",
+        "| Cha:         12      12 | In Bank:            0 | To Level:      691312 |",
+        "+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-+",
+    }, "\n"),
+
+    -- Table long (score -l)
+    score_table_long = table.concat({
+        "+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-+",
+        "| Name:              Vzae | Class:        Warrior | Sex: M    Level:   48 |",
+        "|-------------------------+-----------------------+-----------------------|",
+        "| Stats:   Current   Base | Armor Class:     -146 | HitRoll:           51 |",
+        "| Str:     18/100  18/100 | Alignment:         89 | DamRoll:           72 |",
+        "| Int:         18      18 | Deaths:            45 | Hit:     (716/716+13) |",
+        "| Wis:         18      18 | Kills:          11491 | Mana:     (100/100+3) |",
+        "| Dex:         18      18 | Hometown:     Asgaard | Move:       (82/82+6) |",
+        "| Con:         18      18 | Gold:         5437844 | Exp:         14333688 |",
+        "| Cha:         12      12 | In Bank:            0 | To Level:      691312 |",
+        "|-------------------------+-----------------------+-----------------------|",
+        "| Age:                270 | Sacrifices:         0 | Position:    Standing |",
+        "| Played:   0yr 30d 14hrs | Deathtraps:         0 | Hunger:             0 |",
+        "| Race:          Minotaur | Quest Points:       0 | Thirst:             0 |",
+        "| Remorts:              7 | Honor Points:       0 | Drunk:              0 |",
+        "|-------------------------+-----------------------+-----------------------|",
+        "| Saves vs   Para:   4   Rod:   5   Petri:   6   Breath:   5   Spell:   7 |",
+        "|-------------------------+-----------------------+-----------------------|",
+        "| Title: the adventurer                                                   |",
+        "+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-+",
+    }, "\n"),
+
+    -- Report (score -r)
+    score_report = table.concat({
+        "You are a 270 year-old male.",
+        "You are a Warrior of the Minotaur race.",
+        "You have 716(716) hit, 100(100) mana and 82(82) movement points.",
+        "Current stats:  Str: 18/100 Int: 18 Wis: 18 Dex: 18 Con: 18 Cha: 12",
+        "Original stats: Str: 18/100 Int: 18 Wis: 18 Dex: 18 Con: 18 Cha: 12",
+        "Your armor class is -146/10, and your alignment is 89.",
+        "Your Hitroll is 51, and your Damroll is 72.",
+        "Your regeneration factors are: Hp: 13  Mp: 3  Mv: 6.",
+        "You have scored 14333688 experience points.",
+        "This ranks you as Vzae the adventurer  (level 48).",
+        "You need 691312 experience points to reach your next level.",
+        "You have 5437844 gold coins on hand, and 0 coins in the bank.",
+        "You have been playing for 0 years, 30 days and 14 hours.",
+        "Deaths: [45], Kills: [11491], DTs: [0], Sacrifices: [0]",
+        "Saves vs: Para: [4]  Rod: [5]  Petri: [6]  Breath: [5]  Spell: [7]",
+        "You have remorted this character into the mortal world 7 times.",
+        "You have 0 Quest Points, and 0 Honor Points.",
+        "Your hometown is Asgaard.",
+        "You are standing.",
+        "You are hungry.",
+        "You are thirsty.",
+    }, "\n"),
 }
 
 local function _trim(s)
@@ -285,86 +354,89 @@ local function _trim(s)
     return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
-local function _parseKV(text, key)
-    -- Matches "Key: value" on any line
-    local pat = "\n" .. key .. "%s*:%s*([^\n]+)"
-    local v = text:match(pat)
-    if not v then
-        v = text:match("^" .. key .. "%s*:%s*([^\n]+)")
-    end
-    if v then
-        return _trim(v)
-    end
-    return nil
+local function _toNumber(s)
+    if s == nil then return nil end
+    local t = tostring(s)
+    t = t:gsub(",", "")
+    local n = tonumber(t)
+    return n
 end
 
-local function _parseRatio(text, label)
-    -- Matches "Label: cur/max" -> numbers
-    local pat = "\n" .. label .. "%s*:%s*(%d+)%s*/%s*(%d+)"
-    local a, b = text:match(pat)
-    if not a then
-        a, b = text:match("^" .. label .. "%s*:%s*(%d+)%s*/%s*(%d+)")
+local function _detectVariant(text)
+    if not _isNonEmptyString(text) then return "unknown" end
+
+    if text:find("%+%-%=%-%=%-%=%-", 1, false) then
+        -- table variants
+        if text:find("Age:", 1, true) or text:find("Saves vs", 1, true) or text:find("Played:", 1, true) then
+            return "table_long"
+        end
+        return "table_short"
     end
-    if a and b then
-        return tonumber(a), tonumber(b)
+
+    if text:find("You have ", 1, true) and text:find(" movement points", 1, true) and text:find("Current stats:", 1, true) then
+        return "report"
     end
-    return nil, nil
+
+    return "unknown"
 end
 
-local function _parseScoreText(text)
+local function _parseScoreFixtureKV(text)
+    -- Legacy fixture KV parsing (kept)
     if not _isNonEmptyString(text) then return nil end
     text = "\n" .. text .. "\n" -- padding for \n patterns
 
+    local function _parseKV(key)
+        local pat = "\n" .. key .. "%s*:%s*([^\n]+)"
+        local v = text:match(pat)
+        if not v then v = text:match("^" .. key .. "%s*:%s*([^\n]+)") end
+        if v then return _trim(v) end
+        return nil
+    end
+
+    local function _parseRatio(label)
+        local pat = "\n" .. label .. "%s*:%s*(%d+)%s*/%s*(%d+)"
+        local a, b = text:match(pat)
+        if not a then a, b = text:match("^" .. label .. "%s*:%s*(%d+)%s*/%s*(%d+)") end
+        if a and b then return tonumber(a), tonumber(b) end
+        return nil, nil
+    end
+
     local parsed = {}
 
-    local name = _parseKV(text, "Name")
+    local name = _parseKV("Name")
     if name then parsed.name = name end
 
-    local cls = _parseKV(text, "Class")
+    local cls = _parseKV("Class")
     if cls then parsed.class = cls end
 
     do
-        local lvl = _parseKV(text, "Level")
+        local lvl = _parseKV("Level")
         local n = tonumber(lvl or "")
         if n then parsed.level = n end
     end
 
     do
-        local cur, max = _parseRatio(text, "HP")
-        if cur and max then
-            parsed.hpCur = cur
-            parsed.hpMax = max
-        end
+        local cur, max = _parseRatio("HP")
+        if cur and max then parsed.hpCur, parsed.hpMax = cur, max end
     end
 
     do
-        local cur, max = _parseRatio(text, "Mana")
-        if cur and max then
-            parsed.manaCur = cur
-            parsed.manaMax = max
-        end
+        local cur, max = _parseRatio("Mana")
+        if cur and max then parsed.manaCur, parsed.manaMax = cur, max end
     end
 
     do
-        local cur, max = _parseRatio(text, "Move")
-        if cur and max then
-            parsed.moveCur = cur
-            parsed.moveMax = max
-        end
+        local cur, max = _parseRatio("Move")
+        if cur and max then parsed.moveCur, parsed.moveMax = cur, max end
     end
 
     do
-        local g = _parseKV(text, "Gold")
-        if g ~= nil then
-            -- IMPORTANT: gsub returns (string, count). Capture only the string.
-            local s = tostring(g):gsub(",", "")
-            local n = tonumber(s)
-            if n then parsed.gold = n end
-        end
+        local g = _parseKV("Gold")
+        local n = _toNumber(g)
+        if n then parsed.gold = n end
     end
 
     do
-        -- "Exp: 123456 (Next: 7890)"
         local exp = text:match("\nExp%s*:%s*(%d+)")
         if not exp then exp = text:match("^Exp%s*:%s*(%d+)") end
         if exp then parsed.exp = tonumber(exp) end
@@ -379,6 +451,311 @@ local function _parseScoreText(text)
 
     parsed._parser = "dwkit.score.fixture.v1"
     return parsed
+end
+
+local function _parseTableHeader(text, parsed)
+    -- Extract Name / Class / Sex / Level from the header row (table variants)
+    -- Example: | Name:              Vzae | Class:        Warrior | Sex: M    Level:   48 |
+    local name = text:match("Name:%s*([^|]+)%|")
+    if name then parsed.name = _trim(name) end
+
+    local cls = text:match("Class:%s*([^|]+)%|")
+    if cls then parsed.class = _trim(cls) end
+
+    local sex = text:match("Sex:%s*([A-Za-z])")
+    if sex then parsed.sex = _trim(sex) end
+
+    local lvl = text:match("Level:%s*(%d+)")
+    if lvl then parsed.level = tonumber(lvl) end
+end
+
+local function _parseTableCore(text, parsed)
+    -- Armor Class, Alignment, HitRoll, DamRoll, Deaths, Kills, Hometown, Gold, Bank, Exp, To Level
+    local ac = text:match("Armor Class:%s*([%-%d]+)")
+    if ac then parsed.armorClass = tonumber(ac) end
+
+    local align = text:match("Alignment:%s*([%-%d]+)")
+    if align then parsed.alignment = tonumber(align) end
+
+    local hr = text:match("HitRoll:%s*([%-%d]+)")
+    if hr then parsed.hitroll = tonumber(hr) end
+
+    local dr = text:match("DamRoll:%s*([%-%d]+)")
+    if dr then parsed.damroll = tonumber(dr) end
+
+    local deaths = text:match("Deaths:%s*(%d+)")
+    if deaths then parsed.deaths = tonumber(deaths) end
+
+    local kills = text:match("Kills:%s*(%d+)")
+    if kills then parsed.kills = tonumber(kills) end
+
+    local hometown = text:match("Hometown:%s*([^|]+)%|")
+    if hometown then parsed.hometown = _trim(hometown) end
+
+    local gold = text:match("Gold:%s*([%d,]+)")
+    if gold then parsed.gold = _toNumber(gold) end
+
+    local bank = text:match("In Bank:%s*([%d,]+)")
+    if bank then parsed.bank = _toNumber(bank) end
+
+    local exp = text:match("Exp:%s*([%d,]+)")
+    if exp then parsed.exp = _toNumber(exp) end
+
+    local toLevel = text:match("To Level:%s*([%d,]+)")
+    if toLevel then parsed.toLevel = _toNumber(toLevel) end
+end
+
+local function _parseTableStats(text, parsed)
+    -- Str: 18/100  18/100 ; Int/Wis/Dex/Con/Cha simple
+    -- IMPORTANT: Many servers format columns with spacing; be permissive.
+    local strCur, strBase, strBase2 = text:match("Str:%s*(%d+/%d+)%s+(%d+/%d+)")
+    if strCur and strBase then
+        parsed.strCur = strCur
+        parsed.strBase = strBase
+    end
+
+    local int = text:match("Int:%s*(%d+)")
+    if int then parsed.int = tonumber(int) end
+
+    local wis = text:match("Wis:%s*(%d+)")
+    if wis then parsed.wis = tonumber(wis) end
+
+    local dex = text:match("Dex:%s*(%d+)")
+    if dex then parsed.dex = tonumber(dex) end
+
+    local con = text:match("Con:%s*(%d+)")
+    if con then parsed.con = tonumber(con) end
+
+    local cha = text:match("Cha:%s*(%d+)")
+    if cha then parsed.cha = tonumber(cha) end
+end
+
+local function _parseTableVitals(text, parsed)
+    -- Hit: (716/716+13) Mana: (100/100+3) Move: (82/82+6)
+    local hcur, hmax, hregen = text:match("Hit:%s*%((%d+)%s*/%s*(%d+)%s*%+%s*(%d+)%)")
+    if hcur and hmax then
+        parsed.hpCur = tonumber(hcur)
+        parsed.hpMax = tonumber(hmax)
+        parsed.regenHp = tonumber(hregen)
+    end
+
+    local mcur, mmax, mregen = text:match("Mana:%s*%((%d+)%s*/%s*(%d+)%s*%+%s*(%d+)%)")
+    if mcur and mmax then
+        parsed.manaCur = tonumber(mcur)
+        parsed.manaMax = tonumber(mmax)
+        parsed.regenMp = tonumber(mregen)
+    end
+
+    local vcur, vmax, vregen = text:match("Move:%s*%((%d+)%s*/%s*(%d+)%s*%+%s*(%d+)%)")
+    if vcur and vmax then
+        parsed.moveCur = tonumber(vcur)
+        parsed.moveMax = tonumber(vmax)
+        parsed.regenMv = tonumber(vregen)
+    end
+end
+
+local function _parseTableLongExtras(text, parsed)
+    local age = text:match("Age:%s*(%d+)")
+    if age then parsed.age = tonumber(age) end
+
+    local played = text:match("Played:%s*([^|]+)%|")
+    if played then parsed.played = _trim(played) end
+
+    local race = text:match("Race:%s*([^|]+)%|")
+    if race then parsed.race = _trim(race) end
+
+    local remorts = text:match("Remorts:%s*(%d+)")
+    if remorts then parsed.remorts = tonumber(remorts) end
+
+    local qp = text:match("Quest Points:%s*(%d+)")
+    if qp then parsed.questPoints = tonumber(qp) end
+
+    local hp = text:match("Honor Points:%s*(%d+)")
+    if hp then parsed.honorPoints = tonumber(hp) end
+
+    local pos = text:match("Position:%s*([^|]+)%|")
+    if pos then parsed.position = _trim(pos) end
+
+    local hunger = text:match("Hunger:%s*(%d+)")
+    if hunger then parsed.hunger = tonumber(hunger) end
+
+    local thirst = text:match("Thirst:%s*(%d+)")
+    if thirst then parsed.thirst = tonumber(thirst) end
+
+    local drunk = text:match("Drunk:%s*(%d+)")
+    if drunk then parsed.drunk = tonumber(drunk) end
+
+    -- Saves vs line
+    local p = text:match("Para:%s*(%d+)")
+    local r = text:match("Rod:%s*(%d+)")
+    local pe = text:match("Petri:%s*(%d+)")
+    local b = text:match("Breath:%s*(%d+)")
+    local s = text:match("Spell:%s*(%d+)")
+    if p then parsed.savePara = tonumber(p) end
+    if r then parsed.saveRod = tonumber(r) end
+    if pe then parsed.savePetri = tonumber(pe) end
+    if b then parsed.saveBreath = tonumber(b) end
+    if s then parsed.saveSpell = tonumber(s) end
+
+    local title = text:match("Title:%s*([^\n|]+)")
+    if title then parsed.title = _trim(title) end
+end
+
+local function _parseReport(text, parsed)
+    -- Name + title + level line
+    local name, title, lvl = text:match("This ranks you as%s+([%w_%-]+)%s+([^%(]+)%s*%(%s*level%s+(%d+)%)")
+    if name then parsed.name = _trim(name) end
+    if title then parsed.title = _trim(title) end
+    if lvl then parsed.level = tonumber(lvl) end
+
+    -- Class + race
+    local cls, race = text:match("You are a%s+([%w_%-]+)%s+of the%s+([^%s]+)%s+race")
+    if cls then parsed.class = _trim(cls) end
+    if race then parsed.race = _trim(race) end
+
+    -- Sex + age
+    local age = text:match("You are a%s+(%d+)%s+year%-old%s+([%w]+)")
+    if age then parsed.age = tonumber(age) end
+    -- sex word like male/female
+    local sexWord = text:match("You are a%s+%d+%s+year%-old%s+([%w]+)")
+    if sexWord then parsed.sexWord = _trim(sexWord) end
+
+    -- Vitals
+    local hcur, hmax, mcur, mmax, vcur, vmax =
+        text:match("You have%s+(%d+)%((%d+)%)%s+hit,%s+(%d+)%((%d+)%)%s+mana%s+and%s+(%d+)%((%d+)%)%s+movement points")
+    if hcur and hmax then parsed.hpCur, parsed.hpMax = tonumber(hcur), tonumber(hmax) end
+    if mcur and mmax then parsed.manaCur, parsed.manaMax = tonumber(mcur), tonumber(mmax) end
+    if vcur and vmax then parsed.moveCur, parsed.moveMax = tonumber(vcur), tonumber(vmax) end
+
+    -- Stats (current + original)
+    local str = text:match("Current stats:%s+Str:%s+([%d/]+)")
+    if str then parsed.strCur = _trim(str) end
+    local strO = text:match("Original stats:%s+Str:%s+([%d/]+)")
+    if strO then parsed.strBase = _trim(strO) end
+
+    local int = text:match("Current stats:.-Int:%s+(%d+)")
+    if int then parsed.int = tonumber(int) end
+    local wis = text:match("Current stats:.-Wis:%s+(%d+)")
+    if wis then parsed.wis = tonumber(wis) end
+    local dex = text:match("Current stats:.-Dex:%s+(%d+)")
+    if dex then parsed.dex = tonumber(dex) end
+    local con = text:match("Current stats:.-Con:%s+(%d+)")
+    if con then parsed.con = tonumber(con) end
+    local cha = text:match("Current stats:.-Cha:%s+(%d+)")
+    if cha then parsed.cha = tonumber(cha) end
+
+    -- AC + alignment
+    local ac = text:match("Your armor class is%s+([%-%d]+)")
+    if ac then parsed.armorClass = tonumber(ac) end
+    local align = text:match("alignment is%s+([%-%d]+)")
+    if align then parsed.alignment = tonumber(align) end
+
+    -- Hitroll / damroll
+    local hr = text:match("Your Hitroll is%s+([%-%d]+)")
+    if hr then parsed.hitroll = tonumber(hr) end
+    local dr = text:match("your Damroll is%s+([%-%d]+)")
+    if not dr then dr = text:match("Your Damroll is%s+([%-%d]+)") end
+    if dr then parsed.damroll = tonumber(dr) end
+
+    -- Regen factors
+    local rh, rm, rv = text:match("regeneration factors are:%s+Hp:%s+(%d+)%s+Mp:%s+(%d+)%s+Mv:%s+(%d+)")
+    if rh then parsed.regenHp = tonumber(rh) end
+    if rm then parsed.regenMp = tonumber(rm) end
+    if rv then parsed.regenMv = tonumber(rv) end
+
+    -- Exp + to level
+    local exp = text:match("You have scored%s+([%d,]+)%s+experience points")
+    if exp then parsed.exp = _toNumber(exp) end
+    local toLevel = text:match("You need%s+([%d,]+)%s+experience points to reach your next level")
+    if toLevel then parsed.toLevel = _toNumber(toLevel) end
+
+    -- Gold / bank
+    local gold, bank = text:match("You have%s+([%d,]+)%s+gold coins on hand,%s+and%s+([%d,]+)%s+coins in the bank")
+    if gold then parsed.gold = _toNumber(gold) end
+    if bank then parsed.bank = _toNumber(bank) end
+
+    -- Played
+    local played = text:match("You have been playing for%s+([^\n%.]+)")
+    if played then parsed.played = _trim(played) end
+
+    -- Deaths/kills/dts/sacrifices
+    local d, k, dt, sac = text:match(
+    "Deaths:%s*%[(%d+)%],%s*Kills:%s*%[(%d+)%],%s*DTs:%s*%[(%d+)%],%s*Sacrifices:%s*%[(%d+)%]")
+    if d then parsed.deaths = tonumber(d) end
+    if k then parsed.kills = tonumber(k) end
+    if dt then parsed.deathtraps = tonumber(dt) end
+    if sac then parsed.sacrifices = tonumber(sac) end
+
+    -- Saves
+    local sp = text:match("Para:%s*%[(%d+)%]")
+    local sr = text:match("Rod:%s*%[(%d+)%]")
+    local spe = text:match("Petri:%s*%[(%d+)%]")
+    local sb = text:match("Breath:%s*%[(%d+)%]")
+    local ss = text:match("Spell:%s*%[(%d+)%]")
+    if sp then parsed.savePara = tonumber(sp) end
+    if sr then parsed.saveRod = tonumber(sr) end
+    if spe then parsed.savePetri = tonumber(spe) end
+    if sb then parsed.saveBreath = tonumber(sb) end
+    if ss then parsed.saveSpell = tonumber(ss) end
+
+    -- Remorts
+    local rem = text:match("remorted.-%s+(%d+)%s+times")
+    if rem then parsed.remorts = tonumber(rem) end
+
+    -- QP / Honor
+    local qp = text:match("You have%s+(%d+)%s+Quest Points")
+    if qp then parsed.questPoints = tonumber(qp) end
+    local hp = text:match("and%s+(%d+)%s+Honor Points")
+    if hp then parsed.honorPoints = tonumber(hp) end
+
+    -- Hometown
+    local ht = text:match("Your hometown is%s+([%w_%-]+)")
+    if ht then parsed.hometown = _trim(ht) end
+
+    -- Position / hunger / thirst
+    local pos = text:match("You are%s+([%w_%-]+)%.")
+    if pos then parsed.position = _trim(pos) end
+    if text:find("You are hungry", 1, true) then parsed.hungry = true end
+    if text:find("You are thirsty", 1, true) then parsed.thirsty = true end
+end
+
+local function _parseScoreText(text)
+    if not _isNonEmptyString(text) then return nil end
+
+    local variant = _detectVariant(text)
+
+    -- Legacy KV fixture remains supported
+    if text:find("[DWKit SCORE FIXTURE", 1, true) then
+        local p = _parseScoreFixtureKV(text)
+        if type(p) == "table" then
+            p._variant = "fixture_kv"
+        end
+        return p
+    end
+
+    local parsed = {}
+    parsed._variant = variant
+
+    if variant == "table_short" or variant == "table_long" then
+        _parseTableHeader(text, parsed)
+        _parseTableCore(text, parsed)
+        _parseTableStats(text, parsed)
+        _parseTableVitals(text, parsed)
+        if variant == "table_long" then
+            _parseTableLongExtras(text, parsed)
+        end
+        parsed._parser = "dwkit.score.mud.table.v1"
+        return (next(parsed) ~= nil) and parsed or nil
+    end
+
+    if variant == "report" then
+        _parseReport(text, parsed)
+        parsed._parser = "dwkit.score.mud.report.v1"
+        return (next(parsed) ~= nil) and parsed or nil
+    end
+
+    -- Unknown format: return nil parsed (raw still stored)
+    return nil
 end
 
 local function _startupLoadIfEnabled()
@@ -520,10 +897,13 @@ function M.ingestFromText(text, meta)
     meta = (type(meta) == "table") and meta or {}
     local source = _isNonEmptyString(meta.source) and meta.source or "manual"
 
+    local variant = _detectVariant(text)
+
     local snap = {
         schemaVersion = SCHEMA_VERSION,
         ts = os.time(),
         source = source,
+        variant = variant, -- NEW: table_short | table_long | report | unknown | fixture_kv
         raw = text,
         parsed = _parseScoreText(text),
     }
@@ -664,9 +1044,12 @@ function M.selfTestPersistenceSmoke(opts)
         if tostring(_snapshot.source or "") ~= "self_test_runner" then
             error("loaded snapshot source mismatch")
         end
+
+        -- Fixture should parse
         if type(_snapshot.parsed) ~= "table" then
             error("loaded snapshot parsed missing (parser should succeed for fixture)")
         end
+
         if type(_history) ~= "table" or #_history < 1 then
             error("loaded history missing/empty")
         end
@@ -734,6 +1117,7 @@ function M.printSummary()
     _out("  schemaVersion: " .. tostring(_snapshot.schemaVersion))
     _out("  ts          : " .. tostring(_snapshot.ts))
     _out("  source      : " .. tostring(_snapshot.source))
+    _out("  variant     : " .. tostring(_snapshot.variant or "(none)"))
     local rawLen = (_isNonEmptyString(_snapshot.raw) and #_snapshot.raw or 0)
     _out("  rawLen      : " .. tostring(rawLen))
 
@@ -741,6 +1125,12 @@ function M.printSummary()
         local n = 0
         for _ in pairs(_snapshot.parsed) do n = n + 1 end
         _out("  parsed      : table (keys=" .. tostring(n) .. ")")
+        if _isNonEmptyString(_snapshot.parsed._variant) then
+            _out("  parsedType  : " .. tostring(_snapshot.parsed._variant))
+        end
+        if _isNonEmptyString(_snapshot.parsed._parser) then
+            _out("  parser      : " .. tostring(_snapshot.parsed._parser))
+        end
     else
         _out("  parsed      : nil")
     end
