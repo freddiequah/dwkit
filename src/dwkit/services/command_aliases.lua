@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-13E
+-- Version     : v2026-01-13H
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -18,7 +18,7 @@
 --       * dwpresence
 --       * dwactions
 --       * dwskills
---       * dwscorestore [status|persist <on|off|status>|fixture [basic]|clear]
+--       * dwscorestore [status|persist <on|off|status>|fixture [basic]|clear|wipe [disk]|reset [disk]]
 --       * dweventtap [on|off|status|show|clear] [n]
 --       * dweventsub <EventName>
 --       * dweventunsub <EventName|all>
@@ -37,7 +37,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-13E"
+M.VERSION = "v2026-01-13H"
 
 local STATE = {
     installed = false,
@@ -1165,7 +1165,7 @@ function M.install(opts)
         _printServiceSnapshot("SkillRegistryService", "skillRegistryService")
     end)
 
-    -- UPDATED: dwscorestore [status|persist <on|off|status>|fixture [basic]|clear]
+    -- UPDATED: dwscorestore [status|persist <on|off|status>|fixture [basic]|clear|wipe [disk]|reset [disk]]
     local dwscorestorePattern = [[^dwscorestore(?:\s+(\S+))?(?:\s+(\S+))?\s*$]]
     local id14 = _mkAlias(dwscorestorePattern, function()
         local svc = _getScoreStoreServiceBestEffort()
@@ -1184,6 +1184,13 @@ function M.install(opts)
             _out("  dwscorestore persist on|off|status")
             _out("  dwscorestore fixture [basic]")
             _out("  dwscorestore clear")
+            _out("  dwscorestore wipe [disk]")
+            _out("  dwscorestore reset [disk]")
+            _out("")
+            _out("Notes:")
+            _out("  - clear = clears snapshot only (history preserved)")
+            _out("  - wipe/reset = clears snapshot + history")
+            _out("  - wipe/reset disk = also deletes persisted file (best-effort; requires store.delete)")
         end
 
         if sub == "" or sub == "status" then
@@ -1256,6 +1263,34 @@ function M.install(opts)
                 _err("clear failed: " .. tostring(err))
                 return
             end
+            local ok2, _, _, _, err2 = _callBestEffort(svc, "printSummary")
+            if not ok2 then
+                _err("ScoreStoreService.printSummary failed: " .. tostring(err2))
+            end
+            return
+        end
+
+        if sub == "wipe" or sub == "reset" then
+            if arg ~= "" and arg ~= "disk" then
+                usage()
+                return
+            end
+            if type(svc.wipe) ~= "function" then
+                _err("ScoreStoreService.wipe not available. Update dwkit.services.score_store_service first.")
+                return
+            end
+
+            local meta = { source = "manual" }
+            if arg == "disk" then
+                meta.deleteFile = true
+            end
+
+            local ok, _, _, _, err = _callBestEffort(svc, "wipe", meta)
+            if not ok then
+                _err(sub .. " failed: " .. tostring(err))
+                return
+            end
+
             local ok2, _, _, _, err2 = _callBestEffort(svc, "printSummary")
             if not ok2 then
                 _err("ScoreStoreService.printSummary failed: " .. tostring(err2))

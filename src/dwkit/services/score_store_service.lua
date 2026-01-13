@@ -1,12 +1,12 @@
 -- #########################################################################
 -- Module Name : dwkit.services.score_store_service
 -- Owner       : Services
--- Version     : v2026-01-13G
+-- Version     : v2026-01-13H
 -- Purpose     :
 --   - Provide a SAFE, manual-only score text snapshot store (No-GMCP).
 --   - Ingest score-like text via explicit API calls (no send(), no timers).
 --   - Store latest snapshot in memory.
---   - Manual-only persistence using DWKit.persist.store (writes only on ingest/clear).
+--   - Manual-only persistence using DWKit.persist.store (writes only on ingest/clear/wipe).
 --   - Emit a namespaced update event when snapshot changes.
 --   - Provide deterministic fixtures + a simple parser for repeatable tests.
 --
@@ -23,6 +23,11 @@
 --   - getPersistenceStatus() -> table (SAFE diagnostics)
 --   - ingestFromText(text, meta?) -> boolean ok, string|nil err
 --   - clear(meta?) -> boolean ok, string|nil err
+--       NOTE: clears snapshot only (history preserved)
+--   - wipe(meta?) -> boolean ok, string|nil err
+--       meta:
+--         - source: string (default "manual")
+--         - deleteFile: boolean (optional) if true, attempts store.delete(relPath)
 --   - printSummary() -> nil (SAFE helper output)
 --   - getFixture(name?) -> (ok:boolean, text:string|nil, err:string|nil)
 --   - ingestFixture(name?, meta?) -> boolean ok, string|nil err
@@ -34,7 +39,7 @@
 --
 -- Events Consumed  : None
 -- Persistence      :
---   - ENABLED by default (startup load best-effort; writes only on ingest/clear).
+--   - ENABLED by default (startup load best-effort; writes only on ingest/clear/wipe).
 --   - relPath: <DataFolderName>/<relPath> (default: dwkit/services/score_store/history.tbl)
 --   - envelope schemaVersion: "v0.1"
 --   - envelope data:
@@ -46,7 +51,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-13G"
+M.VERSION = "v2026-01-13H"
 
 local ID = require("dwkit.core.identity")
 
@@ -58,7 +63,7 @@ local SCHEMA_VERSION = 1
 local _snapshot = nil
 local _history = {} -- array of snapshots, oldest -> newest
 
--- persistence (writes only on ingest/clear; startup may load)
+-- persistence (writes only on ingest/clear/wipe; startup may load)
 local _persist = {
     enabled = true, -- enabled by default (manual-only writes)
     schemaVersion = "v0.1",
@@ -474,7 +479,7 @@ function M.configurePersistence(opts)
             end
         end
 
-        -- NOTE: do not force a save here; we only write on manual ingest/clear.
+        -- NOTE: do not force a save here; we only write on manual ingest/clear/wipe.
         return true, nil
     end
 
@@ -547,6 +552,41 @@ function M.clear(meta)
 
     if _persist.enabled then
         _persistSave(source)
+    end
+
+    _emitUpdated({ schemaVersion = SCHEMA_VERSION, ts = os.time(), source = source, raw = "", parsed = nil }, source)
+    return true, nil
+end
+
+function M.wipe(meta)
+    meta = (type(meta) == "table") and meta or {}
+    local source = _isNonEmptyString(meta.source) and meta.source or "manual"
+    local deleteFile = (meta.deleteFile == true)
+
+    _snapshot = nil
+    _history = {}
+
+    if _persist.enabled then
+        if deleteFile then
+            local okStore, store, err = _getPersistStore()
+            if not okStore then
+                return false, "wipe disk failed: persist store not available: " .. tostring(err)
+            end
+            if type(store.delete) ~= "function" then
+                return false, "wipe disk failed: persist store.delete not available"
+            end
+            local okDel, delErr = pcall(store.delete, _persist.relPath)
+            if not okDel then
+                return false, "wipe disk failed: " .. tostring(delErr)
+            end
+
+            -- Mark as "ok" in the existing status fields (best-effort; delete is destructive but successful).
+            _persist.lastSaveOk = true
+            _persist.lastSaveErr = nil
+            _persist.lastSaveTs = os.time()
+        else
+            _persistSave(source)
+        end
     end
 
     _emitUpdated({ schemaVersion = SCHEMA_VERSION, ts = os.time(), source = source, raw = "", parsed = nil }, source)
