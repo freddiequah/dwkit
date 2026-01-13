@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-13B
+-- Version     : v2026-01-13C
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -22,6 +22,8 @@
 --   - getRegistryVersion() -> string   (docs registry version, e.g. v2.9)
 --   - getModuleVersion()   -> string   (code module version tag)
 --   - toMarkdown(opts?) -> string   (docs copy helper; SAFE)
+--   - count() -> number   (SAFE, no output)
+--   - has(name) -> boolean (SAFE, no output)
 --
 -- Events Emitted   : None
 -- Events Consumed  : None
@@ -32,7 +34,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-13B"
+M.VERSION = "v2026-01-13C"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -636,6 +638,17 @@ end
 
 function M.getModuleVersion()
     return tostring(M.VERSION or "unknown")
+end
+
+function M.count()
+    local n = 0
+    for _ in pairs(REG.commands) do n = n + 1 end
+    return n
+end
+
+function M.has(name)
+    if type(name) ~= "string" or name == "" then return false end
+    return REG.commands[name] ~= nil
 end
 
 function M.getAll()

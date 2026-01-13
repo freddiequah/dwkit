@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.tests.self_test_runner
 -- Owner       : Tests
--- Version     : v2026-01-13B
+-- Version     : v2026-01-13C
 -- Purpose     :
 --   - Provide a SAFE, manual-only self-test runner.
 --   - Prints PASS/FAIL summary + compatibility baseline output.
@@ -35,7 +35,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-13B"
+M.VERSION = "v2026-01-13C"
 
 -- -------------------------
 -- Objective D1: Registry version drift locks
@@ -99,28 +99,45 @@ end
 local function _getCountNoPrint(reg)
     if type(reg) ~= "table" then return false, "registry not table" end
 
-    -- Prefer explicit count() if present
+    -- Prefer explicit count() if present (try both f() and f(self) safely)
     if type(reg.count) == "function" then
-        local ok, n = _safecall(reg.count)
-        if ok and type(n) == "number" then return true, n end
+        local ok1, n1 = _safecall(reg.count)
+        if ok1 and type(n1) == "number" then return true, n1 end
+
+        local ok2, n2 = _safecall(reg.count, reg)
+        if ok2 and type(n2) == "number" then return true, n2 end
+
         return false, "count() error"
     end
 
-    -- Prefer getAll() if present
+    -- Prefer getAll() if present (try both f() and f(self))
     if type(reg.getAll) == "function" then
-        local ok, list = _safecall(reg.getAll)
-        if ok and type(list) == "table" then
-            return true, _countAnyTable(list)
+        local ok1, list1 = _safecall(reg.getAll)
+        if ok1 and type(list1) == "table" then
+            return true, _countAnyTable(list1)
         end
+
+        local ok2, list2 = _safecall(reg.getAll, reg)
+        if ok2 and type(list2) == "table" then
+            return true, _countAnyTable(list2)
+        end
+
         return false, "getAll() error"
     end
 
-    -- Fallback to listAll() if present (assumed SAFE; should not echo)
+    -- Fallback to listAll() if present (pass quiet=true to avoid spam; extra args are ignored in Lua)
     if type(reg.listAll) == "function" then
-        local ok, list = _safecall(reg.listAll)
+        local ok, list = _safecall(reg.listAll, { quiet = true })
         if ok and type(list) == "table" then
             return true, _countAnyTable(list)
         end
+
+        -- also try as method if implemented that way
+        local ok2, list2 = _safecall(reg.listAll, reg, { quiet = true })
+        if ok2 and type(list2) == "table" then
+            return true, _countAnyTable(list2)
+        end
+
         return false, "listAll() error"
     end
 
@@ -136,6 +153,15 @@ local function _getCommandOwnerNoPrint(cmdReg, cmdName)
         local okAll, all = _safecall(cmdReg.getAll)
         if okAll and type(all) == "table" then
             local def = all[cmdName]
+            if type(def) ~= "table" then
+                return false, "command not found: " .. tostring(cmdName)
+            end
+            return true, tostring(def.ownerModule or "")
+        end
+        -- try method form
+        local okAll2, all2 = _safecall(cmdReg.getAll, cmdReg)
+        if okAll2 and type(all2) == "table" then
+            local def = all2[cmdName]
             if type(def) ~= "table" then
                 return false, "command not found: " .. tostring(cmdName)
             end
@@ -167,6 +193,10 @@ local function _getAllCommandsNoPrint(cmdReg)
         if okAll and type(all) == "table" then
             return true, all, nil
         end
+        local okAll2, all2 = _safecall(cmdReg.getAll, cmdReg)
+        if okAll2 and type(all2) == "table" then
+            return true, all2, nil
+        end
         return false, nil, "getAll() error"
     end
 
@@ -181,6 +211,12 @@ local function _getGameListNoPrint(cmdReg)
     if okList and type(list) == "table" then
         return true, list, nil
     end
+
+    local okList2, list2 = _safecall(cmdReg.listGame, cmdReg, { quiet = true })
+    if okList2 and type(list2) == "table" then
+        return true, list2, nil
+    end
+
     return false, nil, "listGame() error"
 end
 

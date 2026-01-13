@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-13B
+-- Version     : v2026-01-13C
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -51,7 +51,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-13B"
+M.VERSION = "v2026-01-13C"
 
 local STATE = {
     installed = false,
@@ -108,6 +108,31 @@ local function _safeRequire(modName)
     local ok, mod = pcall(require, modName)
     if ok then return true, mod end
     return false, mod
+end
+
+-- NEW: robust caller for APIs that may be implemented as obj.fn(...) OR obj:fn(...)
+-- Tries no-self first, then self (only if the first attempt fails).
+-- Returns: ok, a, b, c, err
+local function _callBestEffort(obj, fnName, ...)
+    if type(obj) ~= "table" then
+        return false, nil, nil, nil, "obj not table"
+    end
+    local fn = obj[fnName]
+    if type(fn) ~= "function" then
+        return false, nil, nil, nil, "missing function: " .. tostring(fnName)
+    end
+
+    local ok1, a1, b1, c1 = pcall(fn, ...)
+    if ok1 then
+        return true, a1, b1, c1, nil
+    end
+
+    local ok2, a2, b2, c2 = pcall(fn, obj, ...)
+    if ok2 then
+        return true, a2, b2, c2, nil
+    end
+
+    return false, nil, nil, nil, "call failed: " .. tostring(a1) .. " | " .. tostring(a2)
 end
 
 local function _hasCmd()
@@ -309,15 +334,17 @@ local function _printVersionSummary()
 
     -- Command registry version
     local cmdRegVersion = "unknown"
-    if _hasCmd() and type(DWKit.cmd.getRegistryVersion) == "function" then
-        local okV, v = pcall(DWKit.cmd.getRegistryVersion)
-        if okV and v then cmdRegVersion = tostring(v) end
+    if _hasCmd() then
+        local okV, v, _, _, err = _callBestEffort(DWKit.cmd, "getRegistryVersion")
+        if okV and v then
+            cmdRegVersion = tostring(v)
+        end
     end
 
     -- Event registry + bus versions (SAFE diagnostics)
     local evRegVersion = "unknown"
-    if type(DWKit.bus) == "table" and type(DWKit.bus.eventRegistry) == "table" and type(DWKit.bus.eventRegistry.getRegistryVersion) == "function" then
-        local okE, v = pcall(DWKit.bus.eventRegistry.getRegistryVersion)
+    if type(DWKit.bus) == "table" and type(DWKit.bus.eventRegistry) == "table" then
+        local okE, v, _, _, err = _callBestEffort(DWKit.bus.eventRegistry, "getRegistryVersion")
         if okE and v then evRegVersion = tostring(v) end
     else
         local okER, modER = _safeRequire("dwkit.bus.event_registry")
@@ -545,23 +572,25 @@ local function _printServiceSnapshot(label, svcName)
 
     -- Best-effort snapshot: prefer getState(), else getAll(), else dump keys
     if type(svc.getState) == "function" then
-        local ok, state = pcall(svc.getState)
+        local ok, state, _, _, err = _callBestEffort(svc, "getState")
         if ok then
             _out("  getState(): OK")
             _ppTable(state, { maxDepth = 2, maxItems = 30 })
             return
         end
         _out("  getState(): ERROR")
+        if err and err ~= "" then _out("    err=" .. tostring(err)) end
     end
 
     if type(svc.getAll) == "function" then
-        local ok, state = pcall(svc.getAll)
+        local ok, state, _, _, err = _callBestEffort(svc, "getAll")
         if ok then
             _out("  getAll(): OK")
             _ppTable(state, { maxDepth = 2, maxItems = 30 })
             return
         end
         _out("  getAll(): ERROR")
+        if err and err ~= "" then _out("    err=" .. tostring(err)) end
     end
 
     local keys = _sortedKeys(svc)
@@ -1187,10 +1216,7 @@ function M.install(opts)
             return
         end
 
-        -- NOTE: call as method if implemented with ':' (self expected)
-        local ok, err = pcall(function()
-            return svc.printSummary(svc)
-        end)
+        local ok, _, _, _, err = _callBestEffort(svc, "printSummary")
         if not ok then
             _err("ScoreStoreService.printSummary failed: " .. tostring(err))
         end
