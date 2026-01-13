@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-12D
+-- Version     : v2026-01-13B
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -19,7 +19,7 @@
 --   - help(name, opts?) -> boolean ok, table|nil cmdOrNil, string|nil errOrNil
 --   - register(def) -> boolean ok, string|nil errOrNil   (runtime-only, not persisted)
 --   - getAll() -> table copy (name -> def)
---   - getRegistryVersion() -> string   (docs registry version, e.g. v2.8)
+--   - getRegistryVersion() -> string   (docs registry version, e.g. v2.9)
 --   - getModuleVersion()   -> string   (code module version tag)
 --   - toMarkdown(opts?) -> string   (docs copy helper; SAFE)
 --
@@ -32,7 +32,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-12D"
+M.VERSION = "v2026-01-13B"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -55,7 +55,7 @@ end
 -- - M.VERSION is the code module version tag (calendar style)
 -- -------------------------
 local REG = {
-    version = "v2.8",
+    version = "v2.9",
     moduleVersion = M.VERSION,
     commands = {
         dwid = {
@@ -134,6 +134,25 @@ local REG = {
                 "Typed alias implemented by dwkit.services.command_aliases.",
                 "Prints identity/runtimeBaseline/self_test_runner/command registry versions where available.",
                 "Also prints eventRegistry/eventBus versions when present.",
+            },
+        },
+
+        dwdiag = {
+            command     = "dwdiag",
+            aliases     = {},
+            ownerModule = "dwkit.services.command_aliases",
+            description = "Prints a one-shot diagnostic bundle (dwversion + dwboot + dwservices + event diag status).",
+            syntax      = "dwdiag",
+            examples    = {
+                "dwdiag",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Intended for copy/paste into issues or chat handovers.",
+                "MUST remain SAFE and manual-only (no timers, no auto-tap enable).",
+                "Implementation should call existing SAFE printers and keep output bounded.",
             },
         },
 

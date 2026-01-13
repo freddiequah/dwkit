@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-13A
+-- Version     : v2026-01-13B
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -10,6 +10,7 @@
 --       * dwinfo
 --       * dwid
 --       * dwversion
+--       * dwdiag
 --       * dwevents [md]
 --       * dwevent <EventName>
 --       * dwboot
@@ -50,7 +51,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-13A"
+M.VERSION = "v2026-01-13B"
 
 local STATE = {
     installed = false,
@@ -61,6 +62,7 @@ local STATE = {
         dwinfo       = nil,
         dwid         = nil,
         dwversion    = nil,
+        dwdiag       = nil,
         dwevents     = nil,
         dwevent      = nil,
         dwboot       = nil,
@@ -635,6 +637,7 @@ local function _printEventDiagStatus()
     _out("  subsCount      : " .. tostring(subCount))
     _out("  logCount       : " .. tostring(#d.log))
     _out("  maxLog         : " .. tostring(d.maxLog))
+    _out("  eventBus.version       : " .. tostring(stats.version or "unknown"))
     _out("  eventBus.emitted       : " .. tostring(stats.emitted or 0))
     _out("  eventBus.delivered     : " .. tostring(stats.delivered or 0))
     _out("  eventBus.handlerErrors : " .. tostring(stats.handlerErrors or 0))
@@ -845,6 +848,34 @@ local function _logClear()
 end
 
 -- -------------------------
+-- dwdiag bundle (SAFE, manual-only, bounded)
+-- -------------------------
+local function _printDiagBundle()
+    _out("[DWKit Diag] bundle (dwdiag)")
+    _out("  NOTE: SAFE + manual-only. Does not enable event tap or subscriptions.")
+    _out("")
+
+    _out("== dwversion ==")
+    _out("")
+    _printVersionSummary()
+    _out("")
+
+    _out("== dwboot ==")
+    _out("")
+    _printBootHealth()
+    _out("")
+
+    _out("== dwservices ==")
+    _out("")
+    _printServicesHealth()
+    _out("")
+
+    _out("== event diag status ==")
+    _out("")
+    _printEventDiagStatus()
+end
+
+-- -------------------------
 -- Service public API
 -- -------------------------
 function M.isInstalled()
@@ -865,6 +896,7 @@ function M.getState()
             dwinfo = STATE.aliasIds.dwinfo,
             dwid = STATE.aliasIds.dwid,
             dwversion = STATE.aliasIds.dwversion,
+            dwdiag = STATE.aliasIds.dwdiag,
             dwevents = STATE.aliasIds.dwevents,
             dwevent = STATE.aliasIds.dwevent,
             dwboot = STATE.aliasIds.dwboot,
@@ -932,7 +964,7 @@ function M.uninstall()
 
     local ids = STATE.aliasIds
     local allIds = {
-        ids.dwcommands, ids.dwhelp, ids.dwtest, ids.dwinfo, ids.dwid, ids.dwversion,
+        ids.dwcommands, ids.dwhelp, ids.dwtest, ids.dwinfo, ids.dwid, ids.dwversion, ids.dwdiag,
         ids.dwevents, ids.dwevent, ids.dwboot,
         ids.dwservices, ids.dwpresence, ids.dwactions, ids.dwskills, ids.dwscorestore,
         ids.dweventtap, ids.dweventsub, ids.dweventunsub, ids.dweventlog,
@@ -1215,7 +1247,13 @@ function M.install(opts)
         _printEventLog(n)
     end)
 
-    local all = { id1, id2, id3, id4, id5, id6, id7, id8, id9, id10, id11, id12, id13, id14, id15, id16, id17, id18 }
+    -- Alias 19: dwdiag
+    local dwdiagPattern = [[^dwdiag\s*$]]
+    local id19 = _mkAlias(dwdiagPattern, function()
+        _printDiagBundle()
+    end)
+
+    local all = { id1, id2, id3, id4, id5, id6, id7, id8, id9, id10, id11, id12, id13, id14, id15, id16, id17, id18, id19 }
     for _, id in ipairs(all) do
         if not id then
             STATE.lastError = "Failed to create one or more aliases"
@@ -1249,12 +1287,14 @@ function M.install(opts)
     STATE.aliasIds.dweventunsub = id17
     STATE.aliasIds.dweventlog   = id18
 
+    STATE.aliasIds.dwdiag       = id19
+
     STATE.installed             = true
     STATE.lastError             = nil
 
     if not opts.quiet then
         _out(
-            "[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion, dwevents, dwevent, dwboot, dwservices, dwpresence, dwactions, dwskills, dwscorestore, dweventtap, dweventsub, dweventunsub, dweventlog")
+            "[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion, dwevents, dwevent, dwboot, dwservices, dwpresence, dwactions, dwskills, dwscorestore, dweventtap, dweventsub, dweventunsub, dweventlog, dwdiag")
     end
 
     return true, nil
