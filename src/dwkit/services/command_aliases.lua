@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-12E
+-- Version     : v2026-01-13A
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -50,7 +50,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-12E"
+M.VERSION = "v2026-01-13A"
 
 local STATE = {
     installed = false,
