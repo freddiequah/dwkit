@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-01-12F
+-- Version     : v2026-01-13L
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -187,6 +187,29 @@ function Loader.init()
         else
             DWKit.services.scoreStoreService = nil
             DWKit._scoreStoreServiceLoadError = tostring(modOrErr4)
+        end
+    end
+
+    -- ---------------------------------------------------------------------
+    -- Install passive score capture (SAFE). No send(), no timers.
+    -- Captures score / score -l / score -r when YOU run them.
+    -- ---------------------------------------------------------------------
+    do
+        DWKit.capture = DWKit.capture or {}
+
+        local okCap, capOrErr = pcall(require, "dwkit.capture.score_capture")
+        if okCap and type(capOrErr) == "table" and type(capOrErr.install) == "function" then
+            DWKit.capture.scoreCapture = capOrErr
+
+            local okInstall, installErr = capOrErr.install()
+            if okInstall then
+                DWKit._scoreCaptureLoadError = nil
+            else
+                DWKit._scoreCaptureLoadError = tostring(installErr)
+            end
+        else
+            DWKit.capture.scoreCapture = nil
+            DWKit._scoreCaptureLoadError = tostring(capOrErr)
         end
     end
 
