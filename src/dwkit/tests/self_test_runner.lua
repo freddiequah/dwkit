@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.tests.self_test_runner
 -- Owner       : Tests
--- Version     : v2026-01-13C
+-- Version     : v2026-01-13E
 -- Purpose     :
 --   - Provide a SAFE, manual-only self-test runner.
 --   - Prints PASS/FAIL summary + compatibility baseline output.
@@ -35,7 +35,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-13C"
+M.VERSION = "v2026-01-13E"
 
 -- -------------------------
 -- Objective D1: Registry version drift locks

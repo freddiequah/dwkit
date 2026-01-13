@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-13C
+-- Version     : v2026-01-13E
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -18,7 +18,7 @@
 --       * dwpresence
 --       * dwactions
 --       * dwskills
---       * dwscorestore
+--       * dwscorestore [status|persist <on|off|status>|fixture [basic]|clear]
 --       * dweventtap [on|off|status|show|clear] [n]
 --       * dweventsub <EventName>
 --       * dweventunsub <EventName|all>
@@ -33,25 +33,11 @@
 --   - uninstall() -> boolean ok, string|nil err
 --   - isInstalled() -> boolean
 --   - getState() -> table copy
---
--- Events Emitted   : None
--- Events Consumed  : None
--- Persistence      : None
--- Automation Policy: Manual only (invoked by loader.init which is manual)
--- Dependencies     :
---   - Mudlet: tempAlias(), killAlias() (optional but expected)
---   - DWKit.cmd (attached by loader.init)
---   - DWKit.test (attached by loader.init)
---   - DWKit.core.runtimeBaseline (attached by loader.init)
---   - DWKit.core.identity (attached by loader.init)
---   - DWKit.bus.eventRegistry (attached by loader.init)
---   - DWKit.bus.eventBus (attached by loader.init)
---   - DWKit.services.* (presence/actionModel/skillRegistry/scoreStore) (attached by loader.init)
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-13C"
+M.VERSION = "v2026-01-13E"
 
 local STATE = {
     installed = false,
@@ -335,7 +321,7 @@ local function _printVersionSummary()
     -- Command registry version
     local cmdRegVersion = "unknown"
     if _hasCmd() then
-        local okV, v, _, _, err = _callBestEffort(DWKit.cmd, "getRegistryVersion")
+        local okV, v = _callBestEffort(DWKit.cmd, "getRegistryVersion")
         if okV and v then
             cmdRegVersion = tostring(v)
         end
@@ -344,7 +330,7 @@ local function _printVersionSummary()
     -- Event registry + bus versions (SAFE diagnostics)
     local evRegVersion = "unknown"
     if type(DWKit.bus) == "table" and type(DWKit.bus.eventRegistry) == "table" then
-        local okE, v, _, _, err = _callBestEffort(DWKit.bus.eventRegistry, "getRegistryVersion")
+        local okE, v = _callBestEffort(DWKit.bus.eventRegistry, "getRegistryVersion")
         if okE and v then evRegVersion = tostring(v) end
     else
         local okER, modER = _safeRequire("dwkit.bus.event_registry")
@@ -457,7 +443,6 @@ local function _printBootHealth()
     if type(kit._bootReadyTs) == "number" then
         _out("  bootReadyTs                 : " .. tostring(kit._bootReadyTs))
 
-        -- NEW (SAFE): local time string for bootReadyTs (os.date uses client local timezone)
         local okD, s = pcall(os.date, "%Y-%m-%d %H:%M:%S", kit._bootReadyTs)
         if okD and s then
             _out("  bootReadyLocal              : " .. tostring(s))
@@ -466,7 +451,6 @@ local function _printBootHealth()
         end
     end
 
-    -- NEW (tiny, user-visible): expose epoch-ms bootReady timestamp if present
     if type(kit._bootReadyTsMs) == "number" then
         _out("  bootReadyTsMs               : " .. tostring(kit._bootReadyTsMs))
     else
@@ -506,7 +490,7 @@ local function _printBootHealth()
         _out("    (none)")
     end
 
-    if hasEvBus and type(kit.bus.eventBus.getStats) == "function" then
+    if type(kit.bus) == "table" and type(kit.bus.eventBus) == "table" and type(kit.bus.eventBus.getStats) == "function" then
         local okS, stats = pcall(kit.bus.eventBus.getStats)
         if okS and type(stats) == "table" then
             _out("")
@@ -570,7 +554,6 @@ local function _printServiceSnapshot(label, svcName)
 
     _out("  version=" .. tostring(svc.VERSION or "unknown"))
 
-    -- Best-effort snapshot: prefer getState(), else getAll(), else dump keys
     if type(svc.getState) == "function" then
         local ok, state, _, _, err = _callBestEffort(svc, "getState")
         if ok then
@@ -636,7 +619,6 @@ local function _pushEventLog(kind, eventName, payload)
 end
 
 local function _normalizeTapArgs(a, b)
-    -- Prefer (payload, eventName). If reversed, swap.
     if type(a) == "string" and type(b) == "table" then
         return b, a
     end
@@ -876,9 +858,6 @@ local function _logClear()
     _out("[DWKit EventDiag] log cleared")
 end
 
--- -------------------------
--- dwdiag bundle (SAFE, manual-only, bounded)
--- -------------------------
 local function _printDiagBundle()
     _out("[DWKit Diag] bundle (dwdiag)")
     _out("  NOTE: SAFE + manual-only. Does not enable event tap or subscriptions.")
@@ -904,9 +883,6 @@ local function _printDiagBundle()
     _printEventDiagStatus()
 end
 
--- -------------------------
--- Service public API
--- -------------------------
 function M.isInstalled()
     return STATE.installed and true or false
 end
@@ -971,7 +947,6 @@ function M.uninstall()
         return true, nil
     end
 
-    -- Best-effort: disable tap + clear subscriptions
     if _hasEventBus() then
         local d = _diag()
         if d.tapToken ~= nil and type(DWKit.bus.eventBus.tapOff) == "function" then
@@ -1041,7 +1016,6 @@ function M.install(opts)
         return false, STATE.lastError
     end
 
-    -- Alias 1: dwcommands [safe|game|md]
     local dwcommandsPattern = [[^dwcommands(?:\s+(safe|game|md))?\s*$]]
     local id1 = _mkAlias(dwcommandsPattern, function()
         if not _hasCmd() then
@@ -1070,7 +1044,6 @@ function M.install(opts)
         end
     end)
 
-    -- Alias 2: dwhelp <cmd>
     local dwhelpPattern = [[^dwhelp\s+(\S+)\s*$]]
     local id2 = _mkAlias(dwhelpPattern, function()
         if not _hasCmd() then
@@ -1090,7 +1063,6 @@ function M.install(opts)
         end
     end)
 
-    -- Alias 3: dwtest [quiet]
     local dwtestPattern = [[^dwtest(?:\s+(quiet))?\s*$]]
     local id3 = _mkAlias(dwtestPattern, function()
         if not _hasTest() then
@@ -1105,7 +1077,6 @@ function M.install(opts)
         end
     end)
 
-    -- Alias 4: dwinfo
     local dwinfoPattern = [[^dwinfo\s*$]]
     local id4 = _mkAlias(dwinfoPattern, function()
         if not _hasBaseline() then
@@ -1115,19 +1086,16 @@ function M.install(opts)
         DWKit.core.runtimeBaseline.printInfo()
     end)
 
-    -- Alias 5: dwid
     local dwidPattern = [[^dwid\s*$]]
     local id5 = _mkAlias(dwidPattern, function()
         _printIdentity()
     end)
 
-    -- Alias 6: dwversion
     local dwversionPattern = [[^dwversion\s*$]]
     local id6 = _mkAlias(dwversionPattern, function()
         _printVersionSummary()
     end)
 
-    -- Alias 7: dwevents [md]
     local dweventsPattern = [[^dwevents(?:\s+(md))?\s*$]]
     local id7 = _mkAlias(dweventsPattern, function()
         if not _hasEventRegistry() then
@@ -1153,7 +1121,6 @@ function M.install(opts)
         DWKit.bus.eventRegistry.listAll()
     end)
 
-    -- Alias 8: dwevent <EventName>
     local dweventPattern = [[^dwevent\s+(\S+)\s*$]]
     local id8 = _mkAlias(dweventPattern, function()
         if not _hasEventRegistry() then
@@ -1173,56 +1140,132 @@ function M.install(opts)
         end
     end)
 
-    -- Alias 9: dwboot
     local dwbootPattern = [[^dwboot\s*$]]
     local id9 = _mkAlias(dwbootPattern, function()
         _printBootHealth()
     end)
 
-    -- Alias 10: dwservices
     local dwservicesPattern = [[^dwservices\s*$]]
     local id10 = _mkAlias(dwservicesPattern, function()
         _printServicesHealth()
     end)
 
-    -- Alias 11: dwpresence
     local dwpresencePattern = [[^dwpresence\s*$]]
     local id11 = _mkAlias(dwpresencePattern, function()
         _printServiceSnapshot("PresenceService", "presenceService")
     end)
 
-    -- Alias 12: dwactions
     local dwactionsPattern = [[^dwactions\s*$]]
     local id12 = _mkAlias(dwactionsPattern, function()
         _printServiceSnapshot("ActionModelService", "actionModelService")
     end)
 
-    -- Alias 13: dwskills
     local dwskillsPattern = [[^dwskills\s*$]]
     local id13 = _mkAlias(dwskillsPattern, function()
         _printServiceSnapshot("SkillRegistryService", "skillRegistryService")
     end)
 
-    -- Alias 14: dwscorestore
-    local dwscorestorePattern = [[^dwscorestore\s*$]]
+    -- UPDATED: dwscorestore [status|persist <on|off|status>|fixture [basic]|clear]
+    local dwscorestorePattern = [[^dwscorestore(?:\s+(\S+))?(?:\s+(\S+))?\s*$]]
     local id14 = _mkAlias(dwscorestorePattern, function()
         local svc = _getScoreStoreServiceBestEffort()
         if type(svc) ~= "table" then
             _err("ScoreStoreService not available. Run loader.init() first.")
             return
         end
-        if type(svc.printSummary) ~= "function" then
-            _err("ScoreStoreService.printSummary not available.")
+
+        local sub = (matches and matches[2]) and tostring(matches[2]) or ""
+        local arg = (matches and matches[3]) and tostring(matches[3]) or ""
+
+        local function usage()
+            _out("[DWKit ScoreStore] Usage:")
+            _out("  dwscorestore")
+            _out("  dwscorestore status")
+            _out("  dwscorestore persist on|off|status")
+            _out("  dwscorestore fixture [basic]")
+            _out("  dwscorestore clear")
+        end
+
+        if sub == "" or sub == "status" then
+            local ok, _, _, _, err = _callBestEffort(svc, "printSummary")
+            if not ok then
+                _err("ScoreStoreService.printSummary failed: " .. tostring(err))
+            end
             return
         end
 
-        local ok, _, _, _, err = _callBestEffort(svc, "printSummary")
-        if not ok then
-            _err("ScoreStoreService.printSummary failed: " .. tostring(err))
+        if sub == "persist" then
+            if arg ~= "on" and arg ~= "off" and arg ~= "status" then
+                usage()
+                return
+            end
+
+            if arg == "status" then
+                local ok, _, _, _, err = _callBestEffort(svc, "printSummary")
+                if not ok then
+                    _err("ScoreStoreService.printSummary failed: " .. tostring(err))
+                end
+                return
+            end
+
+            if type(svc.configurePersistence) ~= "function" then
+                _err("ScoreStoreService.configurePersistence not available.")
+                return
+            end
+
+            local enable = (arg == "on")
+            local ok, _, _, _, err = _callBestEffort(svc, "configurePersistence",
+                { enabled = enable, loadExisting = true })
+            if not ok then
+                _err("configurePersistence failed: " .. tostring(err))
+                return
+            end
+
+            local ok2, _, _, _, err2 = _callBestEffort(svc, "printSummary")
+            if not ok2 then
+                _err("ScoreStoreService.printSummary failed: " .. tostring(err2))
+            end
+            return
         end
+
+        if sub == "fixture" then
+            local name = (arg ~= "" and arg) or "basic"
+            if type(svc.ingestFixture) ~= "function" then
+                _err("ScoreStoreService.ingestFixture not available.")
+                return
+            end
+            local ok, _, _, _, err = _callBestEffort(svc, "ingestFixture", name, { source = "fixture" })
+            if not ok then
+                _err("ingestFixture failed: " .. tostring(err))
+                return
+            end
+            local ok2, _, _, _, err2 = _callBestEffort(svc, "printSummary")
+            if not ok2 then
+                _err("ScoreStoreService.printSummary failed: " .. tostring(err2))
+            end
+            return
+        end
+
+        if sub == "clear" then
+            if type(svc.clear) ~= "function" then
+                _err("ScoreStoreService.clear not available.")
+                return
+            end
+            local ok, _, _, _, err = _callBestEffort(svc, "clear", { source = "manual" })
+            if not ok then
+                _err("clear failed: " .. tostring(err))
+                return
+            end
+            local ok2, _, _, _, err2 = _callBestEffort(svc, "printSummary")
+            if not ok2 then
+                _err("ScoreStoreService.printSummary failed: " .. tostring(err2))
+            end
+            return
+        end
+
+        usage()
     end)
 
-    -- Alias 15: dweventtap [on|off|status|show|clear] [n]
     local dweventtapPattern = [[^dweventtap(?:\s+(on|off|status|show|clear))?(?:\s+(\d+))?\s*$]]
     local id15 = _mkAlias(dweventtapPattern, function()
         local mode = (matches and matches[2]) and tostring(matches[2]) or ""
@@ -1252,28 +1295,24 @@ function M.install(opts)
         _err("Usage: dweventtap [on|off|status|show|clear] [n]")
     end)
 
-    -- Alias 16: dweventsub <EventName>
     local dweventsubPattern = [[^dweventsub\s+(\S+)\s*$]]
     local id16 = _mkAlias(dweventsubPattern, function()
         local evName = (matches and matches[2]) and tostring(matches[2]) or ""
         _subOn(evName)
     end)
 
-    -- Alias 17: dweventunsub <EventName|all>
     local dweventunsubPattern = [[^dweventunsub\s+(\S+)\s*$]]
     local id17 = _mkAlias(dweventunsubPattern, function()
         local evName = (matches and matches[2]) and tostring(matches[2]) or ""
         _subOff(evName)
     end)
 
-    -- Alias 18: dweventlog [n]
     local dweventlogPattern = [[^dweventlog(?:\s+(\d+))?\s*$]]
     local id18 = _mkAlias(dweventlogPattern, function()
         local n = (matches and matches[2]) and tostring(matches[2]) or ""
         _printEventLog(n)
     end)
 
-    -- Alias 19: dwdiag
     local dwdiagPattern = [[^dwdiag\s*$]]
     local id19 = _mkAlias(dwdiagPattern, function()
         _printDiagBundle()

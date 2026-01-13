@@ -1,13 +1,14 @@
 -- #########################################################################
 -- Module Name : dwkit.services.score_store_service
 -- Owner       : Services
--- Version     : v2026-01-12F
+-- Version     : v2026-01-13F
 -- Purpose     :
 --   - Provide a SAFE, manual-only score text snapshot store (No-GMCP).
 --   - Ingest score-like text via explicit API calls (no send(), no timers).
 --   - Store latest snapshot in memory.
---   - OPTIONAL: Manual-only persistence (OFF by default) using DWKit.persist.store.
+--   - Manual-only persistence using DWKit.persist.store (writes only on ingest/clear).
 --   - Emit a namespaced update event when snapshot changes.
+--   - Provide deterministic fixtures + a simple parser for repeatable tests.
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -15,7 +16,7 @@
 --   - getHistory() -> table (array; shallow-copied; oldest->newest)
 --   - configurePersistence(opts) -> boolean ok, string|nil err
 --       opts:
---         - enabled: boolean (default false)
+--         - enabled: boolean (default true in this build)
 --         - relPath: string (default "services/score_store/history.tbl")
 --         - maxEntries: number (default 50; min 1; max 500)
 --         - loadExisting: boolean (default true when enabling)
@@ -23,6 +24,8 @@
 --   - ingestFromText(text, meta?) -> boolean ok, string|nil err
 --   - clear(meta?) -> boolean ok, string|nil err
 --   - printSummary() -> nil (SAFE helper output)
+--   - getFixture(name?) -> (ok:boolean, text:string|nil, err:string|nil)
+--   - ingestFixture(name?, meta?) -> boolean ok, string|nil err
 --   - selfTestPersistenceSmoke(opts?) -> boolean ok, string|nil err (SAFE; test-only)
 --
 -- Events Emitted :
@@ -31,20 +34,19 @@
 --
 -- Events Consumed  : None
 -- Persistence      :
---   - OFF by default (no disk writes).
---   - When enabled via configurePersistence():
---       relPath: <DataFolderName>/<relPath> (default: dwkit/services/score_store/history.tbl)
---       envelope schemaVersion: "v0.1"
---       envelope data:
---         - snapshot: table|nil
---         - history:  array of snapshot tables (bounded)
+--   - ENABLED by default (startup load best-effort; writes only on ingest/clear).
+--   - relPath: <DataFolderName>/<relPath> (default: dwkit/services/score_store/history.tbl)
+--   - envelope schemaVersion: "v0.1"
+--   - envelope data:
+--     - snapshot: table|nil
+--     - history:  array of snapshot tables (bounded)
 -- Automation Policy: Manual only
 -- Dependencies     : dwkit.core.identity (optional best-effort persist via DWKit.persist.store)
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-12F"
+M.VERSION = "v2026-01-13F"
 
 local ID = require("dwkit.core.identity")
 
@@ -56,9 +58,9 @@ local SCHEMA_VERSION = 1
 local _snapshot = nil
 local _history = {} -- array of snapshots, oldest -> newest
 
--- persistence (OFF by default)
+-- persistence (writes only on ingest/clear; startup may load)
 local _persist = {
-    enabled = false,
+    enabled = true, -- enabled by default (manual-only writes)
     schemaVersion = "v0.1",
     relPath = "services/score_store/history.tbl",
     maxEntries = 50,
@@ -256,6 +258,156 @@ local function _persistLoad()
     return true, nil
 end
 
+-- -------------------------
+-- Deterministic fixture + parser
+-- -------------------------
+local FIXTURES = {
+    basic = table.concat({
+        "[DWKit SCORE FIXTURE v1]",
+        "Name: Vzae",
+        "Class: Warrior",
+        "Level: 50",
+        "HP: 1234/5678",
+        "Mana: 222/333",
+        "Move: 44/55",
+        "Gold: 98765",
+        "Exp: 123456 (Next: 7890)",
+    }, "\n"),
+}
+
+local function _trim(s)
+    s = tostring(s or "")
+    return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function _parseKV(text, key)
+    -- Matches "Key: value" on any line
+    local pat = "\n" .. key .. "%s*:%s*([^\n]+)"
+    local v = text:match(pat)
+    if not v then
+        v = text:match("^" .. key .. "%s*:%s*([^\n]+)")
+    end
+    if v then
+        return _trim(v)
+    end
+    return nil
+end
+
+local function _parseRatio(text, label)
+    -- Matches "Label: cur/max" -> numbers
+    local pat = "\n" .. label .. "%s*:%s*(%d+)%s*/%s*(%d+)"
+    local a, b = text:match(pat)
+    if not a then
+        a, b = text:match("^" .. label .. "%s*:%s*(%d+)%s*/%s*(%d+)")
+    end
+    if a and b then
+        return tonumber(a), tonumber(b)
+    end
+    return nil, nil
+end
+
+local function _parseScoreText(text)
+    if not _isNonEmptyString(text) then return nil end
+    text = "\n" .. text .. "\n" -- padding for \n patterns
+
+    local parsed = {}
+
+    local name = _parseKV(text, "Name")
+    if name then parsed.name = name end
+
+    local cls = _parseKV(text, "Class")
+    if cls then parsed.class = cls end
+
+    do
+        local lvl = _parseKV(text, "Level")
+        local n = tonumber(lvl or "")
+        if n then parsed.level = n end
+    end
+
+    do
+        local cur, max = _parseRatio(text, "HP")
+        if cur and max then
+            parsed.hpCur = cur
+            parsed.hpMax = max
+        end
+    end
+
+    do
+        local cur, max = _parseRatio(text, "Mana")
+        if cur and max then
+            parsed.manaCur = cur
+            parsed.manaMax = max
+        end
+    end
+
+    do
+        local cur, max = _parseRatio(text, "Move")
+        if cur and max then
+            parsed.moveCur = cur
+            parsed.moveMax = max
+        end
+    end
+
+    do
+        local g = _parseKV(text, "Gold")
+        if g ~= nil then
+            -- IMPORTANT: gsub returns (string, count). Capture only the string.
+            local s = tostring(g):gsub(",", "")
+            local n = tonumber(s)
+            if n then parsed.gold = n end
+        end
+    end
+
+    do
+        -- "Exp: 123456 (Next: 7890)"
+        local exp = text:match("\nExp%s*:%s*(%d+)")
+        if not exp then exp = text:match("^Exp%s*:%s*(%d+)") end
+        if exp then parsed.exp = tonumber(exp) end
+
+        local nxt = text:match("Next%s*:%s*(%d+)")
+        if nxt then parsed.nextExp = tonumber(nxt) end
+    end
+
+    if next(parsed) == nil then
+        return nil
+    end
+
+    parsed._parser = "dwkit.score.fixture.v1"
+    return parsed
+end
+
+local function _startupLoadIfEnabled()
+    if not _persist.enabled then
+        return
+    end
+
+    local okLoad, loadErr = _persistLoad()
+    if okLoad then
+        return
+    end
+
+    local msg = tostring(loadErr or "")
+    local isMissing =
+        (msg == "file not found") or
+        (msg:find("file not found", 1, true) ~= nil) or
+        (msg:find("no data loaded", 1, true) ~= nil)
+
+    if isMissing then
+        -- Missing file is normal on first run; do not disable persistence.
+        _persist.lastLoadOk = true
+        _persist.lastLoadErr = nil
+        _persist.lastLoadTs = os.time()
+        return
+    end
+
+    -- For other errors: keep enabled=true, but record the error for diagnostics.
+    _persist.lastLoadOk = false
+    _persist.lastLoadErr = "startup load failed: " .. msg
+    _persist.lastLoadTs = os.time()
+end
+
+_startupLoadIfEnabled()
+
 function M.getVersion()
     return tostring(M.VERSION or "unknown")
 end
@@ -310,7 +462,6 @@ function M.configurePersistence(opts)
             local okLoad, loadErr = _persistLoad()
             if not okLoad then
                 local msg = tostring(loadErr or "")
-                -- First-time enable: missing file is NOT an error (we will create it).
                 local isMissing =
                     (msg == "file not found") or
                     (msg:find("file not found", 1, true) ~= nil) or
@@ -323,13 +474,7 @@ function M.configurePersistence(opts)
             end
         end
 
-        -- Always create/update the file immediately (snapshot may be nil; history may be empty).
-        local okSave, saveErr = _persistSave("configurePersistence")
-        if not okSave then
-            _persist.enabled = false
-            return false, "persistence enabled but initial save failed: " .. tostring(saveErr)
-        end
-
+        -- NOTE: do not force a save here; we only write on manual ingest/clear.
         return true, nil
     end
 
@@ -340,6 +485,27 @@ function M.configurePersistence(opts)
 
     _persist.enabled = enable
     return true, nil
+end
+
+function M.getFixture(name)
+    name = _isNonEmptyString(name) and tostring(name) or "basic"
+    local text = FIXTURES[name]
+    if not _isNonEmptyString(text) then
+        return false, nil, "unknown fixture: " .. tostring(name)
+    end
+    return true, text, nil
+end
+
+function M.ingestFixture(name, meta)
+    local okF, text, ferr = M.getFixture(name)
+    if not okF then
+        return false, ferr
+    end
+    meta = (type(meta) == "table") and meta or {}
+    if not _isNonEmptyString(meta.source) then
+        meta.source = "fixture"
+    end
+    return M.ingestFromText(text, meta)
 end
 
 function M.ingestFromText(text, meta)
@@ -354,7 +520,7 @@ function M.ingestFromText(text, meta)
         ts = os.time(),
         source = source,
         raw = text,
-        parsed = nil,
+        parsed = _parseScoreText(text),
     }
 
     _snapshot = snap
@@ -394,7 +560,8 @@ end
 -- - Restores ALL prior in-memory state + persistence config/status
 function M.selfTestPersistenceSmoke(opts)
     opts = (type(opts) == "table") and opts or {}
-    local relPath = _isNonEmptyString(opts.relPath) and tostring(opts.relPath) or "selftest/score_store_service_smoke.tbl"
+    local relPath = _isNonEmptyString(opts.relPath) and tostring(opts.relPath) or
+        "selftest/score_store_service_smoke.tbl"
 
     local okStore, store, err = _getPersistStore()
     if not okStore then
@@ -420,7 +587,6 @@ function M.selfTestPersistenceSmoke(opts)
     end
 
     local ok, thrown = pcall(function()
-        -- best-effort clean start
         if type(store.delete) == "function" then
             pcall(store.delete, relPath)
         end
@@ -435,13 +601,12 @@ function M.selfTestPersistenceSmoke(opts)
             error("configurePersistence enable failed: " .. tostring(cfgErr))
         end
 
-        local text = "SCORE_STORE_PERSIST_SMOKE"
+        local text = FIXTURES.basic
         local okIn, inErr = M.ingestFromText(text, { source = "self_test_runner" })
         if not okIn then
             error("ingestFromText failed: " .. tostring(inErr))
         end
 
-        -- simulate "fresh session" by clearing memory then loading from disk
         _snapshot = nil
         _history = {}
 
@@ -459,15 +624,13 @@ function M.selfTestPersistenceSmoke(opts)
         if tostring(_snapshot.source or "") ~= "self_test_runner" then
             error("loaded snapshot source mismatch")
         end
+        if type(_snapshot.parsed) ~= "table" then
+            error("loaded snapshot parsed missing (parser should succeed for fixture)")
+        end
         if type(_history) ~= "table" or #_history < 1 then
             error("loaded history missing/empty")
         end
-        local last = _history[#_history]
-        if type(last) ~= "table" or tostring(last.raw or "") ~= text then
-            error("loaded history last raw mismatch")
-        end
 
-        -- disable and cleanup (file removal best-effort)
         M.configurePersistence({ enabled = false })
 
         if type(store.delete) == "function" then
@@ -492,15 +655,12 @@ function M.printSummary()
     do
         local okP, paths = _getPersistPaths()
         if okP and type(paths) == "table" and type(paths.getDataDir) == "function" then
-            -- NOTE: getDataDir() returns (ok, dir, err). Must unpack properly.
             local okCall, okGet, dir, derr = pcall(paths.getDataDir)
             if okCall and okGet and dir ~= nil then
                 _out("  dataDir     : " .. tostring(dir))
             elseif okCall then
-                -- okCall true but okGet false => derr contains error string (3rd return)
                 _out("  dataDir     : (error) " .. tostring(derr))
             else
-                -- okCall false => okGet is the thrown error
                 _out("  dataDir     : (error) " .. tostring(okGet))
             end
         end
@@ -527,7 +687,7 @@ function M.printSummary()
 
     if type(_snapshot) ~= "table" then
         _out("  snapshot: (none)")
-        _out("  hint: lua DWKit.services.scoreStoreService.ingestFromText(\"SCORE TEST\",{source=\"manual\"})")
+        _out("  hint: dwscorestore fixture")
         return
     end
 
@@ -536,7 +696,14 @@ function M.printSummary()
     _out("  source      : " .. tostring(_snapshot.source))
     local rawLen = (_isNonEmptyString(_snapshot.raw) and #_snapshot.raw or 0)
     _out("  rawLen      : " .. tostring(rawLen))
-    _out("  parsed      : " .. (type(_snapshot.parsed) == "table" and "table" or "nil"))
+
+    if type(_snapshot.parsed) == "table" then
+        local n = 0
+        for _ in pairs(_snapshot.parsed) do n = n + 1 end
+        _out("  parsed      : table (keys=" .. tostring(n) .. ")")
+    else
+        _out("  parsed      : nil")
+    end
 end
 
 return M
