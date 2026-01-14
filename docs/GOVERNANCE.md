@@ -22,5 +22,8 @@ dwkit is built as a personal, product-grade Mudlet kit with a strict internal de
 ## Contributions
 This is a personal repo. PRs are not accepted. Please fork.
 
-## Full standard
-The full internal standard exists but is not published in this repository.
+## Full standard (authoritative)
+The full internal development standard is published in this repository:
+- docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.10.md
+
+This file is the authoritative source of truth for governance, workflow, contracts, and verification policy for this project.
