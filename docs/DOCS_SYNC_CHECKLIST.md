@@ -1,4 +1,4 @@
-# Docs Sync Checklist (Required)
+﻿# Docs Sync Checklist (Required)
 
 This document defines the REQUIRED docs-to-runtime sync checks for dwkit.
 It exists to prevent drift between:
@@ -94,8 +94,23 @@ Verification (minimum):
 - dwevent <EventName>
 - Confirm runtime output reflects the docs registry.
 
+### 5) Chat handoff template sync (docs-only; required for continuity)
+When modifying:
+- docs/Chat_Handoff_Pack_Template_v1.0.md
+
+You MUST also verify/update (docs-only cross-check):
+- Ensure it still matches the current internal governance standard’s Section V (Chat Handoff Pack) structure:
+  - Required fields present (identity, objective, scope, verified working, known issues, last change, verification results, next steps, required artifacts).
+  - Full-File Return workflow dump commands are correct for PowerShell.
+  - Mudlet input line paste safety reminder remains correct (single-line lua do ... end).
+
+Verification (minimum):
+- Confirm the template is copy/paste ready (no placeholders missing that would block a handoff).
+- Confirm the dump commands match your current repo paths and common workflow.
+
 ## Definition of Done (Docs Sync)
 A docs change is DONE only when:
 - The corresponding runtime surfaces display the same invocation variants/syntax/examples/notes (where applicable)
 - Any contract-affecting observable output matches the spec (where applicable)
 - The change set contains BOTH docs and runtime updates when required (no split PRs that create drift)
+
