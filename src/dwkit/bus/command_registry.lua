@@ -379,10 +379,14 @@ local REG = {
             command     = "dwscorestore",
             aliases     = {},
             ownerModule = "dwkit.services.command_aliases",
-            description = "Prints ScoreStoreService snapshot summary (best-effort, SAFE).",
-            syntax      = "dwscorestore  (or: lua DWKit.services.scoreStoreService.printSummary())",
+            description = "Shows and manages ScoreStoreService state + persistence (SAFE).",
+            syntax      =
+            "dwscorestore [status|persist on|off|status|fixture [basic]|clear|wipe [disk]|reset [disk]]  (or: lua DWKit.services.scoreStoreService.printSummary())",
             examples    = {
                 "dwscorestore",
+                "dwscorestore status",
+                "dwscorestore persist status",
+                "dwscorestore fixture basic",
                 "lua DWKit.services.scoreStoreService.ingestFromText(\"SCORE TEST\",{source=\"manual\"})",
                 "lua DWKit.services.scoreStoreService.printSummary()",
             },
@@ -391,8 +395,9 @@ local REG = {
             sendsToGame = false,
             notes       = {
                 "Backed by dwkit.services.score_store_service (ScoreStoreService).",
+                "Subcommands are implemented by dwkit.services.command_aliases and call ScoreStoreService methods (still SAFE; no gameplay commands sent).",
+                "Score snapshots may be ingested via passive capture installed during loader.init (capture is SAFE; it only reacts to your score output).",
                 "In case the alias is stale/cached, you can use the lua fallback above after loader init.",
-                "Ingest is manual-only and does not send gameplay commands.",
             },
         },
 

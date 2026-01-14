@@ -73,6 +73,15 @@ Quiet-mode behavior (required when mode=quiet):
 - Registry checks MUST NOT print full registry listing blocks (no list spam).
 - Verbose mode may include list blocks, but must still print counts and PASS/FAIL lines.
 
+5.5) Optional: Persistence Smoke Checks (SAFE)
+If persistence subsystems exist, dwtest MAY include a persistence smoke checks section (SAFE) to verify:
+- persist store save/load/delete (self-test envelope)
+- ScoreStore persistence smoke (SAFE)
+
+Notes:
+- This section is optional and may be omitted until the persistence subsystem exists.
+- If present, it should appear after Registry Checks and before Loader / Boot Wiring Checks.
+
 6) Loader / Boot Wiring Checks (SAFE)
 - Reports PASS/FAIL for:
   - loader init status known
