@@ -1,4 +1,4 @@
-﻿# Chat Handoff Pack Template v1.0 (DWKit)
+# Chat Handoff Pack Template v1.0 (DWKit)
 
 Purpose:
 This file is a copy/paste template to carry verified facts and required artifacts into a new chat,
