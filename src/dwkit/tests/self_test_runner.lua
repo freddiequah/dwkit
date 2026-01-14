@@ -1,13 +1,14 @@
 -- #########################################################################
 -- Module Name : dwkit.tests.self_test_runner
 -- Owner       : Tests
--- Version     : v2026-01-13E
+-- Version     : v2026-01-14C
 -- Purpose     :
 --   - Provide a SAFE, manual-only self-test runner.
 --   - Prints PASS/FAIL summary + compatibility baseline output.
 --   - Prints canonical identity info (packageId/eventPrefix/dataFolderName/versionTagStyle).
 --   - Prints core surfaces + registries + loader/boot wiring checks.
 --   - Validates Event Registry contract (SAFE) to detect registry drift early.
+--   - Validates Command Registry contract (SAFE) to detect registry drift early.
 --   - Detects docs vs runtime registry version drift early (Objective D1).
 --   - Includes SAFE persistence smoke checks (selftest-only files; cleanup best-effort).
 --   - DOES NOT send gameplay commands.
@@ -35,7 +36,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-13E"
+M.VERSION = "v2026-01-14C"
 
 -- -------------------------
 -- Objective D1: Registry version drift locks
@@ -728,6 +729,56 @@ function M.run(opts)
         else
             _lineCheck(false, "command registry module version present", "getModuleVersion() missing")
             check("command registry module version present", false, "getModuleVersion() missing")
+        end
+
+        -- NEW: Command registry contract validation (strict), bounded output
+        if type(cmdReg.validateAll) == "function" then
+            local okV, passOrErr = _safecall(cmdReg.validateAll, { strict = true })
+            if okV then
+                local pass = (passOrErr == true)
+                if pass then
+                    _lineCheck(true, "command registry contract valid", "validateAll(strict)=PASS")
+                    check("command registry contract valid", true, "validateAll(strict)=PASS")
+                else
+                    local ok2, p, issues = pcall(cmdReg.validateAll, { strict = true })
+                    if ok2 and p == false and type(issues) == "table" then
+                        _lineCheck(false, "command registry contract valid",
+                            "validateAll(strict)=FAIL issues=" .. tostring(#issues))
+                        check("command registry contract valid", false, "issues=" .. tostring(#issues))
+
+                        if not quiet then
+                            _out("  details:")
+                            local cap = 10
+                            local shown = 0
+                            for _, it in ipairs(issues) do
+                                shown = shown + 1
+                                if shown > cap then
+                                    _out("    - (more issues omitted; cap=" .. tostring(cap) .. ")")
+                                    break
+                                end
+
+                                if type(it) == "table" then
+                                    local n = tostring(it.name or it.command or "(unknown)")
+                                    local e = tostring(it.error or it.reason or "(no error)")
+                                    _out("    - " .. n .. " :: " .. e)
+                                else
+                                    _out("    - " .. tostring(it))
+                                end
+                            end
+                        end
+                    else
+                        _lineCheck(false, "command registry contract valid",
+                            "validateAll(strict)=FAIL (issues unavailable)")
+                        check("command registry contract valid", false, "issues unavailable")
+                    end
+                end
+            else
+                _lineCheck(false, "command registry contract valid", "validateAll() error: " .. tostring(passOrErr))
+                check("command registry contract valid", false, "validateAll() error: " .. tostring(passOrErr))
+            end
+        else
+            _lineCheck(false, "command registry contract validator available", "validateAll() missing")
+            check("command registry contract validator available", false, "validateAll() missing")
         end
 
         local expectedSafe = {
