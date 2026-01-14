@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.tests.self_test_runner
 -- Owner       : Tests
--- Version     : v2026-01-14C
+-- Version     : v2026-01-14E
 -- Purpose     :
 --   - Provide a SAFE, manual-only self-test runner.
 --   - Prints PASS/FAIL summary + compatibility baseline output.
@@ -36,7 +36,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-14C"
+M.VERSION = "v2026-01-14E"
 
 -- -------------------------
 -- Objective D1: Registry version drift locks
@@ -731,50 +731,106 @@ function M.run(opts)
             check("command registry module version present", false, "getModuleVersion() missing")
         end
 
-        -- NEW: Command registry contract validation (strict), bounded output
+        -- NEW: Command registry contract validation (strict + non-strict), bounded output
         if type(cmdReg.validateAll) == "function" then
-            local okV, passOrErr = _safecall(cmdReg.validateAll, { strict = true })
-            if okV then
-                local pass = (passOrErr == true)
-                if pass then
-                    _lineCheck(true, "command registry contract valid", "validateAll(strict)=PASS")
-                    check("command registry contract valid", true, "validateAll(strict)=PASS")
-                else
-                    local ok2, p, issues = pcall(cmdReg.validateAll, { strict = true })
-                    if ok2 and p == false and type(issues) == "table" then
-                        _lineCheck(false, "command registry contract valid",
-                            "validateAll(strict)=FAIL issues=" .. tostring(#issues))
-                        check("command registry contract valid", false, "issues=" .. tostring(#issues))
+            -- A) strict=true, requireDescription=true
+            do
+                local optsV = { strict = true, requireDescription = true }
+                local okV, passOrErr = _safecall(cmdReg.validateAll, optsV)
+                if okV then
+                    local pass = (passOrErr == true)
+                    if pass then
+                        _lineCheck(true, "command registry contract valid (strict)", "validateAll(strict)=PASS")
+                        check("command registry contract valid (strict)", true, "validateAll(strict)=PASS")
+                    else
+                        local ok2, p, issues = pcall(cmdReg.validateAll, optsV)
+                        if ok2 and p == false and type(issues) == "table" then
+                            _lineCheck(false, "command registry contract valid (strict)",
+                                "validateAll(strict)=FAIL issues=" .. tostring(#issues))
+                            check("command registry contract valid (strict)", false, "issues=" .. tostring(#issues))
 
-                        if not quiet then
-                            _out("  details:")
-                            local cap = 10
-                            local shown = 0
-                            for _, it in ipairs(issues) do
-                                shown = shown + 1
-                                if shown > cap then
-                                    _out("    - (more issues omitted; cap=" .. tostring(cap) .. ")")
-                                    break
-                                end
+                            if not quiet then
+                                _out("  details:")
+                                local cap = 10
+                                local shown = 0
+                                for _, it in ipairs(issues) do
+                                    shown = shown + 1
+                                    if shown > cap then
+                                        _out("    - (more issues omitted; cap=" .. tostring(cap) .. ")")
+                                        break
+                                    end
 
-                                if type(it) == "table" then
-                                    local n = tostring(it.name or it.command or "(unknown)")
-                                    local e = tostring(it.error or it.reason or "(no error)")
-                                    _out("    - " .. n .. " :: " .. e)
-                                else
-                                    _out("    - " .. tostring(it))
+                                    if type(it) == "table" then
+                                        local n = tostring(it.name or it.command or "(unknown)")
+                                        local e = tostring(it.error or it.reason or "(no error)")
+                                        _out("    - " .. n .. " :: " .. e)
+                                    else
+                                        _out("    - " .. tostring(it))
+                                    end
                                 end
                             end
+                        else
+                            _lineCheck(false, "command registry contract valid (strict)",
+                                "validateAll(strict)=FAIL (issues unavailable)")
+                            check("command registry contract valid (strict)", false, "issues unavailable")
                         end
-                    else
-                        _lineCheck(false, "command registry contract valid",
-                            "validateAll(strict)=FAIL (issues unavailable)")
-                        check("command registry contract valid", false, "issues unavailable")
                     end
+                else
+                    _lineCheck(false, "command registry contract valid (strict)",
+                        "validateAll() error: " .. tostring(passOrErr))
+                    check("command registry contract valid (strict)", false,
+                        "validateAll() error: " .. tostring(passOrErr))
                 end
-            else
-                _lineCheck(false, "command registry contract valid", "validateAll() error: " .. tostring(passOrErr))
-                check("command registry contract valid", false, "validateAll() error: " .. tostring(passOrErr))
+            end
+
+            -- B) strict=false, requireDescription=true
+            do
+                local optsV = { strict = false, requireDescription = true }
+                local okV, passOrErr = _safecall(cmdReg.validateAll, optsV)
+                if okV then
+                    local pass = (passOrErr == true)
+                    if pass then
+                        _lineCheck(true, "command registry contract valid (non-strict)", "validateAll(non-strict)=PASS")
+                        check("command registry contract valid (non-strict)", true, "validateAll(non-strict)=PASS")
+                    else
+                        local ok2, p, issues = pcall(cmdReg.validateAll, optsV)
+                        if ok2 and p == false and type(issues) == "table" then
+                            _lineCheck(false, "command registry contract valid (non-strict)",
+                                "validateAll(non-strict)=FAIL issues=" .. tostring(#issues))
+                            check("command registry contract valid (non-strict)", false, "issues=" .. tostring(#issues))
+
+                            if not quiet then
+                                _out("  details:")
+                                local cap = 10
+                                local shown = 0
+                                for _, it in ipairs(issues) do
+                                    shown = shown + 1
+                                    if shown > cap then
+                                        _out("    - (more issues omitted; cap=" .. tostring(cap) .. ")")
+                                        break
+                                    end
+
+                                    if type(it) == "table" then
+                                        local n = tostring(it.name or it.command or "(unknown)")
+                                        local e = tostring(it.error or it.reason or "(no error)")
+                                        _out("    - " .. n .. " :: " .. e)
+                                    else
+                                        _out("    - " .. tostring(it))
+                                    end
+                                end
+                            end
+                        else
+                            _lineCheck(false, "command registry contract valid (non-strict)",
+                                "validateAll(non-strict)=FAIL (issues unavailable)")
+                            check("command registry contract valid (non-strict)", false, "issues unavailable")
+                        end
+                    end
+                else
+                    _lineCheck(false, "command registry contract valid (non-strict)",
+                        "validateAll() error: " .. tostring(passOrErr))
+                    check("command registry contract valid (non-strict)", false,
+                        "validateAll() error: " .. tostring(passOrErr))
+                end
             end
         else
             _lineCheck(false, "command registry contract validator available", "validateAll() missing")
