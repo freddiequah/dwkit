@@ -1,5 +1,2 @@
-﻿# Keep hooks compatible with /bin/sh
 .githooks/* text eol=lf
-
-# Keep docs stable across machines/editors
 docs/*.md text eol=lf
