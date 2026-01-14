@@ -98,7 +98,7 @@ Notes:
   - internal (future ui/services/tests)
 - Notes:
   - SAFE internal event (no gameplay commands).
-  - Manual-only: emitted only when service ingest API is invoked.
+  - Emitted when ScoreStoreService ingest API is invoked (may be triggered by passive capture during loader.init, or manual/fixture ingestion).
   - Parsing is optional; raw capture is the stable core contract.
 
 ### DWKit:Service:SkillRegistry:Updated

@@ -374,19 +374,23 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 - Command: dwscorestore
 - Aliases: (none)
 - Owner Module: dwkit.services.command_aliases
-- Description: Prints ScoreStoreService snapshot summary (best-effort, SAFE).
-- Syntax: dwscorestore  (or: lua DWKit.services.scoreStoreService.printSummary())
+- Description: Shows and manages ScoreStoreService state + persistence (SAFE).
+- Syntax: dwscorestore [status|persist on|off|status|fixture [basic]|clear|wipe [disk]|reset [disk]]
+  (or: lua DWKit.services.scoreStoreService.printSummary())
 - Safety: SAFE
 - Mode: manual
 - SendsToGame: NO
 - Examples:
   - dwscorestore
+  - dwscorestore status
+  - dwscorestore persist status
+  - dwscorestore fixture basic
   - lua DWKit.services.scoreStoreService.ingestFromText("SCORE TEST",{source="manual"})
-  - lua DWKit.services.scoreStoreService.printSummary()
 - Notes:
   - Backed by dwkit.services.score_store_service (ScoreStoreService).
+  - Subcommands are implemented by dwkit.services.command_aliases and call ScoreStoreService methods (still SAFE; no gameplay commands sent).
+  - Score snapshots may be ingested via passive capture installed during loader.init (capture is SAFE; it only reacts to your score output).
   - In case the alias is stale/cached, you can use the lua fallback above after loader init.
-  - Ingest is manual-only and does not send gameplay commands.
 
 ### dwservices
 - Command: dwservices
