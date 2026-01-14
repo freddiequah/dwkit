@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-14D
+-- Version     : v2026-01-14F
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -38,7 +38,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-14D"
+M.VERSION = "v2026-01-14F"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -445,6 +445,25 @@ local REG = {
             notes       = {
                 "Implemented as a Mudlet alias (local only).",
                 "Backed by DWKit.cmd.help(name).",
+            },
+        },
+
+        dwrelease = {
+            command     = "dwrelease",
+            aliases     = {},
+            ownerModule = "dwkit.services.command_aliases",
+            description = "Prints a bounded release checklist + version pointers + tag workflow reminder (SAFE).",
+            syntax      = "dwrelease",
+            examples    = {
+                "dwrelease",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "SAFE/manual only: prints guidance, does not run git or create tags.",
+                "Intended as a copy/paste friendly reminder for PR + tag discipline.",
+                "Typed alias implemented by dwkit.services.command_aliases.",
             },
         },
     }
@@ -866,3 +885,4 @@ function M.validateAll(opts)
 end
 
 return M
+

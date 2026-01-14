@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-13H
+-- Version     : v2026-01-14F
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -23,6 +23,7 @@
 --       * dweventsub <EventName>
 --       * dweventunsub <EventName|all>
 --       * dweventlog [n]
+--       * dwrelease
 --   - Calls into DWKit.cmd (dwkit.bus.command_registry), DWKit.test, runtimeBaseline, identity,
 --     event registry surface, and SAFE spine services (presence/action/skills/scoreStore).
 --   - DOES NOT send gameplay commands.
@@ -37,7 +38,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-13H"
+M.VERSION = "v2026-01-14F"
 
 local STATE = {
     installed = false,
@@ -63,6 +64,8 @@ local STATE = {
         dweventsub   = nil,
         dweventunsub = nil,
         dweventlog   = nil,
+
+        dwrelease    = nil,
     },
     lastError = nil,
 
@@ -596,6 +599,75 @@ local function _getScoreStoreServiceBestEffort()
 end
 
 -- -------------------------
+-- Release checklist (SAFE, bounded)
+-- -------------------------
+local function _printReleaseChecklist()
+    _out("[DWKit Release] checklist (dwrelease)")
+    _out("  NOTE: SAFE + manual-only. This does not run git/gh commands.")
+    _out("")
+
+    _out("== versions (best-effort) ==")
+    _out("")
+    _printVersionSummary()
+    _out("")
+
+    _out("== PR workflow (PowerShell + gh) ==")
+    _out("")
+    _out("  1) Start clean:")
+    _out("     - git checkout main")
+    _out("     - git pull")
+    _out("     - git status -sb")
+    _out("")
+    _out("  2) Create topic branch:")
+    _out("     - git checkout -b <topic/name>")
+    _out("")
+    _out("  3) Commit changes (scope small):")
+    _out("     - git status")
+    _out("     - git add <paths...>")
+    _out("     - git commit -m \"<message>\"")
+    _out("")
+    _out("  4) Push branch:")
+    _out("     - git push --set-upstream origin <topic/name>")
+    _out("")
+    _out("  5) Create PR:")
+    _out("     - gh pr create --base main --head <topic/name> --title \"<title>\" --body \"<body>\"")
+    _out("")
+    _out("  6) Review + merge (preferred: squash + delete branch):")
+    _out("     - gh pr status")
+    _out("     - gh pr view")
+    _out("     - gh pr diff")
+    _out("     - gh pr checks    (if configured)")
+    _out("     - gh pr merge <PR_NUMBER> --squash --delete-branch")
+    _out("")
+    _out("  7) Sync local main AFTER merge:")
+    _out("     - git checkout main")
+    _out("     - git pull")
+    _out("     - git log -1 --oneline --decorate")
+    _out("")
+
+    _out("== release tagging discipline (annotated tag on main HEAD) ==")
+    _out("")
+    _out("  1) Verify main HEAD is correct:")
+    _out("     - git checkout main")
+    _out("     - git pull")
+    _out("     - git log -1 --oneline --decorate")
+    _out("")
+    _out("  2) Create annotated tag (after merge):")
+    _out("     - git tag -a vYYYY-MM-DDX -m \"<tag message>\"")
+    _out("     - git push origin vYYYY-MM-DDX")
+    _out("")
+    _out("  3) Verify tag targets origin/main:")
+    _out("     - git rev-parse --verify origin/main")
+    _out("     - git rev-parse --verify 'vYYYY-MM-DDX^{}'")
+    _out("     - (expected: hashes match)")
+    _out("")
+    _out("  4) If you tagged wrong commit (fix safely):")
+    _out("     - git tag -d vYYYY-MM-DDX")
+    _out("     - git push origin :refs/tags/vYYYY-MM-DDX")
+    _out("     - (then recreate on correct main HEAD)")
+end
+
+-- -------------------------
 -- Event diagnostics harness (SAFE)
 -- -------------------------
 local function _diag()
@@ -916,6 +988,8 @@ function M.getState()
             dweventsub = STATE.aliasIds.dweventsub,
             dweventunsub = STATE.aliasIds.dweventunsub,
             dweventlog = STATE.aliasIds.dweventlog,
+
+            dwrelease = STATE.aliasIds.dwrelease,
         },
         eventDiag = {
             maxLog = d.maxLog,
@@ -972,6 +1046,7 @@ function M.uninstall()
         ids.dwevents, ids.dwevent, ids.dwboot,
         ids.dwservices, ids.dwpresence, ids.dwactions, ids.dwskills, ids.dwscorestore,
         ids.dweventtap, ids.dweventsub, ids.dweventunsub, ids.dweventlog,
+        ids.dwrelease,
     }
 
     local allOk = true
@@ -1353,7 +1428,13 @@ function M.install(opts)
         _printDiagBundle()
     end)
 
-    local all = { id1, id2, id3, id4, id5, id6, id7, id8, id9, id10, id11, id12, id13, id14, id15, id16, id17, id18, id19 }
+    local dwreleasePattern = [[^dwrelease\s*$]]
+    local id20 = _mkAlias(dwreleasePattern, function()
+        _printReleaseChecklist()
+    end)
+
+    local all = { id1, id2, id3, id4, id5, id6, id7, id8, id9, id10, id11, id12, id13, id14, id15, id16, id17, id18, id19,
+        id20 }
     for _, id in ipairs(all) do
         if not id then
             STATE.lastError = "Failed to create one or more aliases"
@@ -1388,13 +1469,14 @@ function M.install(opts)
     STATE.aliasIds.dweventlog   = id18
 
     STATE.aliasIds.dwdiag       = id19
+    STATE.aliasIds.dwrelease    = id20
 
     STATE.installed             = true
     STATE.lastError             = nil
 
     if not opts.quiet then
         _out(
-            "[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion, dwevents, dwevent, dwboot, dwservices, dwpresence, dwactions, dwskills, dwscorestore, dweventtap, dweventsub, dweventunsub, dweventlog, dwdiag")
+            "[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion, dwevents, dwevent, dwboot, dwservices, dwpresence, dwactions, dwskills, dwscorestore, dweventtap, dweventsub, dweventunsub, dweventlog, dwdiag, dwrelease")
     end
 
     return true, nil
