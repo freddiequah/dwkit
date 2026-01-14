@@ -97,3 +97,7 @@ release/
 *.env
 .env
 .env.*
+
+# local recovery/scratch
+docs/_RECOVER_*.txt
+
