@@ -1,4 +1,4 @@
-# Docs Sync Checklist (Required)
+﻿# Docs Sync Checklist (Required)
 
 This document defines the REQUIRED docs-to-runtime sync checks for dwkit.
 It exists to prevent drift between:
@@ -9,6 +9,26 @@ This is a documentation-only checklist. It does not define new runtime behavior.
 
 ## Rule (No Drift)
 If any item listed below changes in docs, the corresponding runtime file(s) MUST be updated in the SAME change set (same branch/PR) so that docs and runtime remain consistent.
+
+## Docs-only PR verification policy (required)
+A docs-only PR is a change set where `git diff` shows ONLY `docs/*` changes.
+
+Minimum verification for docs-only PRs:
+1) Confirm scope is truly docs-only:
+   - `git diff --stat` shows only `docs/*`
+2) Confirm no encoding corruption / mojibake:
+   - `Select-String -Path .\docs\*.md -Pattern '[^\x00-\x7F]'`
+     - Expected: no matches
+3) Confirm files remain copy/paste friendly:
+   - Headings render normally (no hidden leading characters)
+   - Code fences are properly closed (if present)
+4) If the docs change is a contract that must match runtime output (registry/spec docs),
+   the corresponding runtime sync checklist item below still applies (no drift rule).
+
+Notes:
+- Mudlet runtime verification is NOT required for purely editorial docs changes.
+- Mudlet runtime verification IS required if you changed a contract doc whose output must match runtime surfaces
+  (for example: Command Registry, Self-Test Runner spec, Event Registry when runtime-visible).
 
 ## Checklist
 
@@ -99,7 +119,7 @@ When modifying:
 - docs/Chat_Handoff_Pack_Template_v1.0.md
 
 You MUST also verify/update (docs-only cross-check):
-- Ensure it still matches the current internal governance standard’s Section V (Chat Handoff Pack) structure:
+- Ensure it still matches the current internal governance standard's Section V (Chat Handoff Pack) structure:
   - Required fields present (identity, objective, scope, verified working, known issues, last change, verification results, next steps, required artifacts).
   - Full-File Return workflow dump commands are correct for PowerShell.
   - Mudlet input line paste safety reminder remains correct (single-line lua do ... end).
