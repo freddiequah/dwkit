@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-01-13L
+-- Version     : v2026-01-14G
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -83,6 +83,37 @@ function Loader.init()
     else
         DWKit.persist.store = nil
         DWKit._persistStoreLoadError = tostring(storeOrErr)
+    end
+
+    -- ---------------------------------------------------------------------
+    -- Config surfaces (SAFE). Guarded. No writes during load.
+    -- ---------------------------------------------------------------------
+    DWKit.config = DWKit.config or {}
+
+    local okGui, guiOrErr = pcall(require, "dwkit.config.gui_settings")
+    if okGui and type(guiOrErr) == "table" then
+        DWKit.config.guiSettings = guiOrErr
+        DWKit._guiSettingsLoadError = nil
+
+        -- Safe read-only load (missing file => defaults, no save)
+        if type(guiOrErr.load) == "function" then
+            local okLoad, loadOkOrErr = pcall(guiOrErr.load, { quiet = true })
+            if okLoad and loadOkOrErr == true then
+                DWKit._guiSettingsInitLoaded = true
+                DWKit._guiSettingsInitLoadError = nil
+            else
+                DWKit._guiSettingsInitLoaded = false
+                DWKit._guiSettingsInitLoadError = tostring(loadOkOrErr)
+            end
+        else
+            DWKit._guiSettingsInitLoaded = false
+            DWKit._guiSettingsInitLoadError = "guiSettings.load() missing"
+        end
+    else
+        DWKit.config.guiSettings = nil
+        DWKit._guiSettingsLoadError = tostring(guiOrErr)
+        DWKit._guiSettingsInitLoaded = false
+        DWKit._guiSettingsInitLoadError = "guiSettings require failed"
     end
 
     -- Attach test surface (SAFE, manual-only). Guarded to avoid hard failure.

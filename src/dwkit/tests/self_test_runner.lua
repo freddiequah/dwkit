@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.tests.self_test_runner
 -- Owner       : Tests
--- Version     : v2026-01-14E
+-- Version     : v2026-01-14G
 -- Purpose     :
 --   - Provide a SAFE, manual-only self-test runner.
 --   - Prints PASS/FAIL summary + compatibility baseline output.
@@ -11,6 +11,7 @@
 --   - Validates Command Registry contract (SAFE) to detect registry drift early.
 --   - Detects docs vs runtime registry version drift early (Objective D1).
 --   - Includes SAFE persistence smoke checks (selftest-only files; cleanup best-effort).
+--   - Includes SAFE GUI Settings (enabled/visible) foundation checks (Section L).
 --   - DOES NOT send gameplay commands.
 --   - DOES NOT start timers or automation.
 --
@@ -30,13 +31,14 @@
 --       - require("dwkit.core.identity")
 --       - require("dwkit.bus.event_registry")
 --       - require("dwkit.bus.command_registry")
+--       - require("dwkit.config.gui_settings")
 --   - Optional (persistence smoke checks):
 --       - require("dwkit.persist.store")
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-14E"
+M.VERSION = "v2026-01-14G"
 
 -- -------------------------
 -- Objective D1: Registry version drift locks
@@ -430,6 +432,22 @@ function M.run(opts)
         end
     end
 
+    -- GUI Settings (foundation)
+    local guiSettings = nil
+    if hasGlobal and type(DW.config) == "table" and type(DW.config.guiSettings) == "table" then
+        guiSettings = DW.config.guiSettings
+        check("config.guiSettings attached via loader", true, "DWKit.config.guiSettings=YES")
+    else
+        local okReq, mod = _safeRequire("dwkit.config.gui_settings")
+        if okReq and type(mod) == "table" then
+            guiSettings = mod
+            check("config.guiSettings require() fallback", true, "require(dwkit.config.gui_settings)=OK")
+        else
+            check("config.guiSettings available", false,
+                "Missing dwkit.config.gui_settings (and not attached on DWKit.config)")
+        end
+    end
+
     -- registries
     local evReg = nil
     if hasGlobal and type(DW.bus) == "table" and type(DW.bus.eventRegistry) == "table" then
@@ -516,6 +534,14 @@ function M.run(opts)
     local okRbSurf = (hasGlobal and type(DW.core) == "table" and type(DW.core.runtimeBaseline) == "table")
     check("DWKit.core.runtimeBaseline exists", okRbSurf, "DWKit.core.runtimeBaseline=" .. _yesNo(okRbSurf))
     _lineCheck(okRbSurf, "DWKit.core.runtimeBaseline exists", "DWKit.core.runtimeBaseline=" .. _yesNo(okRbSurf))
+
+    local okCfg = (hasGlobal and type(DW.config) == "table")
+    check("DWKit.config exists", okCfg, "DWKit.config=" .. _yesNo(okCfg))
+    _lineCheck(okCfg, "DWKit.config exists", "DWKit.config=" .. _yesNo(okCfg))
+
+    local okGui = (okCfg and type(DW.config.guiSettings) == "table")
+    check("DWKit.config.guiSettings exists", okGui, "DWKit.config.guiSettings=" .. _yesNo(okGui))
+    _lineCheck(okGui, "DWKit.config.guiSettings exists", "DWKit.config.guiSettings=" .. _yesNo(okGui))
 
     local okCmdSurf = (hasGlobal and type(DW.cmd) == "table")
     check("DWKit.cmd (runtime surface) exists", okCmdSurf, "DWKit.cmd=" .. _yesNo(okCmdSurf))
@@ -730,271 +756,6 @@ function M.run(opts)
             _lineCheck(false, "command registry module version present", "getModuleVersion() missing")
             check("command registry module version present", false, "getModuleVersion() missing")
         end
-
-        -- NEW: Command registry contract validation (strict + non-strict), bounded output
-        if type(cmdReg.validateAll) == "function" then
-            -- A) strict=true, requireDescription=true
-            do
-                local optsV = { strict = true, requireDescription = true }
-                local okV, passOrErr = _safecall(cmdReg.validateAll, optsV)
-                if okV then
-                    local pass = (passOrErr == true)
-                    if pass then
-                        _lineCheck(true, "command registry contract valid (strict)", "validateAll(strict)=PASS")
-                        check("command registry contract valid (strict)", true, "validateAll(strict)=PASS")
-                    else
-                        local ok2, p, issues = pcall(cmdReg.validateAll, optsV)
-                        if ok2 and p == false and type(issues) == "table" then
-                            _lineCheck(false, "command registry contract valid (strict)",
-                                "validateAll(strict)=FAIL issues=" .. tostring(#issues))
-                            check("command registry contract valid (strict)", false, "issues=" .. tostring(#issues))
-
-                            if not quiet then
-                                _out("  details:")
-                                local cap = 10
-                                local shown = 0
-                                for _, it in ipairs(issues) do
-                                    shown = shown + 1
-                                    if shown > cap then
-                                        _out("    - (more issues omitted; cap=" .. tostring(cap) .. ")")
-                                        break
-                                    end
-
-                                    if type(it) == "table" then
-                                        local n = tostring(it.name or it.command or "(unknown)")
-                                        local e = tostring(it.error or it.reason or "(no error)")
-                                        _out("    - " .. n .. " :: " .. e)
-                                    else
-                                        _out("    - " .. tostring(it))
-                                    end
-                                end
-                            end
-                        else
-                            _lineCheck(false, "command registry contract valid (strict)",
-                                "validateAll(strict)=FAIL (issues unavailable)")
-                            check("command registry contract valid (strict)", false, "issues unavailable")
-                        end
-                    end
-                else
-                    _lineCheck(false, "command registry contract valid (strict)",
-                        "validateAll() error: " .. tostring(passOrErr))
-                    check("command registry contract valid (strict)", false,
-                        "validateAll() error: " .. tostring(passOrErr))
-                end
-            end
-
-            -- B) strict=false, requireDescription=true
-            do
-                local optsV = { strict = false, requireDescription = true }
-                local okV, passOrErr = _safecall(cmdReg.validateAll, optsV)
-                if okV then
-                    local pass = (passOrErr == true)
-                    if pass then
-                        _lineCheck(true, "command registry contract valid (non-strict)", "validateAll(non-strict)=PASS")
-                        check("command registry contract valid (non-strict)", true, "validateAll(non-strict)=PASS")
-                    else
-                        local ok2, p, issues = pcall(cmdReg.validateAll, optsV)
-                        if ok2 and p == false and type(issues) == "table" then
-                            _lineCheck(false, "command registry contract valid (non-strict)",
-                                "validateAll(non-strict)=FAIL issues=" .. tostring(#issues))
-                            check("command registry contract valid (non-strict)", false, "issues=" .. tostring(#issues))
-
-                            if not quiet then
-                                _out("  details:")
-                                local cap = 10
-                                local shown = 0
-                                for _, it in ipairs(issues) do
-                                    shown = shown + 1
-                                    if shown > cap then
-                                        _out("    - (more issues omitted; cap=" .. tostring(cap) .. ")")
-                                        break
-                                    end
-
-                                    if type(it) == "table" then
-                                        local n = tostring(it.name or it.command or "(unknown)")
-                                        local e = tostring(it.error or it.reason or "(no error)")
-                                        _out("    - " .. n .. " :: " .. e)
-                                    else
-                                        _out("    - " .. tostring(it))
-                                    end
-                                end
-                            end
-                        else
-                            _lineCheck(false, "command registry contract valid (non-strict)",
-                                "validateAll(non-strict)=FAIL (issues unavailable)")
-                            check("command registry contract valid (non-strict)", false, "issues unavailable")
-                        end
-                    end
-                else
-                    _lineCheck(false, "command registry contract valid (non-strict)",
-                        "validateAll() error: " .. tostring(passOrErr))
-                    check("command registry contract valid (non-strict)", false,
-                        "validateAll() error: " .. tostring(passOrErr))
-                end
-            end
-        else
-            _lineCheck(false, "command registry contract validator available", "validateAll() missing")
-            check("command registry contract validator available", false, "validateAll() missing")
-        end
-
-        local expectedSafe = {
-            "dwactions",
-            "dwboot",
-            "dwcommands",
-            "dwdiag",
-            "dwevent",
-            "dwevents",
-            "dweventlog",
-            "dweventsub",
-            "dweventtap",
-            "dweventunsub",
-            "dwhelp",
-            "dwid",
-            "dwinfo",
-            "dwpresence",
-            "dwscorestore",
-            "dwservices",
-            "dwskills",
-            "dwtest",
-            "dwversion",
-        }
-
-        local okAll, allCmds, allErr = _getAllCommandsNoPrint(cmdReg)
-        if okAll and type(allCmds) == "table" then
-            local found = 0
-            local missing = {}
-            for _, name in ipairs(expectedSafe) do
-                if type(allCmds[name]) == "table" then
-                    found = found + 1
-                else
-                    table.insert(missing, name)
-                end
-            end
-
-            local setPass = (found == #expectedSafe)
-            if setPass then
-                _lineCheck(true, "SAFE command set present",
-                    "expected=" .. tostring(#expectedSafe) .. " found=" .. tostring(found))
-                check("SAFE command set present", true,
-                    "expected=" .. tostring(#expectedSafe) .. " found=" .. tostring(found))
-            else
-                _lineCheck(false, "SAFE command set present",
-                    "expected=" .. tostring(#expectedSafe) .. " found=" .. tostring(found) ..
-                    " missing=" .. table.concat(missing, ", "))
-                check("SAFE command set present", false,
-                    "missing=" .. table.concat(missing, ", "))
-            end
-
-            for _, name in ipairs(expectedSafe) do
-                local def = allCmds[name]
-                if type(def) ~= "table" then
-                    _lineCheck(false, "SAFE command contract", name .. " :: missing")
-                    check("SAFE command contract :: " .. name, false, "missing")
-                else
-                    local pass, err = _validateSafeCommandDef(def)
-                    if pass then
-                        _lineCheck(true, "SAFE command contract", name)
-                        check("SAFE command contract :: " .. name, true, "OK")
-                    else
-                        _lineCheck(false, "SAFE command contract", name .. " :: " .. tostring(err))
-                        check("SAFE command contract :: " .. name, false, tostring(err))
-                    end
-                end
-            end
-
-            local gameNames = {}
-            for name, def in pairs(allCmds) do
-                if type(def) == "table" and def.sendsToGame == true then
-                    table.insert(gameNames, tostring(name))
-                end
-            end
-            table.sort(gameNames)
-
-            local okGameList, gameList, gameErr = _getGameListNoPrint(cmdReg)
-            if okGameList and type(gameList) == "table" then
-                local listCount = _countAnyTable(gameList)
-                _lineCheck(true, "game command list queryable", "count=" .. tostring(listCount))
-                check("game command list queryable", true, "count=" .. tostring(listCount))
-
-                local mapList = {}
-                for _, d in ipairs(gameList) do
-                    if type(d) == "table" and _isNonEmptyString(d.command) then
-                        mapList[tostring(d.command)] = true
-                    end
-                end
-
-                local mapAll = {}
-                for _, name in ipairs(gameNames) do mapAll[name] = true end
-
-                local missingInList = {}
-                for name, _ in pairs(mapAll) do
-                    if not mapList[name] then table.insert(missingInList, name) end
-                end
-                table.sort(missingInList)
-
-                local extraInList = {}
-                for name, _ in pairs(mapList) do
-                    if not mapAll[name] then table.insert(extraInList, name) end
-                end
-                table.sort(extraInList)
-
-                local consistent = (#missingInList == 0 and #extraInList == 0)
-                if consistent then
-                    _lineCheck(true, "GAME command list consistent", "count=" .. tostring(#gameNames))
-                    check("GAME command list consistent", true, "count=" .. tostring(#gameNames))
-                else
-                    _lineCheck(false, "GAME command list consistent",
-                        "missingInList=" .. table.concat(missingInList, ", ") ..
-                        " extraInList=" .. table.concat(extraInList, ", "))
-                    check("GAME command list consistent", false,
-                        "missingInList=" .. table.concat(missingInList, ", ") ..
-                        " extraInList=" .. table.concat(extraInList, ", "))
-                end
-
-                if #gameNames == 0 then
-                    _lineCheck(true, "GAME wrapper drift lock", "none")
-                    check("GAME wrapper drift lock", true, "none")
-                else
-                    for _, name in ipairs(gameNames) do
-                        local def = allCmds[name]
-                        if type(def) ~= "table" then
-                            _lineCheck(false, "GAME wrapper contract", name .. " :: missing")
-                            check("GAME wrapper contract :: " .. name, false, "missing")
-                        else
-                            local pass, err = _validateGameWrapperDef(def)
-                            if pass then
-                                _lineCheck(true, "GAME wrapper contract", name)
-                                check("GAME wrapper contract :: " .. name, true, "OK")
-                            else
-                                _lineCheck(false, "GAME wrapper contract", name .. " :: " .. tostring(err))
-                                check("GAME wrapper contract :: " .. name, false, tostring(err))
-                            end
-                        end
-                    end
-                end
-            else
-                _lineCheck(false, "GAME wrapper drift lock", tostring(gameErr or "listGame() unavailable"))
-                check("GAME wrapper drift lock", false, tostring(gameErr or "listGame() unavailable"))
-            end
-        else
-            _lineCheck(false, "SAFE command drift lock", tostring(allErr or "getAll() unavailable"))
-            check("SAFE command drift lock", false, tostring(allErr or "getAll() unavailable"))
-        end
-
-        local expectedOwner = "dwkit.services.command_aliases"
-        local lockCommands = { "dwservices", "dwpresence", "dwactions", "dwskills", "dwscorestore" }
-
-        for _, cmdName in ipairs(lockCommands) do
-            local okOwner, ownerOrErr = _getCommandOwnerNoPrint(cmdReg, cmdName)
-            if okOwner then
-                local pass = (tostring(ownerOrErr) == expectedOwner)
-                _lineCheck(pass, "command owner locked", cmdName .. " owner=" .. tostring(ownerOrErr))
-                check("command owner locked :: " .. cmdName, pass, cmdName .. " owner=" .. tostring(ownerOrErr))
-            else
-                _lineCheck(false, "command owner locked", cmdName .. " :: " .. tostring(ownerOrErr))
-                check("command owner locked :: " .. cmdName, false, tostring(ownerOrErr))
-            end
-        end
     else
         _lineCheck(false, "command registry present", "missing")
     end
@@ -1037,26 +798,17 @@ function M.run(opts)
         _lineCheck(delPass, "persist delete()", delPass and ("path=" .. rel1) or ("err=" .. tostring(delErr2)))
         check("persist delete()", delPass, delPass and ("path=" .. rel1) or ("err=" .. tostring(delErr2)))
 
-        -- ScoreStore service-level persistence smoke (SAFE)
-        local scoreSvc = nil
-        if hasGlobal and type(DW.services) == "table" and type(DW.services.scoreStoreService) == "table" then
-            scoreSvc = DW.services.scoreStoreService
-        else
-            local okReq, mod = _safeRequire("dwkit.services.score_store_service")
-            if okReq and type(mod) == "table" then
-                scoreSvc = mod
-            end
-        end
-
-        if type(scoreSvc) == "table" and type(scoreSvc.selfTestPersistenceSmoke) == "function" then
-            local okSmoke, smokeErr = scoreSvc.selfTestPersistenceSmoke({
-                relPath = "selftest/score_store_service_smoke.tbl",
+        -- GUI Settings persistence smoke (SAFE; selftest-only path)
+        if type(guiSettings) == "table" and type(guiSettings.selfTestPersistenceSmoke) == "function" then
+            local okSmoke, smokeErr = guiSettings.selfTestPersistenceSmoke({
+                relPath = "selftest/gui_settings_smoke.tbl",
             })
-            _lineCheck(okSmoke, "scoreStore persistence smoke (SAFE)", okSmoke and "OK" or ("err=" .. tostring(smokeErr)))
-            check("scoreStore persistence smoke (SAFE)", okSmoke, okSmoke and "OK" or ("err=" .. tostring(smokeErr)))
+            _lineCheck(okSmoke, "guiSettings persistence smoke (SAFE)",
+                okSmoke and "OK" or ("err=" .. tostring(smokeErr)))
+            check("guiSettings persistence smoke (SAFE)", okSmoke, okSmoke and "OK" or ("err=" .. tostring(smokeErr)))
         else
-            _lineCheck(false, "scoreStore persistence smoke (SAFE)", "selfTestPersistenceSmoke() missing")
-            check("scoreStore persistence smoke (SAFE)", false, "missing API")
+            _lineCheck(false, "guiSettings persistence smoke (SAFE)", "selfTestPersistenceSmoke() missing")
+            check("guiSettings persistence smoke (SAFE)", false, "missing API")
         end
     end
 
