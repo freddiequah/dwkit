@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-13C
+-- Version     : v2026-01-14D
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -25,6 +25,7 @@
 --   - validateAll(opts?) -> boolean pass, table issues
 --     opts:
 --       - strict: boolean (default true)
+--       - requireDescription: boolean (default true)
 --   - count() -> number   (SAFE, no output)
 --   - has(name) -> boolean (SAFE, no output)
 --
@@ -37,7 +38,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-13C"
+M.VERSION = "v2026-01-14D"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -462,11 +463,14 @@ local function _isAllowedMode(s)
     return s == "manual" or s == "opt-in" or s == "auto"
 end
 
-local function _validateDef(def)
+local function _validateDef(def, opts)
+    opts = opts or {}
+    local requireDescription = (opts.requireDescription ~= false)
+
     if type(def) ~= "table" then return false, "def must be a table" end
     if not _isNonEmptyString(def.command) then return false, "missing/invalid: command" end
     if not _isNonEmptyString(def.ownerModule) then return false, "missing/invalid: ownerModule" end
-    if not _isNonEmptyString(def.description) then return false, "missing/invalid: description" end
+    if requireDescription and (not _isNonEmptyString(def.description)) then return false, "missing/invalid: description" end
     if not _isNonEmptyString(def.syntax) then return false, "missing/invalid: syntax" end
     if not _isNonEmptyString(def.safety) then return false, "missing/invalid: safety" end
     if not _isAllowedSafety(def.safety) then return false, "invalid: safety must be SAFE|COMBAT-SAFE|NOT SAFE" end
@@ -805,7 +809,7 @@ end
 
 -- Runtime-only registration (NOT persisted)
 function M.register(def)
-    local ok, err = _validateDef(def)
+    local ok, err = _validateDef(def, { requireDescription = true })
     if not ok then return false, err end
 
     local name = def.command
@@ -836,7 +840,7 @@ function M.validateAll(opts)
 
     for k, def in pairs(REG.commands) do
         local keyName = tostring(k or "")
-        local okDef, errDef = _validateDef(def)
+        local okDef, errDef = _validateDef(def, opts)
         if not okDef then
             table.insert(issues, _mkIssue(keyName, errDef))
         else
