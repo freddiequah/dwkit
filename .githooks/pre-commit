@@ -22,4 +22,13 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
+# Block UTF-8 BOM in .gitattributes
+if [ -f ".gitattributes" ]; then
+  sig=$(head -c 3 ".gitattributes" 2>/dev/null | od -An -t x1 | tr -d ' \n')
+  if [ "$sig" = "efbbbf" ]; then
+    echo "ERROR: UTF-8 BOM detected in .gitattributes (EF BB BF). Save as UTF-8 (no BOM) and retry." 1>&2
+    exit 1
+  fi
+fi
+
 exit 0
