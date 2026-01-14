@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-14H
+-- Version     : v2026-01-14J
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -11,6 +11,7 @@
 --       * dwid
 --       * dwversion
 --       * dwdiag
+--       * dwgui
 --       * dwevents [md]
 --       * dwevent <EventName>
 --       * dwboot
@@ -38,7 +39,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-14H"
+M.VERSION = "v2026-01-14J"
 
 local STATE = {
     installed = false,
@@ -599,7 +600,6 @@ local function _getScoreStoreServiceBestEffort()
     return nil
 end
 
-
 local function _getGuiSettingsBestEffort()
     if type(_G.DWKit) == "table" and type(_G.DWKit.config) == "table" and type(_G.DWKit.config.guiSettings) == "table" then
         return _G.DWKit.config.guiSettings
@@ -630,23 +630,33 @@ local function _printGuiStatusAndList(gs)
         _out("  lastError=" .. tostring(st.lastError))
     end
 
-    local okL, list = pcall(gs.list)
-    if not okL or type(list) ~= "table" then
+    local okL, uiMap = pcall(gs.list)
+    if not okL or type(uiMap) ~= "table" then
         _err("guiSettings.list failed")
         return
     end
 
     _out("")
     _out("[DWKit GUI] list (uiId -> enabled/visible)")
-    if #list == 0 then
+
+    local keys = _sortedKeys(uiMap)
+    if #keys == 0 then
         _out("  (none)")
         return
     end
-    for _, rec in ipairs(list) do
-        local id = tostring(rec.uiId or "")
-        local en = (rec.enabled == true) and "ON" or "OFF"
-        local vis = (rec.visible == true) and "ON" or ((rec.visible == false) and "OFF" or "(unset)")
-        _out("  - " .. id .. "  enabled=" .. en .. "  visible=" .. vis)
+
+    for _, uiId in ipairs(keys) do
+        local rec = uiMap[uiId]
+        local en = (type(rec) == "table" and rec.enabled == true) and "ON" or "OFF"
+        local vis = "(unset)"
+        if type(rec) == "table" then
+            if rec.visible == true then
+                vis = "ON"
+            elseif rec.visible == false then
+                vis = "OFF"
+            end
+        end
+        _out("  - " .. tostring(uiId) .. "  enabled=" .. en .. "  visible=" .. vis)
     end
 end
 
@@ -1481,96 +1491,95 @@ function M.install(opts)
         _printDiagBundle()
     end)
 
-    
-local dwguiPattern = [[^dwgui(?:\s+(status|list|enable|disable|visible))?(?:\s+(\S+))?(?:\s+(on|off))?\s*$]]
-local id20a = _mkAlias(dwguiPattern, function()
-    local gs = _getGuiSettingsBestEffort()
-    if type(gs) ~= "table" then
-        _err("DWKit.config.guiSettings not available. Run loader.init() first.")
-        return
-    end
-
-    -- ensure base load (best-effort); visible persistence stays as-is unless visible subcommand is used
-    if type(gs.load) == "function" then
-        pcall(gs.load, { quiet = true })
-    end
-
-    local sub = (matches and matches[2]) and tostring(matches[2]) or ""
-    local uiId = (matches and matches[3]) and tostring(matches[3]) or ""
-    local onoff = (matches and matches[4]) and tostring(matches[4]) or ""
-
-    local function usage()
-        _out("[DWKit GUI] Usage:")
-        _out("  dwgui")
-        _out("  dwgui status")
-        _out("  dwgui list")
-        _out("  dwgui enable <uiId>")
-        _out("  dwgui disable <uiId>")
-        _out("  dwgui visible <uiId> on|off")
-        _out("")
-        _out("Notes:")
-        _out("  - SAFE: stores flags only; does NOT show/hide UI directly.")
-        _out("  - 'visible' enables visible persistence on-demand for this run.")
-    end
-
-    if sub == "" or sub == "status" or sub == "list" then
-        _printGuiStatusAndList(gs)
-        return
-    end
-
-    if sub == "enable" or sub == "disable" then
-        if uiId == "" then
-            usage()
+    local dwguiPattern = [[^dwgui(?:\s+(status|list|enable|disable|visible))?(?:\s+(\S+))?(?:\s+(on|off))?\s*$]]
+    local id20a = _mkAlias(dwguiPattern, function()
+        local gs = _getGuiSettingsBestEffort()
+        if type(gs) ~= "table" then
+            _err("DWKit.config.guiSettings not available. Run loader.init() first.")
             return
         end
-        if type(gs.setEnabled) ~= "function" then
-            _err("guiSettings.setEnabled not available. Update dwkit.config.gui_settings first.")
-            return
-        end
-        local enable = (sub == "enable")
-        local ok, err = pcall(gs.setEnabled, uiId, enable, { source = "dwgui" })
-        if not ok then
-            _err("setEnabled threw error: " .. tostring(err))
-            return
-        end
-        if err ~= nil and tostring(err) ~= "" then
-            _err("setEnabled failed: " .. tostring(err))
-            return
-        end
-        _printGuiStatusAndList(gs)
-        return
-    end
 
-    if sub == "visible" then
-        if uiId == "" or (onoff ~= "on" and onoff ~= "off") then
-            usage()
-            return
-        end
+        -- ensure base load (best-effort); visible persistence stays as-is unless visible subcommand is used
         if type(gs.load) == "function" then
-            pcall(gs.load, { quiet = true, visiblePersistenceEnabled = true })
+            pcall(gs.load, { quiet = true })
         end
-        if type(gs.setVisible) ~= "function" then
-            _err("guiSettings.setVisible not available. Update dwkit.config.gui_settings first.")
-            return
-        end
-        local vis = (onoff == "on")
-        local ok, err = pcall(gs.setVisible, uiId, vis, { source = "dwgui" })
-        if not ok then
-            _err("setVisible threw error: " .. tostring(err))
-            return
-        end
-        if err ~= nil and tostring(err) ~= "" then
-            _err("setVisible failed: " .. tostring(err))
-            return
-        end
-        _printGuiStatusAndList(gs)
-        return
-    end
 
-    usage()
-end)
+        local sub = (matches and matches[2]) and tostring(matches[2]) or ""
+        local uiId = (matches and matches[3]) and tostring(matches[3]) or ""
+        local onoff = (matches and matches[4]) and tostring(matches[4]) or ""
 
-local dwreleasePattern = [[^dwrelease\s*$]]
+        local function usage()
+            _out("[DWKit GUI] Usage:")
+            _out("  dwgui")
+            _out("  dwgui status")
+            _out("  dwgui list")
+            _out("  dwgui enable <uiId>")
+            _out("  dwgui disable <uiId>")
+            _out("  dwgui visible <uiId> on|off")
+            _out("")
+            _out("Notes:")
+            _out("  - SAFE: stores flags only; does NOT show/hide UI directly.")
+            _out("  - 'visible' enables visible persistence on-demand for this run.")
+        end
+
+        if sub == "" or sub == "status" or sub == "list" then
+            _printGuiStatusAndList(gs)
+            return
+        end
+
+        if sub == "enable" or sub == "disable" then
+            if uiId == "" then
+                usage()
+                return
+            end
+            if type(gs.setEnabled) ~= "function" then
+                _err("guiSettings.setEnabled not available. Update dwkit.config.gui_settings first.")
+                return
+            end
+
+            local enable = (sub == "enable")
+
+            -- FIX: capture the 5th return value from _callBestEffort (err), not the 2nd (which may be true/false)
+            local ok, _, _, _, err = _callBestEffort(gs, "setEnabled", uiId, enable, { source = "dwgui" })
+            if not ok then
+                _err("setEnabled failed: " .. tostring(err))
+                return
+            end
+
+            _printGuiStatusAndList(gs)
+            return
+        end
+
+        if sub == "visible" then
+            if uiId == "" or (onoff ~= "on" and onoff ~= "off") then
+                usage()
+                return
+            end
+            if type(gs.load) == "function" then
+                pcall(gs.load, { quiet = true, visiblePersistenceEnabled = true })
+            end
+            if type(gs.setVisible) ~= "function" then
+                _err("guiSettings.setVisible not available. Update dwkit.config.gui_settings first.")
+                return
+            end
+
+            local vis = (onoff == "on")
+
+            -- FIX: capture the 5th return value from _callBestEffort (err), not the 2nd (which may be true/false)
+            local ok, _, _, _, err = _callBestEffort(gs, "setVisible", uiId, vis, { source = "dwgui" })
+            if not ok then
+                _err("setVisible failed: " .. tostring(err))
+                return
+            end
+
+            _printGuiStatusAndList(gs)
+            return
+        end
+
+        usage()
+    end)
+
+    local dwreleasePattern = [[^dwrelease\s*$]]
     local id20 = _mkAlias(dwreleasePattern, function()
         _printReleaseChecklist()
     end)

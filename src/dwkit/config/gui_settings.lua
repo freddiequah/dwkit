@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.config.gui_settings
 -- Owner       : Config
--- Version     : v2026-01-14G
+-- Version     : v2026-01-14H
 -- Purpose     :
 --   - Provide per-profile GUI settings storage for DWKit UI modules.
 --   - Owns "enabled" (mandatory) and "visible" (optional) flags per UI id.
@@ -19,6 +19,7 @@
 --   - setEnabled(uiId, enabled, opts?) -> boolean ok, string|nil err
 --   - getVisible(uiId, default?) -> boolean
 --   - setVisible(uiId, visible, opts?) -> boolean ok, string|nil err
+--   - enableVisiblePersistence(opts?) -> boolean ok, string|nil err
 --   - list() -> table (copy) of uiId -> {enabled=?, visible=?}
 --   - status() -> table (copy) summary
 --   - selfTestPersistenceSmoke(opts?) -> boolean ok, string|nil err
@@ -41,7 +42,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-14G"
+M.VERSION = "v2026-01-14H"
 M.SCHEMA_VERSION = "v0.1"
 
 local ID = require("dwkit.core.identity")
@@ -117,14 +118,21 @@ local function _resolveRelPath(opts)
     return _state.relPath or DEFAULT_REL_PATH
 end
 
-local function _normalizeLoadedData(envData)
+local function _truthy(x) return x == true end
+
+local function _normalizeLoadedData(envData, forceVisiblePersistence)
     -- Expected: envData = { ui = {...}, options = {...} }
     local out = {
         ui = {},
         options = { visiblePersistenceEnabled = false },
     }
 
+    local force = _truthy(forceVisiblePersistence)
+
     if type(envData) ~= "table" then
+        if force then
+            out.options.visiblePersistenceEnabled = true
+        end
         return out
     end
 
@@ -134,10 +142,15 @@ local function _normalizeLoadedData(envData)
         end
     end
 
+    if force then
+        out.options.visiblePersistenceEnabled = true
+    end
+
     if type(envData.ui) == "table" then
         for uiId, rec in pairs(envData.ui) do
             if type(uiId) == "string" and type(rec) == "table" then
                 local enabled = (rec.enabled == true)
+
                 local visible = nil
                 if out.options.visiblePersistenceEnabled then
                     if rec.visible == true then visible = true end
@@ -153,16 +166,14 @@ local function _normalizeLoadedData(envData)
 end
 
 function M.getModuleVersion() return M.VERSION end
-
 function M.getSchemaVersion() return M.SCHEMA_VERSION end
-
 function M.getDefaultRelPath() return DEFAULT_REL_PATH end
-
 function M.isLoaded() return _state.loaded == true end
 
 function M.load(opts)
     opts = opts or {}
     local relPath = _resolveRelPath(opts)
+    local forceVisible = (type(opts) == "table" and opts.visiblePersistenceEnabled == true) and true or false
 
     local okStore, store, storeErr = _getStoreBestEffort()
     if not okStore then
@@ -181,7 +192,7 @@ function M.load(opts)
         -- missing file is acceptable; initialize defaults without saving
         _state.loaded = true
         _state.relPath = relPath
-        _state.data = _normalizeLoadedData(nil)
+        _state.data = _normalizeLoadedData(nil, forceVisible)
         _state.lastLoadAt = os.time()
         _state.lastError = nil
         return true, nil
@@ -189,9 +200,10 @@ function M.load(opts)
 
     local env = envOrNil
     local envData = (type(env) == "table") and env.data or nil
+
     _state.loaded = true
     _state.relPath = relPath
-    _state.data = _normalizeLoadedData(envData)
+    _state.data = _normalizeLoadedData(envData, forceVisible)
     _state.lastLoadAt = os.time()
     _state.lastError = nil
 
@@ -217,7 +229,7 @@ function M.save(opts)
     end
 
     local schema = M.SCHEMA_VERSION
-    local data = _normalizeLoadedData(_state.data)
+    local data = _normalizeLoadedData(_state.data, false)
     local meta = {
         source = "dwkit.config.gui_settings",
         identity = {
@@ -244,8 +256,10 @@ function M.save(opts)
 end
 
 local function _ensureRec(uiId)
-    if type(_state.data) ~= "table" then _state.data = _normalizeLoadedData(nil) end
+    if type(_state.data) ~= "table" then _state.data = _normalizeLoadedData(nil, false) end
     if type(_state.data.ui) ~= "table" then _state.data.ui = {} end
+    if type(_state.data.options) ~= "table" then _state.data.options = { visiblePersistenceEnabled = false } end
+
     local rec = _state.data.ui[uiId]
     if type(rec) ~= "table" then
         rec = { enabled = true, visible = nil }
@@ -314,6 +328,33 @@ function M.getVisible(uiId, default)
     return (default == true)
 end
 
+function M.enableVisiblePersistence(opts)
+    opts = opts or {}
+
+    if _state.loaded ~= true then
+        -- Force-enable on load for this run
+        local okLoad, err = M.load({ quiet = true, visiblePersistenceEnabled = true })
+        if not okLoad then
+            return false, "load failed: " .. tostring(err)
+        end
+    end
+
+    if type(_state.data) ~= "table" then
+        _state.data = _normalizeLoadedData(nil, true)
+    end
+    if type(_state.data.options) ~= "table" then
+        _state.data.options = { visiblePersistenceEnabled = true }
+    end
+
+    _state.data.options.visiblePersistenceEnabled = true
+
+    if opts.noSave == true then
+        return true, nil
+    end
+
+    return M.save(opts)
+end
+
 function M.setVisible(uiId, visible, opts)
     if type(uiId) ~= "string" or uiId == "" then
         return false, "uiId invalid"
@@ -363,7 +404,7 @@ function M.status()
             return n
         end)() or 0,
         options = (type(_state.data) == "table" and type(_state.data.options) == "table") and
-        _copyTableShallow(_state.data.options) or {},
+            _copyTableShallow(_state.data.options) or {},
         lastLoadAt = _state.lastLoadAt,
         lastSaveAt = _state.lastSaveAt,
         lastError = _state.lastError,
