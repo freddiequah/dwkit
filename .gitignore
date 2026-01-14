@@ -101,3 +101,5 @@ release/
 # local recovery/scratch
 docs/_RECOVER_*.txt
 
+docs/_RECOVERED_*.md
+
