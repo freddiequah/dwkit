@@ -22,6 +22,9 @@
 --   - getRegistryVersion() -> string   (docs registry version, e.g. v2.9)
 --   - getModuleVersion()   -> string   (code module version tag)
 --   - toMarkdown(opts?) -> string   (docs copy helper; SAFE)
+--   - validateAll(opts?) -> boolean pass, table issues
+--     opts:
+--       - strict: boolean (default true)
 --   - count() -> number   (SAFE, no output)
 --   - has(name) -> boolean (SAFE, no output)
 --
@@ -494,6 +497,49 @@ local function _validateDef(def)
     return true, nil
 end
 
+local function _isArrayLike(t)
+    if type(t) ~= "table" then return false end
+    local n = #t
+    if n == 0 then
+        for k, _ in pairs(t) do
+            if type(k) ~= "number" then return false end
+        end
+        return true
+    end
+    for i = 1, n do
+        if t[i] == nil then return false end
+    end
+    for k, _ in pairs(t) do
+        if type(k) ~= "number" then return false end
+    end
+    return true
+end
+
+local function _validateStringArray(fieldName, t, allowEmpty)
+    if t == nil then
+        return true, nil
+    end
+    if type(t) ~= "table" then
+        return false, fieldName .. " must be a table (array)"
+    end
+    if not _isArrayLike(t) then
+        return false, fieldName .. " must be an array-like table"
+    end
+    if (not allowEmpty) and (#t == 0) then
+        return false, fieldName .. " must be non-empty"
+    end
+    for i, v in ipairs(t) do
+        if not _isNonEmptyString(v) then
+            return false, fieldName .. "[" .. tostring(i) .. "] must be a non-empty string"
+        end
+    end
+    return true, nil
+end
+
+local function _mkIssue(cmdName, message)
+    return { name = tostring(cmdName or ""), error = tostring(message or "") }
+end
+
 -- -------------------------
 -- Safe copy helpers (no shared mutable state)
 -- -------------------------
@@ -769,6 +815,50 @@ function M.register(def)
 
     REG.commands[name] = _copyDef(def)
     return true, nil
+end
+
+-- SAFE validation for the static registry content (no printing by default).
+-- Returns pass, issues[] where each issue = {name=<commandName>, error=<string>}
+function M.validateAll(opts)
+    opts = opts or {}
+    local strict = (opts.strict ~= false)
+
+    local issues = {}
+
+    if not _isNonEmptyString(REG.version) then
+        table.insert(issues, _mkIssue("(registry)", "REG.version must be a non-empty string"))
+    end
+
+    if type(REG.commands) ~= "table" then
+        table.insert(issues, _mkIssue("(registry)", "REG.commands must be a table"))
+        return false, issues
+    end
+
+    for k, def in pairs(REG.commands) do
+        local keyName = tostring(k or "")
+        local okDef, errDef = _validateDef(def)
+        if not okDef then
+            table.insert(issues, _mkIssue(keyName, errDef))
+        else
+            local defName = tostring(def.command or "")
+            if keyName ~= defName then
+                table.insert(issues,
+                    _mkIssue(defName ~= "" and defName or keyName, "registry key must equal def.command"))
+            end
+
+            -- strictness: arrays must be well-formed; allow empty arrays but entries must be non-empty strings
+            local okA, errA = _validateStringArray("aliases", def.aliases, true)
+            if not okA then table.insert(issues, _mkIssue(defName, errA)) end
+
+            local okE, errE = _validateStringArray("examples", def.examples, not strict)
+            if not okE then table.insert(issues, _mkIssue(defName, errE)) end
+
+            local okN, errN = _validateStringArray("notes", def.notes, true)
+            if not okN then table.insert(issues, _mkIssue(defName, errN)) end
+        end
+    end
+
+    return (#issues == 0), issues
 end
 
 return M
