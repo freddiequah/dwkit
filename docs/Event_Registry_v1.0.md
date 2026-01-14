@@ -1,4 +1,4 @@
-﻿# Event Registry
+# Event Registry
 
 ## Version
 v1.8
