@@ -1,0 +1,11 @@
+#!/bin/sh
+echo "[HOOK] pre-commit running..." 1>&2
+
+branch="$(git rev-parse --abbrev-ref HEAD)"
+if [ "$branch" = "main" ]; then
+  echo "ERROR: Direct commits to main are blocked. Create a branch first." 1>&2
+  echo "Use: git checkout -b <topic/name>" 1>&2
+  exit 1
+fi
+
+exit 0
