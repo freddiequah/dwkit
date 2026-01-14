@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-14F
+-- Version     : v2026-01-14H
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -38,7 +38,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-14F"
+M.VERSION = "v2026-01-14H"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -162,6 +162,31 @@ local REG = {
             },
         },
 
+dwgui = {
+    command     = "dwgui",
+    aliases     = {},
+    ownerModule = "dwkit.services.command_aliases",
+    description = "Manage GUI settings flags (enabled/visible) per UI id (SAFE config only; no UI actions).",
+    syntax      = "dwgui [status|list|enable <uiId>|disable <uiId>|visible <uiId> on|off]",
+    examples    = {
+        "dwgui",
+        "dwgui status",
+        "dwgui list",
+        "dwgui enable test_ui",
+        "dwgui disable test_ui",
+        "dwgui visible test_ui on",
+        "dwgui visible test_ui off",
+    },
+    safety      = "SAFE",
+    mode        = "manual",
+    sendsToGame = false,
+    notes       = {
+        "Typed alias implemented by dwkit.services.command_aliases.",
+        "Backed by DWKit.config.guiSettings (dwkit.config.gui_settings).",
+        "This command only changes stored flags; it does NOT show/hide UI elements directly.",
+        "Visible control requires visible persistence to be enabled in guiSettings; dwgui enables it on-demand for visible subcommands.",
+    },
+},
         dwevents = {
             command     = "dwevents",
             aliases     = {},

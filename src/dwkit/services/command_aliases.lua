@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-14F
+-- Version     : v2026-01-14H
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -38,7 +38,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-14F"
+M.VERSION = "v2026-01-14H"
 
 local STATE = {
     installed = false,
@@ -50,6 +50,7 @@ local STATE = {
         dwid         = nil,
         dwversion    = nil,
         dwdiag       = nil,
+        dwgui        = nil,
         dwevents     = nil,
         dwevent      = nil,
         dwboot       = nil,
@@ -598,6 +599,57 @@ local function _getScoreStoreServiceBestEffort()
     return nil
 end
 
+
+local function _getGuiSettingsBestEffort()
+    if type(_G.DWKit) == "table" and type(_G.DWKit.config) == "table" and type(_G.DWKit.config.guiSettings) == "table" then
+        return _G.DWKit.config.guiSettings
+    end
+    local ok, mod = _safeRequire("dwkit.config.gui_settings")
+    if ok and type(mod) == "table" then return mod end
+    return nil
+end
+
+local function _printGuiStatusAndList(gs)
+    local okS, st = pcall(gs.status)
+    if not okS or type(st) ~= "table" then
+        _err("guiSettings.status failed")
+        return
+    end
+
+    _out("[DWKit GUI] status (dwgui)")
+    _out("  version=" .. tostring(gs.VERSION or "unknown"))
+    _out("  loaded=" .. tostring(st.loaded == true))
+    _out("  relPath=" .. tostring(st.relPath or ""))
+    _out("  uiCount=" .. tostring(st.uiCount or 0))
+    if type(st.options) == "table" then
+        _out("  options.visiblePersistenceEnabled=" .. tostring(st.options.visiblePersistenceEnabled == true))
+        _out("  options.enabledDefault=" .. tostring(st.options.enabledDefault == true))
+        _out("  options.visibleDefault=" .. tostring(st.options.visibleDefault == true))
+    end
+    if st.lastError then
+        _out("  lastError=" .. tostring(st.lastError))
+    end
+
+    local okL, list = pcall(gs.list)
+    if not okL or type(list) ~= "table" then
+        _err("guiSettings.list failed")
+        return
+    end
+
+    _out("")
+    _out("[DWKit GUI] list (uiId -> enabled/visible)")
+    if #list == 0 then
+        _out("  (none)")
+        return
+    end
+    for _, rec in ipairs(list) do
+        local id = tostring(rec.uiId or "")
+        local en = (rec.enabled == true) and "ON" or "OFF"
+        local vis = (rec.visible == true) and "ON" or ((rec.visible == false) and "OFF" or "(unset)")
+        _out("  - " .. id .. "  enabled=" .. en .. "  visible=" .. vis)
+    end
+end
+
 -- -------------------------
 -- Release checklist (SAFE, bounded)
 -- -------------------------
@@ -974,6 +1026,7 @@ function M.getState()
             dwid = STATE.aliasIds.dwid,
             dwversion = STATE.aliasIds.dwversion,
             dwdiag = STATE.aliasIds.dwdiag,
+            dwgui = STATE.aliasIds.dwgui,
             dwevents = STATE.aliasIds.dwevents,
             dwevent = STATE.aliasIds.dwevent,
             dwboot = STATE.aliasIds.dwboot,
@@ -1042,7 +1095,7 @@ function M.uninstall()
 
     local ids = STATE.aliasIds
     local allIds = {
-        ids.dwcommands, ids.dwhelp, ids.dwtest, ids.dwinfo, ids.dwid, ids.dwversion, ids.dwdiag,
+        ids.dwcommands, ids.dwhelp, ids.dwtest, ids.dwinfo, ids.dwid, ids.dwversion, ids.dwdiag, ids.dwgui,
         ids.dwevents, ids.dwevent, ids.dwboot,
         ids.dwservices, ids.dwpresence, ids.dwactions, ids.dwskills, ids.dwscorestore,
         ids.dweventtap, ids.dweventsub, ids.dweventunsub, ids.dweventlog,
@@ -1428,13 +1481,102 @@ function M.install(opts)
         _printDiagBundle()
     end)
 
-    local dwreleasePattern = [[^dwrelease\s*$]]
+    
+local dwguiPattern = [[^dwgui(?:\s+(status|list|enable|disable|visible))?(?:\s+(\S+))?(?:\s+(on|off))?\s*$]]
+local id20a = _mkAlias(dwguiPattern, function()
+    local gs = _getGuiSettingsBestEffort()
+    if type(gs) ~= "table" then
+        _err("DWKit.config.guiSettings not available. Run loader.init() first.")
+        return
+    end
+
+    -- ensure base load (best-effort); visible persistence stays as-is unless visible subcommand is used
+    if type(gs.load) == "function" then
+        pcall(gs.load, { quiet = true })
+    end
+
+    local sub = (matches and matches[2]) and tostring(matches[2]) or ""
+    local uiId = (matches and matches[3]) and tostring(matches[3]) or ""
+    local onoff = (matches and matches[4]) and tostring(matches[4]) or ""
+
+    local function usage()
+        _out("[DWKit GUI] Usage:")
+        _out("  dwgui")
+        _out("  dwgui status")
+        _out("  dwgui list")
+        _out("  dwgui enable <uiId>")
+        _out("  dwgui disable <uiId>")
+        _out("  dwgui visible <uiId> on|off")
+        _out("")
+        _out("Notes:")
+        _out("  - SAFE: stores flags only; does NOT show/hide UI directly.")
+        _out("  - 'visible' enables visible persistence on-demand for this run.")
+    end
+
+    if sub == "" or sub == "status" or sub == "list" then
+        _printGuiStatusAndList(gs)
+        return
+    end
+
+    if sub == "enable" or sub == "disable" then
+        if uiId == "" then
+            usage()
+            return
+        end
+        if type(gs.setEnabled) ~= "function" then
+            _err("guiSettings.setEnabled not available. Update dwkit.config.gui_settings first.")
+            return
+        end
+        local enable = (sub == "enable")
+        local ok, err = pcall(gs.setEnabled, uiId, enable, { source = "dwgui" })
+        if not ok then
+            _err("setEnabled threw error: " .. tostring(err))
+            return
+        end
+        if err ~= nil and tostring(err) ~= "" then
+            _err("setEnabled failed: " .. tostring(err))
+            return
+        end
+        _printGuiStatusAndList(gs)
+        return
+    end
+
+    if sub == "visible" then
+        if uiId == "" or (onoff ~= "on" and onoff ~= "off") then
+            usage()
+            return
+        end
+        if type(gs.load) == "function" then
+            pcall(gs.load, { quiet = true, visiblePersistenceEnabled = true })
+        end
+        if type(gs.setVisible) ~= "function" then
+            _err("guiSettings.setVisible not available. Update dwkit.config.gui_settings first.")
+            return
+        end
+        local vis = (onoff == "on")
+        local ok, err = pcall(gs.setVisible, uiId, vis, { source = "dwgui" })
+        if not ok then
+            _err("setVisible threw error: " .. tostring(err))
+            return
+        end
+        if err ~= nil and tostring(err) ~= "" then
+            _err("setVisible failed: " .. tostring(err))
+            return
+        end
+        _printGuiStatusAndList(gs)
+        return
+    end
+
+    usage()
+end)
+
+local dwreleasePattern = [[^dwrelease\s*$]]
     local id20 = _mkAlias(dwreleasePattern, function()
         _printReleaseChecklist()
     end)
 
     local all = { id1, id2, id3, id4, id5, id6, id7, id8, id9, id10, id11, id12, id13, id14, id15, id16, id17, id18, id19,
-        id20 }
+        id20a, id20 }
     for _, id in ipairs(all) do
         if not id then
             STATE.lastError = "Failed to create one or more aliases"
@@ -1469,6 +1611,7 @@ function M.install(opts)
     STATE.aliasIds.dweventlog   = id18
 
     STATE.aliasIds.dwdiag       = id19
+    STATE.aliasIds.dwgui        = id20a
     STATE.aliasIds.dwrelease    = id20
 
     STATE.installed             = true
@@ -1476,7 +1619,7 @@ function M.install(opts)
 
     if not opts.quiet then
         _out(
-            "[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion, dwevents, dwevent, dwboot, dwservices, dwpresence, dwactions, dwskills, dwscorestore, dweventtap, dweventsub, dweventunsub, dweventlog, dwdiag, dwrelease")
+            "[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion, dwevents, dwevent, dwboot, dwservices, dwpresence, dwactions, dwskills, dwscorestore, dweventtap, dweventsub, dweventunsub, dweventlog, dwdiag, dwgui, dwrelease")
     end
 
     return true, nil

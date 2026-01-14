@@ -53,11 +53,12 @@ Notes:
 These rules are enforced in runtime by the self-test runner in quiet mode (registry-only checks; no gameplay commands sent).
 
 ### SAFE command set (current expected set)
-- Expected SAFE commands (19):
+- Expected SAFE commands (20):
   - dwactions
   - dwboot
   - dwcommands
   - dwdiag
+  - dwgui
   - dwevent
   - dwevents
   - dweventlog
@@ -119,6 +120,7 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 - dwtest
 - dwversion
 - dwdiag
+- dwgui
 - dwevents
 - dwevent
 - dweventtap
@@ -201,6 +203,30 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
   - Implemented as a Mudlet alias (local only).
   - Does not enable event tap or subscriptions.
   - Intended for quick copy/paste troubleshooting bundles.
+
+
+### dwgui
+- Command: dwgui
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Manage GUI settings flags (enabled/visible) per UI id (SAFE config only; no UI actions).
+- Syntax: dwgui [status|list|enable <uiId>|disable <uiId>|visible <uiId> on|off]
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dwgui
+  - dwgui status
+  - dwgui list
+  - dwgui enable test_ui
+  - dwgui disable test_ui
+  - dwgui visible test_ui on
+  - dwgui visible test_ui off
+- Notes:
+  - Typed alias implemented by dwkit.services.command_aliases.
+  - Backed by DWKit.config.guiSettings (dwkit.config.gui_settings).
+  - This command only changes stored flags; it does NOT show/hide UI elements directly.
+  - Visible control requires visible persistence to be enabled in guiSettings; dwgui enables it on-demand for visible subcommands.
 
 ### dwevent
 - Command: dwevent
