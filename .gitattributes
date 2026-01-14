@@ -1,2 +1,4 @@
 .githooks/* text eol=lf
 docs/*.md text eol=lf
+.gitignore text eol=lf
+/.gitignore text eol=lf
