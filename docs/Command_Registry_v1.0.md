@@ -1,7 +1,7 @@
 # Command Registry
 
 ## Version
-v2.8
+v2.9
 
 ## Purpose
 This document is the canonical registry of all user-facing commands.
@@ -33,7 +33,7 @@ If a command is not registered here, it does not exist.
   A) Kit Commands (SAFE diagnostics, config, UI control, tests)
   B) Gameplay Command Wrappers (send commands to the MUD; must be explicitly labeled)
 - Current status:
-  - Gameplay Command Wrappers: NONE (as of v2.8)
+  - Gameplay Command Wrappers: NONE (as of v2.9)
 - Any new gameplay wrapper MUST include the extra wrapper fields in the Command Template.
 
 ## Runtime Export (Docs Sync Helper) (SAFE)
@@ -53,10 +53,11 @@ Notes:
 These rules are enforced in runtime by the self-test runner in quiet mode (registry-only checks; no gameplay commands sent).
 
 ### SAFE command set (current expected set)
-- Expected SAFE commands (18):
+- Expected SAFE commands (19):
   - dwactions
   - dwboot
   - dwcommands
+  - dwdiag
   - dwevent
   - dwevents
   - dweventlog
@@ -117,6 +118,7 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 - dwinfo
 - dwtest
 - dwversion
+- dwdiag
 - dwevents
 - dwevent
 - dweventtap
@@ -183,6 +185,22 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
   - dwcommands safe uses registry filter: sendsToGame == false.
   - dwcommands game uses registry filter: sendsToGame == true.
   - Markdown export is backed by DWKit.cmd.toMarkdown().
+
+### dwdiag
+- Command: dwdiag
+- Aliases: (none)
+- Owner Module: dwkit.services.command_aliases
+- Description: Prints a one-shot diagnostic bundle (dwversion + dwboot + dwservices + event diag status).
+- Syntax: dwdiag
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dwdiag
+- Notes:
+  - Implemented as a Mudlet alias (local only).
+  - Does not enable event tap or subscriptions.
+  - Intended for quick copy/paste troubleshooting bundles.
 
 ### dwevent
 - Command: dwevent
