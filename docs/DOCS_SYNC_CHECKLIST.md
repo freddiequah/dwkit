@@ -1,4 +1,4 @@
-﻿# Docs Sync Checklist (Required)
+# Docs Sync Checklist (Required)
 
 This document defines the REQUIRED docs-to-runtime sync checks for dwkit.
 It exists to prevent drift between:
