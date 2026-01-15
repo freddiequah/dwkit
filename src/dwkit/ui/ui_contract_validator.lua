@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_contract_validator
 -- Owner       : UI
--- Version     : v2026-01-15A
+-- Version     : v2026-01-15C
 -- Purpose     :
 --   - SAFE UI contract validator for DWKit UI modules.
 --   - Validates basic module contract compliance:
@@ -17,17 +17,21 @@
 -- Public API  :
 --   - getModuleVersion() -> string
 --   - validateOne(uiId, opts?) -> boolean ok, table result
---   - validateAll(opts?) -> boolean ok, table results
+--   - validateAll(opts?) -> boolean ok, table summary
 --
 -- Notes:
 --   - Missing UI module file is treated as SKIP (not FAIL) to support staged rollout.
---   - This validator cannot reliably detect "send()" or timers inside module code.
---     It only validates structure + presence/types.
+--   - IMPORTANT: ok boolean reflects overall PASS/WARN/SKIP vs FAIL.
+--       * PASS/WARN/SKIP => ok=true
+--       * FAIL           => ok=false
+--
+-- Options:
+--   - validateAll({ onlyEnabled=true }) : validates only gui_settings entries where enabled=true
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-15A"
+M.VERSION = "v2026-01-15C"
 
 local function _isNonEmptyString(s)
     return type(s) == "string" and s ~= ""
@@ -133,7 +137,7 @@ local function _validateModuleTable(mod, expectedUiId, res)
     if _isNonEmptyString(expectedUiId) and _isNonEmptyString(res.moduleUiId) then
         if tostring(expectedUiId) ~= tostring(res.moduleUiId) then
             _push(res.errors,
-            "UI_ID mismatch: expected=" .. tostring(expectedUiId) .. " got=" .. tostring(res.moduleUiId))
+                "UI_ID mismatch: expected=" .. tostring(expectedUiId) .. " got=" .. tostring(res.moduleUiId))
         end
     end
 
@@ -166,15 +170,19 @@ function M.getModuleVersion()
     return M.VERSION
 end
 
+-- validateOne(uiId) -> ok, resultTable
+-- ok=true for PASS/WARN/SKIP, ok=false for FAIL
 function M.validateOne(uiId, opts)
     opts = (type(opts) == "table") and opts or {}
 
-    if not _isNonEmptyString(uiId) then
-        return false, _mkResult(uiId, "")
-    end
-
-    local moduleName = "dwkit.ui." .. tostring(uiId)
+    local moduleName = "dwkit.ui." .. tostring(uiId or "")
     local res = _mkResult(uiId, moduleName)
+
+    if not _isNonEmptyString(uiId) then
+        res.status = "FAIL"
+        _push(res.errors, "uiId invalid")
+        return false, res
+    end
 
     local okR, modOrErr = _safeRequire(moduleName)
     if not okR or type(modOrErr) ~= "table" then
@@ -184,67 +192,129 @@ function M.validateOne(uiId, opts)
     end
 
     _validateModuleTable(modOrErr, uiId, res)
+
+    if res.status == "FAIL" then
+        return false, res
+    end
+
     return true, res
 end
 
+local function _mkFailSummary(errMsg)
+    return {
+        status = "FAIL",
+        error = tostring(errMsg or "validateAll failed"),
+        count = 0,
+        passCount = 0,
+        warnCount = 0,
+        failCount = 0,
+        skipCount = 0,
+        results = {},
+    }
+end
+
+-- validateAll() -> ok, summaryTable
+-- ok=false if any FAIL exists, even if others PASS/WARN/SKIP
 function M.validateAll(opts)
     opts = (type(opts) == "table") and opts or {}
+    local onlyEnabled = (opts.onlyEnabled == true)
 
     local gs = _getGuiSettingsBestEffort()
     if type(gs) ~= "table" then
-        return false, {
-            status = "FAIL",
-            error = "guiSettings not available (run loader.init first)",
-            results = {},
-        }
+        return false, _mkFailSummary("guiSettings not available (run loader.init first)")
     end
 
     local okLoad, loadErr = _ensureLoaded(gs)
     if not okLoad then
-        return false, {
-            status = "FAIL",
-            error = tostring(loadErr),
-            results = {},
-        }
+        return false, _mkFailSummary(loadErr)
     end
 
     if type(gs.list) ~= "function" then
-        return false, {
-            status = "FAIL",
-            error = "guiSettings.list not available",
-            results = {},
-        }
+        return false, _mkFailSummary("guiSettings.list not available")
     end
 
     local okL, uiMap = pcall(gs.list)
     if not okL or type(uiMap) ~= "table" then
-        return false, {
-            status = "FAIL",
-            error = "guiSettings.list failed",
-            results = {},
-        }
+        return false, _mkFailSummary("guiSettings.list failed")
     end
 
     local keys = _sortedKeys(uiMap)
     local results = {}
 
+    local passCount = 0
+    local warnCount = 0
+    local failCount = 0
+    local skipCount = 0
+
     for _, id in ipairs(keys) do
-        local okOne, r = M.validateOne(id, opts)
-        if okOne and type(r) == "table" then
-            results[#results + 1] = r
+        -- Optional filter: only validate enabled UI
+        if onlyEnabled then
+            local rec = uiMap[id]
+            if type(rec) == "table" and rec.enabled ~= true then
+                -- ignore disabled
+            else
+                local okOne, r = M.validateOne(id, opts)
+
+                if type(r) ~= "table" then
+                    local fallback = _mkResult(id, "dwkit.ui." .. tostring(id))
+                    fallback.status = "FAIL"
+                    _push(fallback.errors, "validateOne returned invalid result")
+                    results[#results + 1] = fallback
+                    failCount = failCount + 1
+                else
+                    results[#results + 1] = r
+
+                    if r.status == "PASS" then passCount = passCount + 1 end
+                    if r.status == "WARN" then warnCount = warnCount + 1 end
+                    if r.status == "FAIL" then failCount = failCount + 1 end
+                    if r.status == "SKIP" then skipCount = skipCount + 1 end
+                end
+            end
         else
-            local fallback = _mkResult(id, "dwkit.ui." .. tostring(id))
-            fallback.status = "FAIL"
-            _push(fallback.errors, "validateOne failed unexpectedly")
-            results[#results + 1] = fallback
+            local okOne, r = M.validateOne(id, opts)
+
+            if type(r) ~= "table" then
+                local fallback = _mkResult(id, "dwkit.ui." .. tostring(id))
+                fallback.status = "FAIL"
+                _push(fallback.errors, "validateOne returned invalid result")
+                results[#results + 1] = fallback
+                failCount = failCount + 1
+            else
+                results[#results + 1] = r
+
+                if r.status == "PASS" then passCount = passCount + 1 end
+                if r.status == "WARN" then warnCount = warnCount + 1 end
+                if r.status == "FAIL" then failCount = failCount + 1 end
+                if r.status == "SKIP" then skipCount = skipCount + 1 end
+            end
         end
     end
 
-    return true, {
-        status = "OK",
+    local overallStatus = "PASS"
+    if failCount > 0 then
+        overallStatus = "FAIL"
+    elseif warnCount > 0 then
+        overallStatus = "WARN"
+    else
+        overallStatus = "PASS"
+    end
+
+    local summary = {
+        status = overallStatus,
         count = #results,
+        passCount = passCount,
+        warnCount = warnCount,
+        failCount = failCount,
+        skipCount = skipCount,
         results = results,
     }
+
+    if overallStatus == "FAIL" then
+        summary.error = "One or more UI modules failed contract validation"
+        return false, summary
+    end
+
+    return true, summary
 end
 
 return M

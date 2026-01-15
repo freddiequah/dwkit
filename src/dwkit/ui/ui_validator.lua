@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_validator
 -- Owner       : UI
--- Version     : v2026-01-15J
+-- Version     : v2026-01-15L
 -- Purpose     :
 --   - Compatibility + convenience wrapper for UI validation.
 --   - Delegates to dwkit.ui.ui_contract_validator (authoritative implementation).
@@ -11,22 +11,50 @@
 -- Public API  :
 --   - getModuleVersion() -> string
 --   - getContractValidatorVersion() -> string
---   - validateOne(uiId, opts?) -> boolean ok, table result | false, string err
---   - validateAll(opts?) -> boolean ok, table results | false, string err
+--   - validateOne(uiId, opts?) -> boolean ok, table result
+--   - validateAll(opts?) -> boolean ok, table summary
 --
 -- Notes:
---   - This module exists because dwgui expects: require("dwkit.ui.ui_validator")
---   - The actual validation rules live in ui_contract_validator.
+--   - ok boolean is meaningful:
+--       * validateOne: ok=false when status=FAIL
+--       * validateAll: ok=false when any FAIL exists
+--   - Always returns structured tables (no string conversion).
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-15J"
+M.VERSION = "v2026-01-15L"
 
 local function _safeRequire(modName)
     local ok, mod = pcall(require, modName)
     if ok then return true, mod end
     return false, mod
+end
+
+-- Robust caller for APIs that may be implemented as obj.fn(...) OR obj:fn(...)
+-- Tries no-self first, then self (only if the first attempt fails).
+-- Returns: ok, a, b, c, err
+local function _callBestEffort(obj, fnName, ...)
+    if type(obj) ~= "table" then
+        return false, nil, nil, nil, "obj not table"
+    end
+
+    local fn = obj[fnName]
+    if type(fn) ~= "function" then
+        return false, nil, nil, nil, "missing function: " .. tostring(fnName)
+    end
+
+    local ok1, a1, b1, c1 = pcall(fn, ...)
+    if ok1 then
+        return true, a1, b1, c1, nil
+    end
+
+    local ok2, a2, b2, c2 = pcall(fn, obj, ...)
+    if ok2 then
+        return true, a2, b2, c2, nil
+    end
+
+    return false, nil, nil, nil, "call failed: " .. tostring(a1) .. " | " .. tostring(a2)
 end
 
 local function _getContractValidator()
@@ -49,73 +77,49 @@ function M.getContractValidatorVersion()
     return "missing"
 end
 
--- validateOne(uiId, opts?) -> boolean ok, table result | false, string err
+-- validateOne(uiId, opts?) -> boolean ok, table result
 function M.validateOne(uiId, opts)
     opts = (type(opts) == "table") and opts or {}
 
     local v, err = _getContractValidator()
     if not v then
-        return false, tostring(err or "contract validator missing")
+        return false, { status = "FAIL", error = tostring(err or "contract validator missing") }
     end
 
     if type(v.validateOne) ~= "function" then
-        return false, "ui_contract_validator.validateOne not available"
+        return false, { status = "FAIL", error = "ui_contract_validator.validateOne not available" }
     end
 
-    -- Contract validator returns: true, resultTable  OR  false, resultTable
-    local okCall, a, b = pcall(v.validateOne, uiId, opts)
+    local okCall, okFlag, resultOrErr, extra, callErr = _callBestEffort(v, "validateOne", uiId, opts)
     if not okCall then
-        return false, "validateOne threw error: " .. tostring(a)
+        return false, { status = "FAIL", error = "validateOne call failed: " .. tostring(callErr) }
     end
 
-    if a == true then
-        return true, b
-    end
-
-    -- a == false -> b is still a result table (best-effort); convert to string err
-    if type(b) == "table" then
-        local msg = "validateOne failed"
-        if type(b.errors) == "table" and #b.errors > 0 then
-            msg = tostring(b.errors[1] or msg)
-        end
-        return false, msg
-    end
-
-    return false, tostring(b or "validateOne failed")
+    -- Expected:
+    --   okFlag = boolean (false only when FAIL)
+    --   resultOrErr = table
+    return (okFlag == true), resultOrErr
 end
 
--- validateAll(opts?) -> boolean ok, table results | false, string err
+-- validateAll(opts?) -> boolean ok, table summary
 function M.validateAll(opts)
     opts = (type(opts) == "table") and opts or {}
 
     local v, err = _getContractValidator()
     if not v then
-        return false, tostring(err or "contract validator missing")
+        return false, { status = "FAIL", error = tostring(err or "contract validator missing") }
     end
 
     if type(v.validateAll) ~= "function" then
-        return false, "ui_contract_validator.validateAll not available"
+        return false, { status = "FAIL", error = "ui_contract_validator.validateAll not available" }
     end
 
-    -- Contract validator returns:
-    --   true, { status="OK", count=n, results=[...] }
-    --   false, { status="FAIL", error="...", results=[...] }
-    local okCall, a, b = pcall(v.validateAll, opts)
+    local okCall, okFlag, summaryOrErr, extra, callErr = _callBestEffort(v, "validateAll", opts)
     if not okCall then
-        return false, "validateAll threw error: " .. tostring(a)
+        return false, { status = "FAIL", error = "validateAll call failed: " .. tostring(callErr) }
     end
 
-    if a == true then
-        return true, b
-    end
-
-    -- a == false, b likely a failure object
-    if type(b) == "table" then
-        local msg = b.error or "validateAll failed"
-        return false, tostring(msg)
-    end
-
-    return false, tostring(b or "validateAll failed")
+    return (okFlag == true), summaryOrErr
 end
 
 return M
