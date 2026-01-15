@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_manager
 -- Owner       : UI
--- Version     : v2026-01-15E
+-- Version     : v2026-01-15F
 -- Purpose     :
 --   - SAFE dispatcher for applying UI modules registered in gui_settings.
 --   - Provides manual-only "apply all" and "apply one" capability.
@@ -29,7 +29,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-15E"
+M.VERSION = "v2026-01-15F"
 
 local function _out(line)
     line = tostring(line or "")
@@ -271,6 +271,22 @@ function M.reloadOne(uiId, opts)
 
     if type(uiId) ~= "string" or uiId == "" then
         return false, "uiId invalid"
+    end
+
+    -- GATING: reload should also skip disabled UI (do not dispose/clear cache/apply)
+    local gs = _getGuiSettingsBestEffort()
+    if type(gs) ~= "table" then
+        return false, "DWKit.config.guiSettings not available"
+    end
+
+    local okLoad, loadErr = _ensureLoaded(gs)
+    if not okLoad then
+        return false, tostring(loadErr)
+    end
+
+    if not _isEnabled(gs, uiId) then
+        _out("[DWKit UI] SKIP reload uiId=" .. tostring(uiId) .. " (disabled)")
+        return true, nil
     end
 
     _out("[DWKit UI] reload uiId=" .. tostring(uiId))
