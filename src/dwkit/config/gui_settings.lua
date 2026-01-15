@@ -1,12 +1,13 @@
 -- #########################################################################
 -- Module Name : dwkit.config.gui_settings
 -- Owner       : Config
--- Version     : v2026-01-14G
+-- Version     : v2026-01-15B
 -- Purpose     :
 --   - Provide per-profile GUI settings storage for DWKit UI modules.
 --   - Owns "enabled" (mandatory) and "visible" (optional) flags per UI id.
 --   - SAFE module: no events, no automation, no gameplay commands.
---   - Read-only load by default; writes only when save()/set*() is called.
+--   - Read-only load by default; writes only when save()/set*()/enableVisiblePersistence() is called.
+--   - Supports UI module seeding via register() (SAFE; in-memory only unless opts.save=true).
 --
 -- Public API  :
 --   - getModuleVersion() -> string
@@ -15,10 +16,12 @@
 --   - load(opts?) -> boolean ok, string|nil err
 --   - save(opts?) -> boolean ok, string|nil err
 --   - isLoaded() -> boolean
+--   - register(uiId, defaults?, opts?) -> boolean ok, string|nil err
 --   - isEnabled(uiId, default?) -> boolean
 --   - setEnabled(uiId, enabled, opts?) -> boolean ok, string|nil err
 --   - getVisible(uiId, default?) -> boolean
 --   - setVisible(uiId, visible, opts?) -> boolean ok, string|nil err
+--   - enableVisiblePersistence(opts?) -> boolean ok, string|nil err
 --   - list() -> table (copy) of uiId -> {enabled=?, visible=?}
 --   - status() -> table (copy) summary
 --   - selfTestPersistenceSmoke(opts?) -> boolean ok, string|nil err
@@ -36,12 +39,13 @@
 --   - Optional: DWKit.persist.store (preferred) or require("dwkit.persist.store")
 -- Invariants       :
 --   - Does not create UI windows or trigger visibility changes.
---   - Enabled defaults to true unless caller supplies a different default.
+--   - Enabled defaults to options.enabledDefault unless caller provides defaults.enabled.
+--   - Visible is only stored/returned when options.visiblePersistenceEnabled=true.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-14G"
+M.VERSION = "v2026-01-15B"
 M.SCHEMA_VERSION = "v0.1"
 
 local ID = require("dwkit.core.identity")
@@ -53,9 +57,11 @@ local _state = {
     relPath = DEFAULT_REL_PATH,
     schemaVersion = M.SCHEMA_VERSION,
     data = {
-        ui = {},                               -- uiId -> { enabled=bool, visible=bool|nil }
+        ui = {}, -- uiId -> { enabled=bool, visible=bool|nil }
         options = {
-            visiblePersistenceEnabled = false, -- future toggle; kept false until explicitly enabled
+            visiblePersistenceEnabled = false,
+            enabledDefault = false,
+            visibleDefault = false,
         },
     },
     lastLoadAt = nil,
@@ -117,14 +123,24 @@ local function _resolveRelPath(opts)
     return _state.relPath or DEFAULT_REL_PATH
 end
 
-local function _normalizeLoadedData(envData)
-    -- Expected: envData = { ui = {...}, options = {...} }
+local function _truthy(x) return x == true end
+
+local function _normalizeLoadedData(envData, forceVisiblePersistence)
     local out = {
         ui = {},
-        options = { visiblePersistenceEnabled = false },
+        options = {
+            visiblePersistenceEnabled = false,
+            enabledDefault = false,
+            visibleDefault = false,
+        },
     }
 
+    local force = _truthy(forceVisiblePersistence)
+
     if type(envData) ~= "table" then
+        if force then
+            out.options.visiblePersistenceEnabled = true
+        end
         return out
     end
 
@@ -132,12 +148,23 @@ local function _normalizeLoadedData(envData)
         if envData.options.visiblePersistenceEnabled == true then
             out.options.visiblePersistenceEnabled = true
         end
+        if envData.options.enabledDefault == true then
+            out.options.enabledDefault = true
+        end
+        if envData.options.visibleDefault == true then
+            out.options.visibleDefault = true
+        end
+    end
+
+    if force then
+        out.options.visiblePersistenceEnabled = true
     end
 
     if type(envData.ui) == "table" then
         for uiId, rec in pairs(envData.ui) do
             if type(uiId) == "string" and type(rec) == "table" then
                 local enabled = (rec.enabled == true)
+
                 local visible = nil
                 if out.options.visiblePersistenceEnabled then
                     if rec.visible == true then visible = true end
@@ -152,6 +179,31 @@ local function _normalizeLoadedData(envData)
     return out
 end
 
+local function _ensureStructures()
+    if type(_state.data) ~= "table" then
+        _state.data = _normalizeLoadedData(nil, false)
+    end
+    if type(_state.data.ui) ~= "table" then _state.data.ui = {} end
+    if type(_state.data.options) ~= "table" then
+        _state.data.options = {
+            visiblePersistenceEnabled = false,
+            enabledDefault = false,
+            visibleDefault = false,
+        }
+    end
+end
+
+local function _ensureRec(uiId)
+    _ensureStructures()
+
+    local rec = _state.data.ui[uiId]
+    if type(rec) ~= "table" then
+        rec = { enabled = false, visible = nil }
+        _state.data.ui[uiId] = rec
+    end
+    return rec
+end
+
 function M.getModuleVersion() return M.VERSION end
 
 function M.getSchemaVersion() return M.SCHEMA_VERSION end
@@ -163,6 +215,7 @@ function M.isLoaded() return _state.loaded == true end
 function M.load(opts)
     opts = opts or {}
     local relPath = _resolveRelPath(opts)
+    local forceVisible = (type(opts) == "table" and opts.visiblePersistenceEnabled == true) and true or false
 
     local okStore, store, storeErr = _getStoreBestEffort()
     if not okStore then
@@ -170,7 +223,6 @@ function M.load(opts)
         return false, _state.lastError
     end
 
-    -- Load envelope (missing file => defaults)
     local okP, okFlag, envOrNil, errMaybe = pcall(store.loadEnvelope, relPath)
     if not okP then
         _state.lastError = tostring(okFlag)
@@ -178,10 +230,9 @@ function M.load(opts)
     end
 
     if okFlag ~= true then
-        -- missing file is acceptable; initialize defaults without saving
         _state.loaded = true
         _state.relPath = relPath
-        _state.data = _normalizeLoadedData(nil)
+        _state.data = _normalizeLoadedData(nil, forceVisible)
         _state.lastLoadAt = os.time()
         _state.lastError = nil
         return true, nil
@@ -189,9 +240,10 @@ function M.load(opts)
 
     local env = envOrNil
     local envData = (type(env) == "table") and env.data or nil
+
     _state.loaded = true
     _state.relPath = relPath
-    _state.data = _normalizeLoadedData(envData)
+    _state.data = _normalizeLoadedData(envData, forceVisible)
     _state.lastLoadAt = os.time()
     _state.lastError = nil
 
@@ -209,7 +261,6 @@ function M.save(opts)
     end
 
     if _state.loaded ~= true then
-        -- best-effort: load first (no save during load)
         local okLoad, loadErr = M.load({ relPath = relPath, quiet = true })
         if not okLoad then
             return false, tostring(loadErr)
@@ -217,7 +268,7 @@ function M.save(opts)
     end
 
     local schema = M.SCHEMA_VERSION
-    local data = _normalizeLoadedData(_state.data)
+    local data = _normalizeLoadedData(_state.data, false)
     local meta = {
         source = "dwkit.config.gui_settings",
         identity = {
@@ -243,15 +294,55 @@ function M.save(opts)
     return false, _state.lastError
 end
 
-local function _ensureRec(uiId)
-    if type(_state.data) ~= "table" then _state.data = _normalizeLoadedData(nil) end
-    if type(_state.data.ui) ~= "table" then _state.data.ui = {} end
-    local rec = _state.data.ui[uiId]
-    if type(rec) ~= "table" then
-        rec = { enabled = true, visible = nil }
-        _state.data.ui[uiId] = rec
+-- NEW: UI module seeding
+-- - Creates record if missing.
+-- - Does NOT overwrite existing record.
+-- - Does NOT save unless opts.save=true.
+function M.register(uiId, defaults, opts)
+    if type(uiId) ~= "string" or uiId == "" then
+        return false, "uiId invalid"
     end
-    return rec
+
+    defaults = (type(defaults) == "table") and defaults or {}
+    opts = (type(opts) == "table") and opts or {}
+
+    if _state.loaded ~= true then
+        local okLoad, err = M.load({ quiet = true })
+        if not okLoad then
+            return false, "load failed: " .. tostring(err)
+        end
+    end
+
+    _ensureStructures()
+
+    local existed = (type(_state.data.ui[uiId]) == "table")
+    if existed then
+        return true, nil
+    end
+
+    local rec = _ensureRec(uiId)
+
+    local en = defaults.enabled
+    if en == nil then
+        en = (_state.data.options and _state.data.options.enabledDefault == true) or false
+    end
+    rec.enabled = (en == true)
+
+    if _state.data.options and _state.data.options.visiblePersistenceEnabled == true then
+        local vis = defaults.visible
+        if vis == nil then
+            vis = (_state.data.options.visibleDefault == true)
+        end
+        rec.visible = (vis == true)
+    else
+        rec.visible = nil
+    end
+
+    if opts.save == true then
+        return M.save(opts)
+    end
+
+    return true, nil
 end
 
 function M.isEnabled(uiId, default)
@@ -270,7 +361,6 @@ function M.isEnabled(uiId, default)
         return (default == true)
     end
 
-    -- Safe default: enabled=true (visibility is separate and remains opt-in later)
     return true
 end
 
@@ -289,7 +379,6 @@ function M.setEnabled(uiId, enabled, opts)
     local rec = _ensureRec(uiId)
     rec.enabled = (enabled == true)
 
-    -- Persist immediately for now (foundation behavior; no automation beyond explicit call)
     if opts and opts.noSave == true then
         return true, nil
     end
@@ -314,6 +403,26 @@ function M.getVisible(uiId, default)
     return (default == true)
 end
 
+function M.enableVisiblePersistence(opts)
+    opts = opts or {}
+
+    if _state.loaded ~= true then
+        local okLoad, err = M.load({ quiet = true, visiblePersistenceEnabled = true })
+        if not okLoad then
+            return false, "load failed: " .. tostring(err)
+        end
+    end
+
+    _ensureStructures()
+    _state.data.options.visiblePersistenceEnabled = true
+
+    if opts.noSave == true then
+        return true, nil
+    end
+
+    return M.save(opts)
+end
+
 function M.setVisible(uiId, visible, opts)
     if type(uiId) ~= "string" or uiId == "" then
         return false, "uiId invalid"
@@ -326,7 +435,6 @@ function M.setVisible(uiId, visible, opts)
         end
     end
 
-    -- Visible persistence is optional and OFF by default.
     if type(_state.data) ~= "table" or type(_state.data.options) ~= "table"
         or _state.data.options.visiblePersistenceEnabled ~= true
     then
@@ -344,26 +452,26 @@ function M.setVisible(uiId, visible, opts)
 end
 
 function M.list()
-    local out = {}
     if type(_state.data) ~= "table" or type(_state.data.ui) ~= "table" then
-        return out
+        return {}
     end
     return _deepCopyUi(_state.data.ui)
 end
 
 function M.status()
+    local uiCount = 0
+    if type(_state.data) == "table" and type(_state.data.ui) == "table" then
+        for _ in pairs(_state.data.ui) do uiCount = uiCount + 1 end
+    end
+
     return {
         moduleVersion = M.VERSION,
         schemaVersion = M.SCHEMA_VERSION,
         loaded = (_state.loaded == true),
         relPath = tostring(_state.relPath or DEFAULT_REL_PATH),
-        uiCount = (type(_state.data) == "table" and type(_state.data.ui) == "table") and (function()
-            local n = 0
-            for _ in pairs(_state.data.ui) do n = n + 1 end
-            return n
-        end)() or 0,
+        uiCount = uiCount,
         options = (type(_state.data) == "table" and type(_state.data.options) == "table") and
-        _copyTableShallow(_state.data.options) or {},
+            _copyTableShallow(_state.data.options) or {},
         lastLoadAt = _state.lastLoadAt,
         lastSaveAt = _state.lastSaveAt,
         lastError = _state.lastError,
@@ -379,7 +487,6 @@ function M.selfTestPersistenceSmoke(opts)
         return false, tostring(storeErr)
     end
 
-    -- Best-effort cleanup first
     pcall(store.delete, relPath)
 
     local schema = M.SCHEMA_VERSION
@@ -387,7 +494,11 @@ function M.selfTestPersistenceSmoke(opts)
         ui = {
             ["_selftest_dummy_ui"] = { enabled = true, visible = nil },
         },
-        options = { visiblePersistenceEnabled = false },
+        options = {
+            visiblePersistenceEnabled = false,
+            enabledDefault = false,
+            visibleDefault = false,
+        },
     }
     local meta = { source = "dwkit.config.gui_settings.selfTestPersistenceSmoke" }
 
