@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.tests.self_test_runner
 -- Owner       : Tests
--- Version     : v2026-01-14G
+-- Version     : v2026-01-15A
 -- Purpose     :
 --   - Provide a SAFE, manual-only self-test runner.
 --   - Prints PASS/FAIL summary + compatibility baseline output.
@@ -12,6 +12,7 @@
 --   - Detects docs vs runtime registry version drift early (Objective D1).
 --   - Includes SAFE persistence smoke checks (selftest-only files; cleanup best-effort).
 --   - Includes SAFE GUI Settings (enabled/visible) foundation checks (Section L).
+--   - Includes SAFE UI Safety Gate (UI contract validation; no UI creation) (Objective: dwtest ui gate).
 --   - DOES NOT send gameplay commands.
 --   - DOES NOT start timers or automation.
 --
@@ -34,11 +35,13 @@
 --       - require("dwkit.config.gui_settings")
 --   - Optional (persistence smoke checks):
 --       - require("dwkit.persist.store")
+--   - Optional (UI safety gate):
+--       - require("dwkit.ui.ui_validator")
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-14G"
+M.VERSION = "v2026-01-15A"
 
 -- -------------------------
 -- Objective D1: Registry version drift locks
@@ -346,6 +349,64 @@ local function _callStore(fn, ...)
         return false, valueOrErr, errMaybe
     end
     return false, nil, valueOrErr
+end
+
+-- -------------------------
+-- UI Safety Gate helpers (SAFE)
+-- -------------------------
+local function _summarizeUiValidation(details)
+    local resArr = nil
+    if type(details) ~= "table" then
+        return { pass = 0, warn = 0, fail = 0, skip = 0, total = 0 }
+    end
+
+    if type(details.results) == "table" and #details.results > 0 then
+        resArr = details.results
+    elseif type(details.details) == "table" and type(details.details.results) == "table" and #details.details.results > 0 then
+        resArr = details.details.results
+    end
+
+    if type(resArr) ~= "table" then
+        return { pass = 0, warn = 0, fail = 0, skip = 0, total = 0 }
+    end
+
+    local c = { pass = 0, warn = 0, fail = 0, skip = 0, total = #resArr }
+    for _, r in ipairs(resArr) do
+        local st = (type(r) == "table" and type(r.status) == "string") and r.status or "UNKNOWN"
+        if st == "PASS" then c.pass = c.pass + 1 end
+        if st == "WARN" then c.warn = c.warn + 1 end
+        if st == "FAIL" then c.fail = c.fail + 1 end
+        if st == "SKIP" then c.skip = c.skip + 1 end
+        if st == "UNKNOWN" then c.warn = c.warn + 1 end
+    end
+    return c
+end
+
+local function _callUiValidatorValidateAllBestEffort(v, opts)
+    if type(v) ~= "table" or type(v.validateAll) ~= "function" then
+        return false, nil, "validateAll missing"
+    end
+
+    -- try function-style
+    local ok1, okFlag1, details1, errMsg1 = pcall(v.validateAll, opts)
+    if ok1 then
+        if okFlag1 == true then
+            return true, details1, errMsg1
+        end
+        -- still a valid call, but returned okFlag=false
+        return false, details1, errMsg1 or "validateAll returned false"
+    end
+
+    -- try method-style
+    local ok2, okFlag2, details2, errMsg2 = pcall(v.validateAll, v, opts)
+    if ok2 then
+        if okFlag2 == true then
+            return true, details2, errMsg2
+        end
+        return false, details2, errMsg2 or "validateAll returned false"
+    end
+
+    return false, nil, "validateAll threw error"
 end
 
 -- -------------------------
@@ -810,6 +871,41 @@ function M.run(opts)
             _lineCheck(false, "guiSettings persistence smoke (SAFE)", "selfTestPersistenceSmoke() missing")
             check("guiSettings persistence smoke (SAFE)", false, "missing API")
         end
+    end
+
+    _out("")
+
+    -- ------------------------------------------------------------
+    -- 5c) UI Safety Gate (SAFE; contract validation only, no UI creation)
+    -- ------------------------------------------------------------
+    _out("[DWKit Test] UI Safety Gate (SAFE):")
+
+    local okUIVal, uiVal = _safeRequire("dwkit.ui.ui_validator")
+    if okUIVal and type(uiVal) == "table" and type(uiVal.validateAll) == "function" then
+        _lineCheck(true, "ui_validator available", "version=" .. tostring(uiVal.VERSION or "unknown"))
+        check("ui_validator available", true, "version=" .. tostring(uiVal.VERSION or "unknown"))
+
+        local okGate, detailsOrNil, errMsg = _callUiValidatorValidateAllBestEffort(uiVal, { source = "self_test_runner" })
+        local c = _summarizeUiValidation(detailsOrNil)
+
+        local passGate = (okGate == true) and (c.fail == 0)
+        local detail = string.format("PASS=%d WARN=%d FAIL=%d SKIP=%d total=%d",
+            c.pass, c.warn, c.fail, c.skip, c.total)
+
+        if passGate then
+            _lineCheck(true, "UI contract validation", detail)
+            check("UI contract validation", true, detail)
+        else
+            local errPart = ""
+            if errMsg and tostring(errMsg) ~= "" then
+                errPart = " err=" .. tostring(errMsg)
+            end
+            _lineCheck(false, "UI contract validation", detail .. errPart)
+            check("UI contract validation", false, detail .. errPart)
+        end
+    else
+        _lineCheck(false, "ui_validator available", "Missing dwkit.ui.ui_validator or validateAll()")
+        check("ui_validator available", false, "Missing dwkit.ui.ui_validator or validateAll()")
     end
 
     _out("")
