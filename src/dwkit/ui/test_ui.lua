@@ -1,11 +1,11 @@
 -- #########################################################################
--- Module Name : dwkit.ui.sample_ui
+-- Module Name : dwkit.ui.test_ui
 -- Owner       : UI
--- Version     : v2026-01-15C
+-- Version     : v2026-01-15B
 -- Purpose     :
 --   - Minimal SAFE UI module that creates a visible Geyser window.
---   - Demonstrates self-seeding gui_settings from inside UI module.
---   - Demonstrates enabled/visible gates and apply() contract.
+--   - Mirrors sample_ui contract so we can validate multi-UI management.
+--   - Demonstrates enabled/visible gates and apply()/dispose() lifecycle.
 --
 -- Public API  :
 --   - getModuleVersion() -> string
@@ -29,8 +29,8 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-15C"
-M.UI_ID = "sample_ui"
+M.VERSION = "v2026-01-15B"
+M.UI_ID = "test_ui"
 
 local U = require("dwkit.ui.ui_base")
 
@@ -57,14 +57,13 @@ local function _ensureWidgets()
             return nil
         end
 
-        -- Create a simple container + label
-        local cname = "__DWKit_sample_ui_container"
-        local lname = "__DWKit_sample_ui_label"
+        local cname = "__DWKit_test_ui_container"
+        local lname = "__DWKit_test_ui_label"
 
         local container = G.Container:new({
             name = cname,
             x = 30,
-            y = 80,
+            y = 150,
             width = 280,
             height = 60,
         })
@@ -77,12 +76,11 @@ local function _ensureWidgets()
             height = "100%",
         }, container)
 
-        -- Style (readable, obvious)
         pcall(function()
             label:setStyleSheet([[
-                background-color: rgba(0,0,0,180);
-                color: white;
-                border: 1px solid #888888;
+                background-color: rgba(20,20,20,190);
+                color: #DDDDDD;
+                border: 1px solid #777777;
                 padding-left: 8px;
                 padding-top: 8px;
                 font-size: 10pt;
@@ -120,7 +118,7 @@ function M.init(opts)
 
     -- Seed UI id here (does NOT overwrite existing record)
     if type(gs.register) == "function" then
-        local okSeed, errSeed = gs.register(M.UI_ID, { enabled = true }, { save = false })
+        local okSeed, errSeed = gs.register(M.UI_ID, { enabled = true, visible = true }, { save = false })
         if not okSeed then
             _state.lastError = "seed failed: " .. tostring(errSeed)
             return false, _state.lastError
@@ -133,7 +131,6 @@ function M.init(opts)
         return false, _state.lastError
     end
 
-    -- Start hidden until apply() decides
     U.safeHide(_state.widgets.container)
 
     _state.inited = true
@@ -157,7 +154,6 @@ function M.apply(opts)
         end
     end
 
-    -- Enabled defaults true, Visible defaults false unless persisted ON
     local enabled = true
     local visible = false
 
@@ -179,7 +175,7 @@ function M.apply(opts)
     local action = "hide"
     if enabled and visible then
         action = "show"
-        _setLabelText("DWKit sample_ui\n(enabled=ON, visible=ON)")
+        _setLabelText("DWKit test_ui\n(enabled=ON, visible=ON)")
         U.safeShow(_state.widgets.container)
     else
         U.safeHide(_state.widgets.container)

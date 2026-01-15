@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-15D
+-- Version     : v2026-01-15H
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -44,7 +44,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-15D"
+M.VERSION = "v2026-01-15H"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -1549,8 +1549,9 @@ function M.install(opts)
         _printDiagBundle()
     end)
 
-    -- UPDATED: include apply
-    local dwguiPattern = [[^dwgui(?:\s+(status|list|enable|disable|visible|apply))?(?:\s+(\S+))?(?:\s+(on|off))?\s*$]]
+    -- UPDATED: include apply + lifecycle helpers + per-UI state drilldown
+    local dwguiPattern =
+    [[^dwgui(?:\s+(status|list|enable|disable|visible|apply|dispose|reload|state))?(?:\s+(\S+))?(?:\s+(on|off))?\s*$]]
     local id20a = _mkAlias(dwguiPattern, function()
         local gs = _getGuiSettingsBestEffort()
         if type(gs) ~= "table" then
@@ -1584,15 +1585,71 @@ function M.install(opts)
             _out("  dwgui visible <uiId> on|off")
             _out("  dwgui apply")
             _out("  dwgui apply <uiId>")
+            _out("  dwgui dispose <uiId>")
+            _out("  dwgui reload")
+            _out("  dwgui reload <uiId>")
+            _out("  dwgui state <uiId>")
             _out("")
             _out("Notes:")
-            _out("  - SAFE: stores flags only; does NOT show/hide UI directly.")
+            _out("  - SAFE flags: enable/disable/visible only updates gui_settings state.")
+            _out("  - Manual lifecycle: apply/dispose/reload dispatches to dwkit.ui.ui_manager.")
+            _out("  - reload (no uiId) reloads all enabled UI.")
             _out("  - 'visible' enables visible persistence on-demand for this run.")
-            _out("  - 'apply' dispatches to dwkit.ui.ui_manager (manual-only).")
+            _out("  - 'state' best-effort calls dwkit.ui.<uiId>.getState() (SAFE, bounded output).")
+            _out("  - UI modules decide show/hide behaviour in apply()/dispose().")
         end
 
         if sub == "" or sub == "status" or sub == "list" then
             _printGuiStatusAndList(gs)
+            return
+        end
+
+        if sub == "state" then
+            if onoff ~= "" or uiId == "" then
+                usage()
+                return
+            end
+
+            local modName = "dwkit.ui." .. tostring(uiId)
+            local okUI, uiModOrErr = _safeRequire(modName)
+            if not okUI or type(uiModOrErr) ~= "table" then
+                _out("[DWKit UI] state uiId=" .. tostring(uiId))
+                _out("  module=" .. tostring(modName))
+                _out("  status=SKIP (no module yet)")
+                return
+            end
+
+            local ui = uiModOrErr
+            _out("[DWKit UI] state uiId=" .. tostring(uiId))
+            _out("  module=" .. tostring(modName))
+            _out("  version=" .. tostring(ui.VERSION or "unknown"))
+
+            if type(ui.getState) == "function" then
+                local ok, state, _, _, err = _callBestEffort(ui, "getState")
+                if ok then
+                    _out("  getState(): OK")
+                    if type(state) == "table" then
+                        _ppTable(state, { maxDepth = 3, maxItems = 35 })
+                    else
+                        _out("  value=" .. _ppValue(state))
+                    end
+                    return
+                end
+                _out("  getState(): ERROR")
+                if err and err ~= "" then _out("    err=" .. tostring(err)) end
+                return
+            end
+
+            _out("  getState(): MISSING")
+            local keys = _sortedKeys(ui)
+            _out("  APIs available (keys on ui table): count=" .. tostring(#keys))
+            local limit = math.min(#keys, 40)
+            for i = 1, limit do
+                _out("    - " .. tostring(keys[i]))
+            end
+            if #keys > limit then
+                _out("    ... (" .. tostring(#keys - limit) .. " more)")
+            end
             return
         end
 
@@ -1628,6 +1685,111 @@ function M.install(opts)
             local okCall, errMaybe = pcall(mgr.applyOne, uiId, { source = "dwgui" })
             if not okCall then
                 _err("dwgui apply <uiId> failed: " .. tostring(errMaybe))
+            end
+            return
+        end
+
+        if sub == "dispose" then
+            if onoff ~= "" or uiId == "" then
+                usage()
+                return
+            end
+
+            local okMgr, mgr = _safeRequire("dwkit.ui.ui_manager")
+            if not okMgr or type(mgr) ~= "table" then
+                _err("dwkit.ui.ui_manager not available. Create src/dwkit/ui/ui_manager.lua first.")
+                return
+            end
+
+            if type(mgr.disposeOne) ~= "function" then
+                _err("ui_manager.disposeOne not available.")
+                return
+            end
+
+            local okCall, errMaybe = pcall(mgr.disposeOne, uiId, { source = "dwgui" })
+            if not okCall then
+                _err("dwgui dispose <uiId> failed: " .. tostring(errMaybe))
+            end
+            return
+        end
+
+        if sub == "reload" then
+            if onoff ~= "" then
+                usage()
+                return
+            end
+
+            local okMgr, mgr = _safeRequire("dwkit.ui.ui_manager")
+            if not okMgr or type(mgr) ~= "table" then
+                _err("dwkit.ui.ui_manager not available. Create src/dwkit/ui/ui_manager.lua first.")
+                return
+            end
+
+            -- NEW: dwgui reload (no uiId) reloads all enabled UI
+            if uiId == "" then
+                if type(mgr.reloadAll) == "function" then
+                    local okCall, errMaybe = pcall(mgr.reloadAll, { source = "dwgui" })
+                    if not okCall then
+                        _err("dwgui reload failed: " .. tostring(errMaybe))
+                    end
+                    return
+                end
+
+                if type(gs.list) ~= "function" then
+                    _err("guiSettings.list not available.")
+                    return
+                end
+                if type(mgr.reloadOne) ~= "function" then
+                    _err("ui_manager.reloadOne not available.")
+                    return
+                end
+
+                local okList, uiMap = pcall(gs.list)
+                if not okList or type(uiMap) ~= "table" then
+                    _err("guiSettings.list failed")
+                    return
+                end
+
+                local keys = _sortedKeys(uiMap)
+                local enabledIds = {}
+                for _, k in ipairs(keys) do
+                    local rec = uiMap[k]
+                    if type(rec) == "table" and rec.enabled == true then
+                        enabledIds[#enabledIds + 1] = k
+                    end
+                end
+
+                if #enabledIds == 0 then
+                    _out("[DWKit UI] reloadAll: no enabled UI")
+                    return
+                end
+
+                local okCount = 0
+                local failCount = 0
+                for _, id in ipairs(enabledIds) do
+                    local okCall, errMaybe = pcall(mgr.reloadOne, id, { source = "dwgui" })
+                    if okCall then
+                        okCount = okCount + 1
+                    else
+                        failCount = failCount + 1
+                        _err("dwgui reload <uiId> failed for " .. tostring(id) .. ": " .. tostring(errMaybe))
+                    end
+                end
+
+                _out("[DWKit UI] reloadAll done enabledCount=" ..
+                    tostring(#enabledIds) .. " ok=" .. tostring(okCount) .. " failed=" .. tostring(failCount))
+                return
+            end
+
+            -- existing: dwgui reload <uiId>
+            if type(mgr.reloadOne) ~= "function" then
+                _err("ui_manager.reloadOne not available.")
+                return
+            end
+
+            local okCall, errMaybe = pcall(mgr.reloadOne, uiId, { source = "dwgui" })
+            if not okCall then
+                _err("dwgui reload <uiId> failed: " .. tostring(errMaybe))
             end
             return
         end
