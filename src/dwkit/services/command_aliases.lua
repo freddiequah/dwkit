@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-15I
+-- Version     : v2026-01-15K
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -44,7 +44,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-15I"
+M.VERSION = "v2026-01-15K"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -1558,8 +1558,10 @@ function M.install(opts)
     end)
 
     -- UPDATED: include validate + apply + lifecycle helpers + per-UI state drilldown
+    -- CHANGE: allow 3rd arg to be generic token (supports "verbose" for validate),
+    -- while still accepting "on|off" for visible.
     local dwguiPattern =
-    [[^dwgui(?:\s+(status|list|enable|disable|visible|validate|apply|dispose|reload|state))?(?:\s+(\S+))?(?:\s+(on|off))?\s*$]]
+    [[^dwgui(?:\s+(status|list|enable|disable|visible|validate|apply|dispose|reload|state))?(?:\s+(\S+))?(?:\s+(\S+))?\s*$]]
     local id20a = _mkAlias(dwguiPattern, function()
         local gs = _getGuiSettingsBestEffort()
         if type(gs) ~= "table" then
@@ -1581,7 +1583,7 @@ function M.install(opts)
 
         local sub = (matches and matches[2]) and tostring(matches[2]) or ""
         local uiId = (matches and matches[3]) and tostring(matches[3]) or ""
-        local onoff = (matches and matches[4]) and tostring(matches[4]) or ""
+        local arg3 = (matches and matches[4]) and tostring(matches[4]) or ""
 
         local function usage()
             _out("[DWKit GUI] Usage:")
@@ -1592,7 +1594,11 @@ function M.install(opts)
             _out("  dwgui disable <uiId>")
             _out("  dwgui visible <uiId> on|off")
             _out("  dwgui validate")
+            _out("  dwgui validate enabled")
             _out("  dwgui validate <uiId>")
+            _out("  dwgui validate verbose")
+            _out("  dwgui validate enabled verbose")
+            _out("  dwgui validate <uiId> verbose")
             _out("  dwgui apply")
             _out("  dwgui apply <uiId>")
             _out("  dwgui dispose <uiId>")
@@ -1606,6 +1612,8 @@ function M.install(opts)
             _out("  - reload (no uiId) reloads all enabled UI.")
             _out("  - 'visible' enables visible persistence on-demand for this run.")
             _out("  - 'validate' dispatches to dwkit.ui.ui_validator (SAFE, no UI creation).")
+            _out("  - compact validate hides SKIP details (but still counts SKIP in summary).")
+            _out("  - 'validate enabled' validates enabled UI only (based on gui_settings list).")
             _out("  - 'state' best-effort calls dwkit.ui.<uiId>.getState() (SAFE, bounded output).")
             _out("  - UI modules decide show/hide behaviour in apply()/dispose().")
         end
@@ -1615,9 +1623,27 @@ function M.install(opts)
             return
         end
 
-        -- NEW: dwgui validate [<uiId>]
+        -- NEW: dwgui validate [enabled|<uiId>] [verbose]
         if sub == "validate" then
-            if onoff ~= "" then
+            local verbose = false
+            local onlyEnabled = false
+
+            -- Support: "dwgui validate verbose" (uiId captured as "verbose")
+            if uiId == "verbose" and arg3 == "" then
+                uiId = ""
+                verbose = true
+            end
+
+            -- Support: "dwgui validate enabled" (enabled captured as uiId token)
+            if uiId == "enabled" then
+                onlyEnabled = true
+                uiId = ""
+            end
+
+            -- Support: "dwgui validate enabled verbose"
+            if arg3 == "verbose" or arg3 == "v" then
+                verbose = true
+            elseif arg3 ~= "" then
                 usage()
                 return
             end
@@ -1630,9 +1656,123 @@ function M.install(opts)
 
             _out("[DWKit UI] validate (dwgui validate)")
             _out("  validator=" .. tostring(v.VERSION or "unknown"))
+            _out("  mode=" .. (verbose and "verbose" or "compact"))
+            _out("  scope=" .. (onlyEnabled and "enabled" or "all"))
             _out("")
 
-            local function showResult(label, okFlag, res, errMsg)
+            local function firstMsgFrom(r)
+                if type(r) ~= "table" then return nil end
+                if type(r.errors) == "table" and #r.errors > 0 then return tostring(r.errors[1]) end
+                if type(r.warnings) == "table" and #r.warnings > 0 then return tostring(r.warnings[1]) end
+                if type(r.notes) == "table" and #r.notes > 0 then return tostring(r.notes[1]) end
+                return nil
+            end
+
+            local function summarizeAll(details, opts)
+                opts = (type(opts) == "table") and opts or {}
+                local includeSkipInList = (opts.includeSkipInList == true)
+
+                local resArr = nil
+                if type(details) ~= "table" then
+                    return { pass = 0, warn = 0, fail = 0, skip = 0, count = 0, list = {} }
+                end
+
+                if type(details.results) == "table" and _isArrayLike(details.results) then
+                    resArr = details.results
+                elseif type(details.details) == "table" and type(details.details.results) == "table" and _isArrayLike(details.details.results) then
+                    resArr = details.details.results
+                end
+
+                local counts = { pass = 0, warn = 0, fail = 0, skip = 0, count = 0, list = {} }
+
+                if type(resArr) ~= "table" then
+                    return counts
+                end
+
+                counts.count = #resArr
+
+                for _, r in ipairs(resArr) do
+                    local st = (type(r) == "table" and type(r.status) == "string") and r.status or "UNKNOWN"
+                    if st == "PASS" then
+                        counts.pass = counts.pass + 1
+                    elseif st == "WARN" then
+                        counts.warn = counts.warn + 1
+                        counts.list[#counts.list + 1] = r
+                    elseif st == "FAIL" then
+                        counts.fail = counts.fail + 1
+                        counts.list[#counts.list + 1] = r
+                    elseif st == "SKIP" then
+                        counts.skip = counts.skip + 1
+                        if includeSkipInList then
+                            counts.list[#counts.list + 1] = r
+                        end
+                    else
+                        -- treat unknown as WARN-like (show it)
+                        counts.warn = counts.warn + 1
+                        counts.list[#counts.list + 1] = r
+                    end
+                end
+
+                return counts
+            end
+
+            local function printCompactAll(label, okFlag, details, errMsg)
+                _out("[DWKit UI] " .. tostring(label))
+                _out("  ok=" .. tostring(okFlag == true))
+                if errMsg and tostring(errMsg) ~= "" then
+                    _out("  err=" .. tostring(errMsg))
+                end
+
+                -- Compact rule: SKIP counted, but hidden from list output
+                local c = summarizeAll(details, { includeSkipInList = false })
+                _out(string.format("  summary: PASS=%d WARN=%d FAIL=%d SKIP=%d total=%d",
+                    c.pass, c.warn, c.fail, c.skip, c.count))
+
+                if #c.list == 0 then
+                    return
+                end
+
+                _out("  WARN/FAIL:")
+                local limit = math.min(#c.list, 25)
+                for i = 1, limit do
+                    local r = c.list[i]
+                    local st = tostring(r.status or "UNKNOWN")
+                    local id = tostring(r.uiId or "?")
+                    local msg = firstMsgFrom(r) or ""
+                    if msg ~= "" then
+                        _out(string.format("    - %s  uiId=%s  msg=%s", st, id, msg))
+                    else
+                        _out(string.format("    - %s  uiId=%s", st, id))
+                    end
+                end
+                if #c.list > limit then
+                    _out("    ... (" .. tostring(#c.list - limit) .. " more)")
+                end
+            end
+
+            local function printCompactOne(label, okFlag, details, errMsg)
+                _out("[DWKit UI] " .. tostring(label))
+                _out("  ok=" .. tostring(okFlag == true))
+                if errMsg and tostring(errMsg) ~= "" then
+                    _out("  err=" .. tostring(errMsg))
+                end
+
+                if type(details) ~= "table" then
+                    _out("  status=UNKNOWN")
+                    return
+                end
+
+                _out("  status=" .. tostring(details.status or "UNKNOWN"))
+                _out("  uiId=" .. tostring(details.uiId or ""))
+                _out("  module=" .. tostring(details.moduleName or ""))
+                _out("  version=" .. tostring(details.version or ""))
+                local msg = firstMsgFrom(details)
+                if msg and msg ~= "" then
+                    _out("  msg=" .. tostring(msg))
+                end
+            end
+
+            local function showVerbose(label, okFlag, res, errMsg)
                 _out("[DWKit UI] " .. tostring(label))
                 _out("  ok=" .. tostring(okFlag == true))
                 if errMsg and tostring(errMsg) ~= "" then
@@ -1646,7 +1786,124 @@ function M.install(opts)
                 end
             end
 
+            -- validateAll (all / enabled)
             if uiId == "" then
+                -- enabled-only path: build summary by filtering gs.list and calling validateOne for enabled ids
+                if onlyEnabled then
+                    if type(gs.list) ~= "function" then
+                        _err("guiSettings.list not available.")
+                        return
+                    end
+                    if type(v.validateOne) ~= "function" then
+                        _err("ui_validator.validateOne not available.")
+                        return
+                    end
+
+                    local okL, uiMap = pcall(gs.list)
+                    if not okL or type(uiMap) ~= "table" then
+                        _err("guiSettings.list failed")
+                        return
+                    end
+
+                    local keys = _sortedKeys(uiMap)
+                    local enabledIds = {}
+                    for _, id in ipairs(keys) do
+                        local rec = uiMap[id]
+                        if type(rec) == "table" and rec.enabled == true then
+                            enabledIds[#enabledIds + 1] = id
+                        end
+                    end
+
+                    if #enabledIds == 0 then
+                        local emptySummary = {
+                            status = "PASS",
+                            count = 0,
+                            passCount = 0,
+                            warnCount = 0,
+                            failCount = 0,
+                            skipCount = 0,
+                            results = {},
+                        }
+                        if verbose then
+                            showVerbose("validateAll (enabled) result", true, emptySummary, nil)
+                        else
+                            printCompactAll("validateAll (enabled) result", true, emptySummary, nil)
+                        end
+                        return
+                    end
+
+                    local results = {}
+                    local passCount, warnCount, failCount, skipCount = 0, 0, 0, 0
+
+                    for _, id in ipairs(enabledIds) do
+                        local okCall, a, b, c, err = _callBestEffort(v, "validateOne", id,
+                            { source = "dwgui", scope = "enabled" })
+                        if not okCall then
+                            results[#results + 1] = {
+                                uiId = tostring(id),
+                                moduleName = "dwkit.ui." .. tostring(id),
+                                status = "FAIL",
+                                errors = { "validateOne call failed: " .. tostring(err) },
+                                warnings = {},
+                                notes = {},
+                                has = {},
+                            }
+                            failCount = failCount + 1
+                        else
+                            local r = (type(b) == "table") and b or nil
+                            if not r then
+                                results[#results + 1] = {
+                                    uiId = tostring(id),
+                                    moduleName = "dwkit.ui." .. tostring(id),
+                                    status = "FAIL",
+                                    errors = { "validateOne returned invalid result" },
+                                    warnings = {},
+                                    notes = {},
+                                    has = {},
+                                }
+                                failCount = failCount + 1
+                            else
+                                results[#results + 1] = r
+                                local st = tostring(r.status or "UNKNOWN")
+                                if st == "PASS" then passCount = passCount + 1 end
+                                if st == "WARN" then warnCount = warnCount + 1 end
+                                if st == "FAIL" then failCount = failCount + 1 end
+                                if st == "SKIP" then skipCount = skipCount + 1 end
+                            end
+                            -- a is okFlag, but we trust r.status
+                        end
+                    end
+
+                    local overallStatus = "PASS"
+                    if failCount > 0 then
+                        overallStatus = "FAIL"
+                    elseif warnCount > 0 then
+                        overallStatus = "WARN"
+                    else
+                        overallStatus = "PASS"
+                    end
+
+                    local summary = {
+                        status = overallStatus,
+                        count = #results,
+                        passCount = passCount,
+                        warnCount = warnCount,
+                        failCount = failCount,
+                        skipCount = skipCount,
+                        results = results,
+                    }
+
+                    local okFlag = (overallStatus ~= "FAIL")
+
+                    if verbose then
+                        showVerbose("validateAll (enabled) result", okFlag, summary, nil)
+                    else
+                        printCompactAll("validateAll (enabled) result", okFlag, summary, nil)
+                    end
+                    return
+                end
+
+                -- all path: delegate to validator.validateAll
                 if type(v.validateAll) ~= "function" then
                     _err("ui_validator.validateAll not available.")
                     return
@@ -1658,12 +1915,12 @@ function M.install(opts)
                     return
                 end
 
-                -- expected patterns:
-                --   (true, resultTable)
-                --   (false, errString)
-                --   (true, resultTable, errString?)   (best-effort)
                 if a == true then
-                    showResult("validateAll result", true, b, c)
+                    if verbose then
+                        showVerbose("validateAll result", true, b, c)
+                    else
+                        printCompactAll("validateAll result", true, b, c)
+                    end
                     return
                 end
 
@@ -1672,6 +1929,7 @@ function M.install(opts)
                 return
             end
 
+            -- validateOne (explicit uiId)
             if type(v.validateOne) ~= "function" then
                 _err("ui_validator.validateOne not available.")
                 return
@@ -1684,7 +1942,11 @@ function M.install(opts)
             end
 
             if a == true then
-                showResult("validateOne result uiId=" .. tostring(uiId), true, b, c)
+                if verbose then
+                    showVerbose("validateOne result uiId=" .. tostring(uiId), true, b, c)
+                else
+                    printCompactOne("validateOne result uiId=" .. tostring(uiId), true, b, c)
+                end
                 return
             end
 
@@ -1694,7 +1956,7 @@ function M.install(opts)
         end
 
         if sub == "state" then
-            if onoff ~= "" or uiId == "" then
+            if arg3 ~= "" or uiId == "" then
                 usage()
                 return
             end
@@ -1743,7 +2005,7 @@ function M.install(opts)
         end
 
         if sub == "apply" then
-            if onoff ~= "" then
+            if arg3 ~= "" then
                 usage()
                 return
             end
@@ -1779,7 +2041,7 @@ function M.install(opts)
         end
 
         if sub == "dispose" then
-            if onoff ~= "" or uiId == "" then
+            if arg3 ~= "" or uiId == "" then
                 usage()
                 return
             end
@@ -1803,7 +2065,7 @@ function M.install(opts)
         end
 
         if sub == "reload" then
-            if onoff ~= "" then
+            if arg3 ~= "" then
                 usage()
                 return
             end
@@ -1884,7 +2146,7 @@ function M.install(opts)
         end
 
         if sub == "enable" or sub == "disable" then
-            if uiId == "" then
+            if arg3 ~= "" or uiId == "" then
                 usage()
                 return
             end
@@ -1907,7 +2169,7 @@ function M.install(opts)
         end
 
         if sub == "visible" then
-            if uiId == "" or (onoff ~= "on" and onoff ~= "off") then
+            if uiId == "" or (arg3 ~= "on" and arg3 ~= "off") then
                 usage()
                 return
             end
@@ -1919,7 +2181,7 @@ function M.install(opts)
                 return
             end
 
-            local vis = (onoff == "on")
+            local vis = (arg3 == "on")
 
             -- FIX: capture the 5th return value from _callBestEffort (err), not the 2nd (which may be true/false)
             local ok, _, _, _, err = _callBestEffort(gs, "setVisible", uiId, vis, { source = "dwgui" })
