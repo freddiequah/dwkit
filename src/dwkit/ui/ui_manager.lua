@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_manager
 -- Owner       : UI
--- Version     : v2026-01-15B
+-- Version     : v2026-01-15E
 -- Purpose     :
 --   - SAFE dispatcher for applying UI modules registered in gui_settings.
 --   - Provides manual-only "apply all" and "apply one" capability.
@@ -13,6 +13,9 @@
 --   - getModuleVersion() -> string
 --   - applyAll(opts?) -> boolean ok, string|nil err
 --   - applyOne(uiId, opts?) -> boolean ok, string|nil err
+--   - disposeOne(uiId, opts?) -> boolean ok, string|nil err
+--   - reloadOne(uiId, opts?) -> boolean ok, string|nil err
+--   - reloadAll(opts?) -> boolean ok, string|nil err
 --
 -- Notes:
 --   - Gating:
@@ -21,11 +24,12 @@
 --   - UI module contract (best-effort):
 --       * init(opts?) optional
 --       * apply(opts?) optional but recommended
+--       * dispose(opts?) optional but recommended
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-15B"
+M.VERSION = "v2026-01-15E"
 
 local function _out(line)
     line = tostring(line or "")
@@ -56,23 +60,30 @@ local function _safeRequire(modName)
     return false, mod
 end
 
--- robust caller: tries fn(obj, ...) then fn(...)
-local function _callBestEffort(obj, fnName, ...)
-    if type(obj) ~= "table" then
-        return false, nil, "obj not table"
+-- Robust module method call WITHOUT double side-effects.
+-- Tries dot-call first: fn(...)
+-- Only if that fails, tries colon-call: fn(self, ...)
+-- Returns: ok, result, err
+local function _callModuleBestEffort(mod, fnName, ...)
+    if type(mod) ~= "table" then
+        return false, nil, "module not table"
     end
-    local fn = obj[fnName]
+    local fn = mod[fnName]
     if type(fn) ~= "function" then
         return false, nil, "missing function: " .. tostring(fnName)
     end
 
-    local ok1, a1 = pcall(fn, obj, ...)
-    if ok1 then return true, a1, nil end
+    local ok1, res1 = pcall(fn, ...)
+    if ok1 then
+        return true, res1, nil
+    end
 
-    local ok2, a2 = pcall(fn, ...)
-    if ok2 then return true, a2, nil end
+    local ok2, res2 = pcall(fn, mod, ...)
+    if ok2 then
+        return true, res2, nil
+    end
 
-    return false, nil, "call failed"
+    return false, nil, "call failed: " .. tostring(res1)
 end
 
 local function _getGuiSettingsBestEffort()
@@ -106,6 +117,26 @@ local function _ensureLoaded(gs)
     return true, nil
 end
 
+local function _isEnabled(gs, uiId)
+    local enabled = true
+    if type(gs.isEnabled) == "function" then
+        local okE, v = pcall(gs.isEnabled, uiId, true)
+        if okE then enabled = (v == true) end
+    end
+    return enabled
+end
+
+local function _clearModuleCache(modName)
+    if type(modName) ~= "string" or modName == "" then
+        return false, "module name invalid"
+    end
+    if type(package) ~= "table" or type(package.loaded) ~= "table" then
+        return false, "package.loaded not available"
+    end
+    package.loaded[modName] = nil
+    return true, nil
+end
+
 function M.getModuleVersion()
     return M.VERSION
 end
@@ -127,13 +158,7 @@ function M.applyOne(uiId, opts)
         return false, tostring(loadErr)
     end
 
-    local enabled = true
-    if type(gs.isEnabled) == "function" then
-        local okE, v = pcall(gs.isEnabled, uiId, true)
-        if okE then enabled = (v == true) end
-    end
-
-    if not enabled then
+    if not _isEnabled(gs, uiId) then
         _out("[DWKit UI] SKIP uiId=" .. tostring(uiId) .. " (disabled)")
         return true, nil
     end
@@ -148,15 +173,15 @@ function M.applyOne(uiId, opts)
     local ui = modOrErr
 
     if type(ui.init) == "function" then
-        pcall(ui.init, opts)
-        -- best-effort also try init(self, opts) if module uses colon style
-        pcall(ui.init, ui, opts)
+        -- IMPORTANT: do NOT call init twice; only retry with colon-style if needed.
+        _callModuleBestEffort(ui, "init", opts)
     end
 
     if type(ui.apply) == "function" then
-        pcall(ui.apply, opts)
-        -- best-effort also try apply(self, opts)
-        pcall(ui.apply, ui, opts)
+        local okApply, _, errApply = _callModuleBestEffort(ui, "apply", opts)
+        if not okApply then
+            return false, tostring(errApply)
+        end
         return true, nil
     end
 
@@ -208,6 +233,127 @@ function M.applyAll(opts)
     _out("  attempted=" .. tostring(attempted))
     _out("  errors=" .. tostring(errors))
     _out("  note=SKIP lines are normal when modules not implemented")
+
+    return true, nil
+end
+
+function M.disposeOne(uiId, opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    if type(uiId) ~= "string" or uiId == "" then
+        return false, "uiId invalid"
+    end
+
+    local modName = "dwkit.ui." .. tostring(uiId)
+    local okR, modOrErr = _safeRequire(modName)
+    if not okR or type(modOrErr) ~= "table" then
+        _out("[DWKit UI] dispose uiId=" .. tostring(uiId) .. " (no module yet)")
+        return true, nil
+    end
+
+    local ui = modOrErr
+
+    if type(ui.dispose) == "function" then
+        local okD, _, errD = _callModuleBestEffort(ui, "dispose", opts)
+        if not okD then
+            return false, tostring(errD)
+        end
+        _out("[DWKit UI] dispose uiId=" .. tostring(uiId) .. " ok=true")
+        return true, nil
+    end
+
+    _out("[DWKit UI] dispose uiId=" .. tostring(uiId) .. " (no dispose() function)")
+    return true, nil
+end
+
+function M.reloadOne(uiId, opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    if type(uiId) ~= "string" or uiId == "" then
+        return false, "uiId invalid"
+    end
+
+    _out("[DWKit UI] reload uiId=" .. tostring(uiId))
+
+    local okD, errD = M.disposeOne(uiId, opts)
+    if not okD then
+        return false, "dispose failed: " .. tostring(errD)
+    end
+
+    -- IMPORTANT: true reload must clear require() cache
+    local modName = "dwkit.ui." .. tostring(uiId)
+    local okClr, errClr = _clearModuleCache(modName)
+    if not okClr then
+        return false, "reload cache clear failed: " .. tostring(errClr)
+    end
+
+    local okA, errA = M.applyOne(uiId, opts)
+    if not okA then
+        return false, "apply failed: " .. tostring(errA)
+    end
+
+    return true, nil
+end
+
+-- NEW: reloadAll (enabled UI only)
+function M.reloadAll(opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    local gs = _getGuiSettingsBestEffort()
+    if type(gs) ~= "table" then
+        return false, "DWKit.config.guiSettings not available"
+    end
+
+    local okLoad, loadErr = _ensureLoaded(gs)
+    if not okLoad then
+        return false, tostring(loadErr)
+    end
+
+    local okL, uiMap = pcall(gs.list)
+    if not okL or type(uiMap) ~= "table" then
+        return false, "guiSettings.list failed"
+    end
+
+    local keys = _sortedKeys(uiMap)
+
+    _out("[DWKit UI] reloadAll (dwgui reload)")
+    if #keys == 0 then
+        _out("  (no registered UI)")
+        return true, nil
+    end
+
+    local enabledIds = {}
+    for _, uiId in ipairs(keys) do
+        if _isEnabled(gs, uiId) then
+            enabledIds[#enabledIds + 1] = uiId
+        end
+    end
+
+    if #enabledIds == 0 then
+        _out("  (no enabled UI)")
+        return true, nil
+    end
+
+    local attempted = 0
+    local okCount = 0
+    local failed = 0
+
+    for _, uiId in ipairs(enabledIds) do
+        attempted = attempted + 1
+        local okOne, errOne = M.reloadOne(uiId, opts)
+        if okOne then
+            okCount = okCount + 1
+        else
+            failed = failed + 1
+            _err("reloadOne failed uiId=" .. tostring(uiId) .. " err=" .. tostring(errOne))
+        end
+    end
+
+    _out("[DWKit UI] reloadAll done enabledCount=" ..
+        tostring(#enabledIds) ..
+        " attempted=" .. tostring(attempted) ..
+        " ok=" .. tostring(okCount) ..
+        " failed=" .. tostring(failed))
 
     return true, nil
 end
