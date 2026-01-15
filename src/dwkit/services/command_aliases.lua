@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-15L
+-- Version     : v2026-01-15M
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -44,7 +44,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-15L"
+M.VERSION = "v2026-01-15M"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -673,6 +673,16 @@ local function _printGuiStatusAndList(gs)
         end
         _out("  - " .. tostring(uiId) .. "  enabled=" .. en .. "  visible=" .. vis)
     end
+end
+
+-- NOTE helper: Avoid misleading PASS when total=0
+local function _printNoUiNote(context)
+    context = tostring(context or "UI")
+    _out("  NOTE: No UI modules found for this profile (" .. context .. ").")
+    _out("  Tips:")
+    _out("    - dwgui list")
+    _out("    - dwgui enable <uiId>")
+    _out("    - dwgui apply   (optional: render enabled UI)")
 end
 
 -- -------------------------
@@ -1370,12 +1380,22 @@ function M.install(opts)
             if verbose then
                 _out("[DWKit Test] UI validateAll details (bounded)")
                 _ppTable(b, { maxDepth = 3, maxItems = 40 })
+                if type(b) == "table" and tonumber(b.count or 0) == 0 then
+                    _out("")
+                    _printNoUiNote("dwtest ui")
+                end
                 return
             end
 
             local cts = summarizeAll(b, { includeSkipInList = false })
             _out(string.format("[DWKit Test] UI summary: PASS=%d WARN=%d FAIL=%d SKIP=%d total=%d",
                 cts.pass, cts.warn, cts.fail, cts.skip, cts.count))
+
+            if cts.count == 0 then
+                _out("")
+                _printNoUiNote("dwtest ui")
+                return
+            end
 
             if #cts.list > 0 then
                 _out("")
@@ -1855,6 +1875,12 @@ function M.install(opts)
                 _out(string.format("  summary: PASS=%d WARN=%d FAIL=%d SKIP=%d total=%d",
                     c.pass, c.warn, c.fail, c.skip, c.count))
 
+                if c.count == 0 then
+                    _out("")
+                    _printNoUiNote("dwgui validate")
+                    return
+                end
+
                 if #c.list == 0 then
                     return
                 end
@@ -1908,6 +1934,10 @@ function M.install(opts)
                 if type(res) == "table" then
                     _out("  details=")
                     _ppTable(res, { maxDepth = 3, maxItems = 40 })
+                    if tonumber(res.count or 0) == 0 then
+                        _out("")
+                        _printNoUiNote("dwgui validate")
+                    end
                 elseif res ~= nil then
                     _out("  details=" .. _ppValue(res))
                 end
@@ -2080,6 +2110,9 @@ function M.install(opts)
             _err(tostring(msg))
             return
         end
+
+        -- (rest of file unchanged)
+        -- NOTE: everything below remains exactly as before to avoid accidental behavioural changes.
 
         if sub == "state" then
             if arg3 ~= "" or uiId == "" then
