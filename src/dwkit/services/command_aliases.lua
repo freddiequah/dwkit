@@ -1,12 +1,12 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-15K
+-- Version     : v2026-01-15L
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
 --       * dwhelp <cmd>
---       * dwtest [quiet]
+--       * dwtest [quiet|ui]
 --       * dwinfo
 --       * dwid
 --       * dwversion
@@ -44,7 +44,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-15K"
+M.VERSION = "v2026-01-15L"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -1267,18 +1267,145 @@ function M.install(opts)
         end
     end)
 
-    local dwtestPattern = [[^dwtest(?:\s+(quiet))?\s*$]]
+    -- UPDATED: dwtest [quiet|ui] [verbose]
+    local dwtestPattern = [[^dwtest(?:\s+(quiet|ui))?(?:\s+(verbose|v))?\s*$]]
     local id3 = _mkAlias(dwtestPattern, function()
         if not _hasTest() then
             _err("DWKit.test.run not available. Run loader.init() first.")
             return
         end
+
         local mode = (matches and matches[2]) and tostring(matches[2]) or ""
+        local arg2 = (matches and matches[3]) and tostring(matches[3]) or ""
+
         if mode == "quiet" then
             DWKit.test.run({ quiet = true })
-        else
-            DWKit.test.run()
+            return
         end
+
+        if mode == "ui" then
+            local verbose = (arg2 == "verbose" or arg2 == "v")
+
+            local v = _getUiValidatorBestEffort()
+            if type(v) ~= "table" then
+                _err("dwkit.ui.ui_validator not available. Create src/dwkit/ui/ui_validator.lua first.")
+                return
+            end
+            if type(v.validateAll) ~= "function" then
+                _err("ui_validator.validateAll not available.")
+                return
+            end
+
+            _out("[DWKit Test] UI Safety Gate (dwtest ui)")
+            _out("  validator=" .. tostring(v.VERSION or "unknown"))
+            _out("  mode=" .. (verbose and "verbose" or "compact"))
+            _out("")
+
+            local function firstMsgFrom(r)
+                if type(r) ~= "table" then return nil end
+                if type(r.errors) == "table" and #r.errors > 0 then return tostring(r.errors[1]) end
+                if type(r.warnings) == "table" and #r.warnings > 0 then return tostring(r.warnings[1]) end
+                if type(r.notes) == "table" and #r.notes > 0 then return tostring(r.notes[1]) end
+                return nil
+            end
+
+            local function summarizeAll(details, opts)
+                opts = (type(opts) == "table") and opts or {}
+                local includeSkipInList = (opts.includeSkipInList == true)
+
+                local resArr = nil
+                if type(details) ~= "table" then
+                    return { pass = 0, warn = 0, fail = 0, skip = 0, count = 0, list = {} }
+                end
+
+                if type(details.results) == "table" and _isArrayLike(details.results) then
+                    resArr = details.results
+                elseif type(details.details) == "table" and type(details.details.results) == "table" and _isArrayLike(details.details.results) then
+                    resArr = details.details.results
+                end
+
+                local counts = { pass = 0, warn = 0, fail = 0, skip = 0, count = 0, list = {} }
+
+                if type(resArr) ~= "table" then
+                    return counts
+                end
+
+                counts.count = #resArr
+
+                for _, r in ipairs(resArr) do
+                    local st = (type(r) == "table" and type(r.status) == "string") and r.status or "UNKNOWN"
+                    if st == "PASS" then
+                        counts.pass = counts.pass + 1
+                    elseif st == "WARN" then
+                        counts.warn = counts.warn + 1
+                        counts.list[#counts.list + 1] = r
+                    elseif st == "FAIL" then
+                        counts.fail = counts.fail + 1
+                        counts.list[#counts.list + 1] = r
+                    elseif st == "SKIP" then
+                        counts.skip = counts.skip + 1
+                        if includeSkipInList then
+                            counts.list[#counts.list + 1] = r
+                        end
+                    else
+                        counts.warn = counts.warn + 1
+                        counts.list[#counts.list + 1] = r
+                    end
+                end
+
+                return counts
+            end
+
+            local okCall, a, b, c, err = _callBestEffort(v, "validateAll", { source = "dwtest" })
+            if not okCall then
+                _err("validateAll failed: " .. tostring(err))
+                return
+            end
+            if a ~= true then
+                local msg = b or c or err or "validateAll failed"
+                _err(tostring(msg))
+                return
+            end
+
+            if verbose then
+                _out("[DWKit Test] UI validateAll details (bounded)")
+                _ppTable(b, { maxDepth = 3, maxItems = 40 })
+                return
+            end
+
+            local cts = summarizeAll(b, { includeSkipInList = false })
+            _out(string.format("[DWKit Test] UI summary: PASS=%d WARN=%d FAIL=%d SKIP=%d total=%d",
+                cts.pass, cts.warn, cts.fail, cts.skip, cts.count))
+
+            if #cts.list > 0 then
+                _out("")
+                _out("[DWKit Test] UI WARN/FAIL (compact)")
+                local limit = math.min(#cts.list, 25)
+                for i = 1, limit do
+                    local r = cts.list[i]
+                    local st = tostring(r.status or "UNKNOWN")
+                    local id = tostring(r.uiId or "?")
+                    local msg = firstMsgFrom(r) or ""
+                    if msg ~= "" then
+                        _out(string.format("  - %s  uiId=%s  msg=%s", st, id, msg))
+                    else
+                        _out(string.format("  - %s  uiId=%s", st, id))
+                    end
+                end
+                if #cts.list > limit then
+                    _out("  ... (" .. tostring(#cts.list - limit) .. " more)")
+                end
+            end
+
+            return
+        end
+
+        if arg2 ~= "" then
+            _err("Usage: dwtest [quiet|ui] [verbose]")
+            return
+        end
+
+        DWKit.test.run()
     end)
 
     local dwinfoPattern = [[^dwinfo\s*$]]
@@ -1870,7 +1997,6 @@ function M.install(opts)
                                 if st == "FAIL" then failCount = failCount + 1 end
                                 if st == "SKIP" then skipCount = skipCount + 1 end
                             end
-                            -- a is okFlag, but we trust r.status
                         end
                     end
 
