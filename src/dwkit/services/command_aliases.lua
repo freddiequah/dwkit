@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-15H
+-- Version     : v2026-01-15I
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -44,7 +44,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-15H"
+M.VERSION = "v2026-01-15I"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -613,6 +613,14 @@ local function _getGuiSettingsBestEffort()
     end
     local ok, mod = _safeRequire("dwkit.config.gui_settings")
     if ok and type(mod) == "table" then return mod end
+    return nil
+end
+
+local function _getUiValidatorBestEffort()
+    local ok, mod = _safeRequire("dwkit.ui.ui_validator")
+    if ok and type(mod) == "table" then
+        return mod
+    end
     return nil
 end
 
@@ -1549,9 +1557,9 @@ function M.install(opts)
         _printDiagBundle()
     end)
 
-    -- UPDATED: include apply + lifecycle helpers + per-UI state drilldown
+    -- UPDATED: include validate + apply + lifecycle helpers + per-UI state drilldown
     local dwguiPattern =
-    [[^dwgui(?:\s+(status|list|enable|disable|visible|apply|dispose|reload|state))?(?:\s+(\S+))?(?:\s+(on|off))?\s*$]]
+    [[^dwgui(?:\s+(status|list|enable|disable|visible|validate|apply|dispose|reload|state))?(?:\s+(\S+))?(?:\s+(on|off))?\s*$]]
     local id20a = _mkAlias(dwguiPattern, function()
         local gs = _getGuiSettingsBestEffort()
         if type(gs) ~= "table" then
@@ -1583,6 +1591,8 @@ function M.install(opts)
             _out("  dwgui enable <uiId>")
             _out("  dwgui disable <uiId>")
             _out("  dwgui visible <uiId> on|off")
+            _out("  dwgui validate")
+            _out("  dwgui validate <uiId>")
             _out("  dwgui apply")
             _out("  dwgui apply <uiId>")
             _out("  dwgui dispose <uiId>")
@@ -1595,12 +1605,91 @@ function M.install(opts)
             _out("  - Manual lifecycle: apply/dispose/reload dispatches to dwkit.ui.ui_manager.")
             _out("  - reload (no uiId) reloads all enabled UI.")
             _out("  - 'visible' enables visible persistence on-demand for this run.")
+            _out("  - 'validate' dispatches to dwkit.ui.ui_validator (SAFE, no UI creation).")
             _out("  - 'state' best-effort calls dwkit.ui.<uiId>.getState() (SAFE, bounded output).")
             _out("  - UI modules decide show/hide behaviour in apply()/dispose().")
         end
 
         if sub == "" or sub == "status" or sub == "list" then
             _printGuiStatusAndList(gs)
+            return
+        end
+
+        -- NEW: dwgui validate [<uiId>]
+        if sub == "validate" then
+            if onoff ~= "" then
+                usage()
+                return
+            end
+
+            local v = _getUiValidatorBestEffort()
+            if type(v) ~= "table" then
+                _err("dwkit.ui.ui_validator not available. Create src/dwkit/ui/ui_validator.lua first.")
+                return
+            end
+
+            _out("[DWKit UI] validate (dwgui validate)")
+            _out("  validator=" .. tostring(v.VERSION or "unknown"))
+            _out("")
+
+            local function showResult(label, okFlag, res, errMsg)
+                _out("[DWKit UI] " .. tostring(label))
+                _out("  ok=" .. tostring(okFlag == true))
+                if errMsg and tostring(errMsg) ~= "" then
+                    _out("  err=" .. tostring(errMsg))
+                end
+                if type(res) == "table" then
+                    _out("  details=")
+                    _ppTable(res, { maxDepth = 3, maxItems = 40 })
+                elseif res ~= nil then
+                    _out("  details=" .. _ppValue(res))
+                end
+            end
+
+            if uiId == "" then
+                if type(v.validateAll) ~= "function" then
+                    _err("ui_validator.validateAll not available.")
+                    return
+                end
+
+                local okCall, a, b, c, err = _callBestEffort(v, "validateAll", { source = "dwgui" })
+                if not okCall then
+                    _err("validateAll failed: " .. tostring(err))
+                    return
+                end
+
+                -- expected patterns:
+                --   (true, resultTable)
+                --   (false, errString)
+                --   (true, resultTable, errString?)   (best-effort)
+                if a == true then
+                    showResult("validateAll result", true, b, c)
+                    return
+                end
+
+                local msg = b or c or err or "validateAll failed"
+                _err(tostring(msg))
+                return
+            end
+
+            if type(v.validateOne) ~= "function" then
+                _err("ui_validator.validateOne not available.")
+                return
+            end
+
+            local okCall, a, b, c, err = _callBestEffort(v, "validateOne", uiId, { source = "dwgui" })
+            if not okCall then
+                _err("validateOne failed for uiId=" .. tostring(uiId) .. ": " .. tostring(err))
+                return
+            end
+
+            if a == true then
+                showResult("validateOne result uiId=" .. tostring(uiId), true, b, c)
+                return
+            end
+
+            local msg = b or c or err or ("validateOne failed for uiId=" .. tostring(uiId))
+            _err(tostring(msg))
             return
         end
 
