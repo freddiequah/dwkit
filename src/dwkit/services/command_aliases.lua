@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-14J
+-- Version     : v2026-01-15D
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -30,6 +30,11 @@
 --   - DOES NOT send gameplay commands.
 --   - DOES NOT start timers or automation.
 --
+--   IMPORTANT:
+--   - tempAlias objects persist in Mudlet even if this module is reloaded via package.loaded=nil.
+--   - This module therefore stores alias ids in _G.DWKit._commandAliasesAliasIds and cleans them up
+--     on install() before creating new aliases, preventing duplicate alias execution/output.
+--
 -- Public API  :
 --   - install(opts?) -> boolean ok, string|nil err
 --   - uninstall() -> boolean ok, string|nil err
@@ -39,7 +44,9 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-14J"
+M.VERSION = "v2026-01-15D"
+
+local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
 local STATE = {
     installed = false,
@@ -1017,6 +1024,63 @@ local function _printDiagBundle()
     _printEventDiagStatus()
 end
 
+-- -------------------------
+-- Global alias-id persistence + cleanup
+-- -------------------------
+local function _getGlobalAliasIds()
+    if type(_G.DWKit) ~= "table" then return nil end
+    local t = _G.DWKit[_GLOBAL_ALIAS_IDS_KEY]
+    if type(t) == "table" then return t end
+    return nil
+end
+
+local function _setGlobalAliasIds(t)
+    if type(_G.DWKit) ~= "table" then return end
+    _G.DWKit[_GLOBAL_ALIAS_IDS_KEY] = (type(t) == "table") and t or nil
+end
+
+local function _killAliasStrict(id)
+    if not id then return true end
+    if type(killAlias) ~= "function" then
+        return false, "killAlias() not available"
+    end
+    local okCall, res = pcall(killAlias, id)
+    if not okCall then
+        return false, "killAlias threw error for id=" .. tostring(id)
+    end
+    if res == false then
+        return false, "killAlias returned false for id=" .. tostring(id)
+    end
+    return true
+end
+
+local function _cleanupPriorAliasesBestEffort()
+    local t = _getGlobalAliasIds()
+    if type(t) ~= "table" then
+        return true
+    end
+    if type(killAlias) ~= "function" then
+        return true
+    end
+
+    -- kill any ids present in the persisted table
+    local any = false
+    for _, id in pairs(t) do
+        if id ~= nil then
+            any = true
+            pcall(killAlias, id)
+        end
+    end
+
+    -- clear persisted state
+    _setGlobalAliasIds(nil)
+
+    if any then
+        _out("[DWKit Alias] cleaned up prior aliases (best-effort)")
+    end
+    return true
+end
+
 function M.isInstalled()
     return STATE.installed and true or false
 end
@@ -1064,23 +1128,10 @@ function M.getState()
     }
 end
 
-local function _killAliasStrict(id)
-    if not id then return true end
-    if type(killAlias) ~= "function" then
-        return false, "killAlias() not available"
-    end
-    local okCall, res = pcall(killAlias, id)
-    if not okCall then
-        return false, "killAlias threw error for id=" .. tostring(id)
-    end
-    if res == false then
-        return false, "killAlias returned false for id=" .. tostring(id)
-    end
-    return true
-end
-
 function M.uninstall()
     if not STATE.installed then
+        -- still clear any global persisted alias ids (best-effort)
+        _setGlobalAliasIds(nil)
         return true, nil
     end
 
@@ -1126,6 +1177,9 @@ function M.uninstall()
 
     STATE.installed = false
 
+    -- clear global persisted alias ids as well
+    _setGlobalAliasIds(nil)
+
     if not allOk then
         STATE.lastError = "One or more aliases failed to uninstall"
         return false, STATE.lastError
@@ -1153,6 +1207,10 @@ function M.install(opts)
         STATE.lastError = "tempAlias() not available"
         return false, STATE.lastError
     end
+
+    -- NEW: Clean up any old aliases from prior module reloads (best-effort).
+    -- Prevents duplicate alias execution/output.
+    _cleanupPriorAliasesBestEffort()
 
     local dwcommandsPattern = [[^dwcommands(?:\s+(safe|game|md))?\s*$]]
     local id1 = _mkAlias(dwcommandsPattern, function()
@@ -1491,7 +1549,8 @@ function M.install(opts)
         _printDiagBundle()
     end)
 
-    local dwguiPattern = [[^dwgui(?:\s+(status|list|enable|disable|visible))?(?:\s+(\S+))?(?:\s+(on|off))?\s*$]]
+    -- UPDATED: include apply
+    local dwguiPattern = [[^dwgui(?:\s+(status|list|enable|disable|visible|apply))?(?:\s+(\S+))?(?:\s+(on|off))?\s*$]]
     local id20a = _mkAlias(dwguiPattern, function()
         local gs = _getGuiSettingsBestEffort()
         if type(gs) ~= "table" then
@@ -1499,8 +1558,15 @@ function M.install(opts)
             return
         end
 
-        -- ensure base load (best-effort); visible persistence stays as-is unless visible subcommand is used
-        if type(gs.load) == "function" then
+        -- ensure base load ONLY if not already loaded
+        -- (prevents wiping in-memory UI seeding done by UI modules this run)
+        local alreadyLoaded = false
+        if type(gs.isLoaded) == "function" then
+            local okLoaded, v = pcall(gs.isLoaded)
+            alreadyLoaded = (okLoaded and v == true)
+        end
+
+        if (not alreadyLoaded) and type(gs.load) == "function" then
             pcall(gs.load, { quiet = true })
         end
 
@@ -1516,14 +1582,53 @@ function M.install(opts)
             _out("  dwgui enable <uiId>")
             _out("  dwgui disable <uiId>")
             _out("  dwgui visible <uiId> on|off")
+            _out("  dwgui apply")
+            _out("  dwgui apply <uiId>")
             _out("")
             _out("Notes:")
             _out("  - SAFE: stores flags only; does NOT show/hide UI directly.")
             _out("  - 'visible' enables visible persistence on-demand for this run.")
+            _out("  - 'apply' dispatches to dwkit.ui.ui_manager (manual-only).")
         end
 
         if sub == "" or sub == "status" or sub == "list" then
             _printGuiStatusAndList(gs)
+            return
+        end
+
+        if sub == "apply" then
+            if onoff ~= "" then
+                usage()
+                return
+            end
+
+            local okMgr, mgr = _safeRequire("dwkit.ui.ui_manager")
+            if not okMgr or type(mgr) ~= "table" then
+                _err("dwkit.ui.ui_manager not available. Create src/dwkit/ui/ui_manager.lua first.")
+                return
+            end
+
+            if uiId == "" then
+                if type(mgr.applyAll) ~= "function" then
+                    _err("ui_manager.applyAll not available.")
+                    return
+                end
+                local okCall, errMaybe = pcall(mgr.applyAll, { source = "dwgui" })
+                if not okCall then
+                    _err("dwgui apply failed: " .. tostring(errMaybe))
+                end
+                return
+            end
+
+            if type(mgr.applyOne) ~= "function" then
+                _err("ui_manager.applyOne not available.")
+                return
+            end
+
+            local okCall, errMaybe = pcall(mgr.applyOne, uiId, { source = "dwgui" })
+            if not okCall then
+                _err("dwgui apply <uiId> failed: " .. tostring(errMaybe))
+            end
             return
         end
 
@@ -1625,6 +1730,31 @@ function M.install(opts)
 
     STATE.installed             = true
     STATE.lastError             = nil
+
+    -- NEW: Persist alias ids globally so install() can clean them up across module reloads.
+    _setGlobalAliasIds({
+        dwcommands   = id1,
+        dwhelp       = id2,
+        dwtest       = id3,
+        dwinfo       = id4,
+        dwid         = id5,
+        dwversion    = id6,
+        dwevents     = id7,
+        dwevent      = id8,
+        dwboot       = id9,
+        dwservices   = id10,
+        dwpresence   = id11,
+        dwactions    = id12,
+        dwskills     = id13,
+        dwscorestore = id14,
+        dweventtap   = id15,
+        dweventsub   = id16,
+        dweventunsub = id17,
+        dweventlog   = id18,
+        dwdiag       = id19,
+        dwgui        = id20a,
+        dwrelease    = id20,
+    })
 
     if not opts.quiet then
         _out(
