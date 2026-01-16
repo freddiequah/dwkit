@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-15M
+-- Version     : v2026-01-16A
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -17,6 +17,7 @@
 --       * dwboot
 --       * dwservices
 --       * dwpresence
+--       * dwroom
 --       * dwactions
 --       * dwskills
 --       * dwscorestore [status|persist <on|off|status>|fixture [basic]|clear|wipe [disk]|reset [disk]]
@@ -44,7 +45,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-15M"
+M.VERSION = "v2026-01-16A"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -65,6 +66,7 @@ local STATE = {
 
         dwservices   = nil,
         dwpresence   = nil,
+        dwroom       = nil,
         dwactions    = nil,
         dwskills     = nil,
         dwscorestore = nil,
@@ -178,6 +180,68 @@ local function _getService(name)
     if not _hasServices() then return nil end
     local s = _G.DWKit.services[name]
     if type(s) == "table" then return s end
+    return nil
+end
+
+-- ------------------------------------------------------------
+-- RoomEntities helpers (SAFE manual surface)
+-- ------------------------------------------------------------
+local function _getRoomEntitiesServiceBestEffort()
+    local svc = _getService("roomEntitiesService")
+    if type(svc) == "table" then return svc end
+    local ok, mod = _safeRequire("dwkit.services.roomentities_service")
+    if ok and type(mod) == "table" then return mod end
+    return nil
+end
+
+local function _roomCountsFromState(state)
+    state = (type(state) == "table") and state or {}
+    local function cnt(t)
+        if type(t) ~= "table" then return 0 end
+        local n = 0
+        for _ in pairs(t) do n = n + 1 end
+        return n
+    end
+    return {
+        players = cnt(state.players),
+        mobs = cnt(state.mobs),
+        items = cnt(state.items),
+        unknown = cnt(state.unknown),
+    }
+end
+
+local function _printRoomEntitiesStatus(svc)
+    if type(svc) ~= "table" then
+        _err("RoomEntitiesService not available. Run loader.init() first.")
+        return
+    end
+
+    local state = {}
+    if type(svc.getState) == "function" then
+        local ok, v, _, _, err = _callBestEffort(svc, "getState")
+        if ok and type(v) == "table" then
+            state = v
+        elseif err then
+            _out("[DWKit Room] getState failed: " .. tostring(err))
+        end
+    end
+
+    local c = _roomCountsFromState(state)
+    _out("[DWKit Room] status (dwroom)")
+    _out("  serviceVersion=" .. tostring(svc.VERSION or "unknown"))
+    _out("  players=" .. tostring(c.players))
+    _out("  mobs=" .. tostring(c.mobs))
+    _out("  items=" .. tostring(c.items))
+    _out("  unknown=" .. tostring(c.unknown))
+end
+
+local function _getClipboardTextBestEffort()
+    if type(getClipboardText) == "function" then
+        local ok, t = pcall(getClipboardText)
+        if ok and type(t) == "string" then
+            return t
+        end
+    end
     return nil
 end
 
@@ -1125,6 +1189,7 @@ function M.getState()
 
             dwservices = STATE.aliasIds.dwservices,
             dwpresence = STATE.aliasIds.dwpresence,
+            dwroom = STATE.aliasIds.dwroom,
             dwactions = STATE.aliasIds.dwactions,
             dwskills = STATE.aliasIds.dwskills,
             dwscorestore = STATE.aliasIds.dwscorestore,
@@ -1176,7 +1241,7 @@ function M.uninstall()
     local allIds = {
         ids.dwcommands, ids.dwhelp, ids.dwtest, ids.dwinfo, ids.dwid, ids.dwversion, ids.dwdiag, ids.dwgui,
         ids.dwevents, ids.dwevent, ids.dwboot,
-        ids.dwservices, ids.dwpresence, ids.dwactions, ids.dwskills, ids.dwscorestore,
+        ids.dwservices, ids.dwpresence, ids.dwroom, ids.dwactions, ids.dwskills, ids.dwscorestore,
         ids.dweventtap, ids.dweventsub, ids.dweventunsub, ids.dweventlog,
         ids.dwrelease,
     }
@@ -1504,6 +1569,110 @@ function M.install(opts)
     local dwpresencePattern = [[^dwpresence\s*$]]
     local id11 = _mkAlias(dwpresencePattern, function()
         _printServiceSnapshot("PresenceService", "presenceService")
+    end)
+
+    -- NEW: dwroom [status|clear|ingestclip [cap]|fixture]
+    local dwroomPattern = [[^dwroom(?:\s+(status|clear|ingestclip|fixture))?(?:\s+(\S+))?\s*$]]
+    local id11b = _mkAlias(dwroomPattern, function()
+        local svc = _getRoomEntitiesServiceBestEffort()
+        if type(svc) ~= "table" then
+            _err("RoomEntitiesService not available. Run loader.init() first.")
+            return
+        end
+
+        local sub = (matches and matches[2]) and tostring(matches[2]) or ""
+        local arg = (matches and matches[3]) and tostring(matches[3]) or ""
+
+        local function usage()
+            _out("[DWKit Room] Usage:")
+            _out("  dwroom")
+            _out("  dwroom status")
+            _out("  dwroom clear")
+            _out("  dwroom ingestclip [cap]")
+            _out("  dwroom fixture")
+            _out("")
+            _out("Notes:")
+            _out("  - ingestclip reads your clipboard and parses it as LOOK output")
+            _out("  - 'cap' treats Capitalized names as players (temporary heuristic)")
+        end
+
+        if sub == "" or sub == "status" then
+            _printRoomEntitiesStatus(svc)
+            return
+        end
+
+        if sub == "clear" then
+            if type(svc.clear) ~= "function" then
+                _err("RoomEntitiesService.clear not available.")
+                return
+            end
+            local ok, _, _, _, err = _callBestEffort(svc, "clear", { source = "dwroom" })
+            if not ok then
+                _err("clear failed: " .. tostring(err))
+                return
+            end
+            _printRoomEntitiesStatus(svc)
+            return
+        end
+
+        if sub == "ingestclip" then
+            if type(svc.ingestLookText) ~= "function" then
+                _err("RoomEntitiesService.ingestLookText not available.")
+                return
+            end
+
+            local text = _getClipboardTextBestEffort()
+            if type(text) ~= "string" or text:gsub("%s+", "") == "" then
+                _err("clipboard is empty (copy LOOK output first).")
+                return
+            end
+
+            local cap = (arg == "cap" or arg == "playercap")
+            local ok, _, _, _, err = _callBestEffort(svc, "ingestLookText", text, {
+                source = "dwroom:clipboard",
+                assumeCapitalizedAsPlayer = cap,
+            })
+            if not ok then
+                _err("ingestclip failed: " .. tostring(err))
+                return
+            end
+
+            _out("[DWKit Room] ingestclip OK (cap=" .. tostring(cap == true) .. ")")
+            _printRoomEntitiesStatus(svc)
+            return
+        end
+
+        if sub == "fixture" then
+            if type(svc.ingestLookText) ~= "function" then
+                _err("RoomEntitiesService.ingestLookText not available.")
+                return
+            end
+
+            local fixture = table.concat({
+                "A quiet stone hallway.",
+                "Exits: north south",
+                "Zerath is standing here.",
+                "a city guard is standing here.",
+                "the corpse of a rat is here.",
+                "a rusty sword is here.",
+                "a small lantern is here.",
+            }, "\n")
+
+            local ok, _, _, _, err = _callBestEffort(svc, "ingestLookText", fixture, {
+                source = "dwroom:fixture",
+                assumeCapitalizedAsPlayer = true,
+            })
+            if not ok then
+                _err("fixture ingest failed: " .. tostring(err))
+                return
+            end
+
+            _out("[DWKit Room] fixture ingested")
+            _printRoomEntitiesStatus(svc)
+            return
+        end
+
+        usage()
     end)
 
     local dwactionsPattern = [[^dwactions\s*$]]
@@ -2361,7 +2530,7 @@ function M.install(opts)
         _printReleaseChecklist()
     end)
 
-    local all = { id1, id2, id3, id4, id5, id6, id7, id8, id9, id10, id11, id12, id13, id14, id15, id16, id17, id18, id19,
+    local all = { id1, id2, id3, id4, id5, id6, id7, id8, id9, id10, id11, id11b, id12, id13, id14, id15, id16, id17, id18, id19,
         id20a, id20 }
     for _, id in ipairs(all) do
         if not id then
@@ -2387,6 +2556,7 @@ function M.install(opts)
 
     STATE.aliasIds.dwservices   = id10
     STATE.aliasIds.dwpresence   = id11
+    STATE.aliasIds.dwroom       = id11b
     STATE.aliasIds.dwactions    = id12
     STATE.aliasIds.dwskills     = id13
     STATE.aliasIds.dwscorestore = id14
@@ -2416,6 +2586,7 @@ function M.install(opts)
         dwboot       = id9,
         dwservices   = id10,
         dwpresence   = id11,
+        dwroom       = id11b,
         dwactions    = id12,
         dwskills     = id13,
         dwscorestore = id14,
@@ -2430,7 +2601,7 @@ function M.install(opts)
 
     if not opts.quiet then
         _out(
-            "[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion, dwevents, dwevent, dwboot, dwservices, dwpresence, dwactions, dwskills, dwscorestore, dweventtap, dweventsub, dweventunsub, dweventlog, dwdiag, dwgui, dwrelease")
+            "[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion, dwevents, dwevent, dwboot, dwservices, dwpresence, dwroom, dwactions, dwskills, dwscorestore, dweventtap, dweventsub, dweventunsub, dweventlog, dwdiag, dwgui, dwrelease")
     end
 
     return true, nil
