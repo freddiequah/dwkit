@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.tests.self_test_runner
 -- Owner       : Tests
--- Version     : v2026-01-15A
+-- Version     : v2026-01-16A
 -- Purpose     :
 --   - Provide a SAFE, manual-only self-test runner.
 --   - Prints PASS/FAIL summary + compatibility baseline output.
@@ -41,13 +41,13 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-15A"
+M.VERSION = "v2026-01-16A"
 
 -- -------------------------
 -- Objective D1: Registry version drift locks
 -- -------------------------
 -- MUST match docs/Event_Registry_v1.0.md "## Version"
-local EXPECTED_EVENT_REGISTRY_VERSION = "v1.8"
+local EXPECTED_EVENT_REGISTRY_VERSION = "v1.9"
 
 -- MUST match docs/Command_Registry_v1.0.md "## Version"
 local EXPECTED_COMMAND_REGISTRY_VERSION = "v2.9"
@@ -747,6 +747,7 @@ function M.run(opts)
             prefix .. "Service:ActionModel:Updated",
             prefix .. "Service:SkillRegistry:Updated",
             prefix .. "Service:ScoreStore:Updated",
+            prefix .. "Service:RoomEntities:Updated",
         }
         for _, ev in ipairs(required) do
             local okHas, hasOrErr = _safecall(evReg.has, ev)

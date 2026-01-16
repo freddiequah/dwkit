@@ -1,39 +1,51 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-01-16A
+-- Version     : v2026-01-16B
 -- Purpose     :
---   - Minimal SAFE scaffold UI module for RoomEntities UI track.
---   - Creates a small Geyser container + label (placeholder only).
+--   - SAFE RoomEntities UI scaffold with live render from RoomEntitiesService (data only).
+--   - Creates a small Geyser container + label.
 --   - Demonstrates gui_settings self-seeding (register) + apply()/dispose() lifecycle.
---   - Does NOT depend on WhoStore yet.
---
--- Public API  :
---   - getModuleVersion() -> string
---   - getUiId() -> string
---   - init(opts?) -> boolean ok, string|nil err
---   - apply(opts?) -> boolean ok, string|nil err
---   - getState() -> table copy
---   - dispose(opts?) -> boolean ok, string|nil err
---
--- Events Emitted   : None (SAFE)
--- Events Consumed  : None (SAFE)
--- Gameplay Sends   : None
--- Automation       : None
--- Dependencies     :
---   - DWKit.config.guiSettings (preferred) or require("dwkit.config.gui_settings")
---   - Mudlet Geyser (Label / Container)
---   - dwkit.ui.ui_base
--- Invariants       :
---   - MUST remain SAFE. No gameplay commands, no timers.
+--   - No timers, no send(), no automation.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-16A"
+M.VERSION = "v2026-01-16B"
 M.UI_ID = "roomentities_ui"
 
 local U = require("dwkit.ui.ui_base")
+
+local function _safeRequire(modName)
+    local ok, mod = pcall(require, modName)
+    if ok then return true, mod end
+    return false, mod
+end
+
+local function _countAny(x)
+    if type(x) ~= "table" then return 0 end
+    local n = 0
+    for _ in pairs(x) do n = n + 1 end
+    return n
+end
+
+local function _formatRoomEntitiesState(state)
+    state = (type(state) == "table") and state or {}
+
+    local players = state.players
+    local mobs = state.mobs
+    local items = state.items
+    local unknown = state.unknown
+
+    local lines = {}
+    lines[#lines + 1] = "DWKit roomentities_ui"
+    lines[#lines + 1] = "players=" .. tostring(_countAny(players))
+    lines[#lines + 1] = "mobs=" .. tostring(_countAny(mobs))
+    lines[#lines + 1] = "items=" .. tostring(_countAny(items))
+    lines[#lines + 1] = "unknown=" .. tostring(_countAny(unknown))
+
+    return table.concat(lines, "\n")
+end
 
 local _state = {
     inited = false,
@@ -64,9 +76,9 @@ local function _ensureWidgets()
         local container = G.Container:new({
             name = cname,
             x = 30,
-            y = 300,
+            y = 310,
             width = 280,
-            height = 60,
+            height = 80,
         })
 
         local label = G.Label:new({
@@ -117,8 +129,6 @@ function M.init(opts)
         return false, _state.lastError
     end
 
-    -- Seed UI id here (does NOT overwrite existing record)
-    -- Default enabled=false so it won't suddenly enter enabled-scope validation unless user enables it.
     if type(gs.register) == "function" then
         local okSeed, errSeed = gs.register(M.UI_ID, { enabled = false }, { save = false })
         if not okSeed then
@@ -133,7 +143,6 @@ function M.init(opts)
         return false, _state.lastError
     end
 
-    -- Start hidden until apply() decides
     U.safeHide(_state.widgets.container)
 
     _state.inited = true
@@ -178,7 +187,15 @@ function M.apply(opts)
     local action = "hide"
     if enabled and visible then
         action = "show"
-        _setLabelText("DWKit roomentities_ui (scaffold)\n(enabled=ON, visible=ON)")
+
+        local okS, S = _safeRequire("dwkit.services.roomentities_service")
+        local state = {}
+        if okS and type(S) == "table" and type(S.getState) == "function" then
+            local okGet, v = pcall(S.getState)
+            if okGet and type(v) == "table" then state = v end
+        end
+
+        _setLabelText(_formatRoomEntitiesState(state))
         U.safeShow(_state.widgets.container)
     else
         U.safeHide(_state.widgets.container)
