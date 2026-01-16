@@ -1,7 +1,7 @@
-# DWKit UI Module Contract (v1.1)
+# DWKit UI Module Contract (v1.2)
 
-Version: **v1.1**  
-Status: **Authoritative Contract**  
+Version: **v1.2**
+Status: **Authoritative Contract**
 Scope: **DWKit SAFE UI modules** (Mudlet Geyser UI only)
 
 This document defines the required contract for all UI modules under:
@@ -33,22 +33,22 @@ It ensures all UI modules behave consistently with DWKit governance:
 
 ## 1) Non-Negotiable SAFE Rules
 
-All DWKit UI modules MUST remain **SAFE**:
+All DWKit UI modules MUST remain SAFE.
 
-✅ Allowed
+Allowed:
 - Creating/drawing UI widgets using Mudlet Geyser (Container/Label/etc)
 - Reading config state (guiSettings) and showing/hiding UI accordingly
 - Logging DWKit UI lifecycle messages (apply/dispose/reload)
 - Calling SAFE helper modules (e.g., ui_base, guiSettings) to manage widgets and state
 
-❌ Not allowed
+Not allowed:
 - Sending gameplay commands (`send()`, `sendAll()`, etc)
 - Timers, auto-triggers, background automation
 - Auto-executing combat/heal/scripting actions
 - Event emissions that cause automation behavior
 - Writing persistence directly (UI must not write files)
 
-A UI module MUST behave like a **display layer only**.
+A UI module MUST behave like a display layer only.
 
 ---
 

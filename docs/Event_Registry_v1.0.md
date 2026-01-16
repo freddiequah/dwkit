@@ -1,7 +1,7 @@
 # Event Registry
 
 ## Version
-v1.8
+v1.9
 
 ## Purpose
 This document is the canonical registry of all project events.
@@ -44,6 +44,7 @@ Notes:
   - Emitted once after loader.init attaches DWKit surfaces; indicates kit is ready for manual use.
 - PayloadSchema:
   - ts: number
+  - tsMs: number (epoch ms; monotonic)
 - Producers:
   - dwkit.loader.init
 - Consumers:
@@ -85,6 +86,23 @@ Notes:
   - SAFE internal event (no gameplay commands).
   - Manual-only: emitted only when service API is invoked.
 
+### DWKit:Service:RoomEntities:Updated
+- Description:
+  - Emitted when RoomEntitiesService updates its room entity classification state (SAFE; data only).
+- PayloadSchema:
+  - ts: number
+  - state: table
+  - delta: table (optional)
+  - source: string (optional)
+- Producers:
+  - dwkit.services.roomentities_service
+- Consumers:
+  - internal (ui/tests/integrations)
+- Notes:
+  - SAFE internal event (no gameplay commands).
+  - Manual-only: emitted only when service API is invoked.
+  - Primary consumer is ui_autorefresh and RoomEntities UI modules.
+
 ### DWKit:Service:ScoreStore:Updated
 - Description:
   - Emitted when ScoreStoreService ingests a score-like text snapshot (SAFE; no gameplay sends).
@@ -116,6 +134,22 @@ Notes:
 - Notes:
   - SAFE internal event (no gameplay commands).
   - Manual-only: emitted only when service API is invoked.
+
+### DWKit:Service:WhoStore:Updated
+- Description:
+  - Emitted when WhoStoreService ingests WHO output and updates the WhoStore snapshot (SAFE; data only).
+- PayloadSchema:
+  - snapshot: table
+  - source: string (optional)
+  - ts: number
+- Producers:
+  - dwkit.services.whostore_service (future)
+- Consumers:
+  - internal (future ui/services/tests)
+- Notes:
+  - SAFE internal event (no gameplay commands).
+  - UI modules MUST consume WhoStore snapshot via this event or service API.
+  - WHO parsing contract is defined in docs/WhoStore_Service_Contract_v1.0.md.
 
 ## Notes
 - Registry and bus skeleton exist to enforce "docs-first" event introduction.

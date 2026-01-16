@@ -1,12 +1,12 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.presence_ui
 -- Owner       : UI
--- Version     : v2026-01-16A
+-- Version     : v2026-01-16B
 -- Purpose     :
---   - Minimal SAFE scaffold UI module for Presence UI track.
---   - Creates a small Geyser container + label (placeholder only).
+--   - SAFE Presence UI scaffold with live render from PresenceService (data only).
+--   - Creates a small Geyser container + label.
 --   - Demonstrates gui_settings self-seeding (register) + apply()/dispose() lifecycle.
---   - Does NOT depend on WhoStore yet.
+--   - No timers, no send(), no automation.
 --
 -- Public API  :
 --   - getModuleVersion() -> string
@@ -15,25 +15,77 @@
 --   - apply(opts?) -> boolean ok, string|nil err
 --   - getState() -> table copy
 --   - dispose(opts?) -> boolean ok, string|nil err
---
--- Events Emitted   : None (SAFE)
--- Events Consumed  : None (SAFE)
--- Gameplay Sends   : None
--- Automation       : None
--- Dependencies     :
---   - DWKit.config.guiSettings (preferred) or require("dwkit.config.gui_settings")
---   - Mudlet Geyser (Label / Container)
---   - dwkit.ui.ui_base
--- Invariants       :
---   - MUST remain SAFE. No gameplay commands, no timers.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-16A"
+M.VERSION = "v2026-01-16B"
 M.UI_ID = "presence_ui"
 
 local U = require("dwkit.ui.ui_base")
+
+local function _safeRequire(modName)
+    local ok, mod = pcall(require, modName)
+    if ok then return true, mod end
+    return false, mod
+end
+
+local function _sortedKeys(t)
+    local keys = {}
+    if type(t) ~= "table" then return keys end
+    for k, _ in pairs(t) do keys[#keys + 1] = k end
+    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    return keys
+end
+
+local function _asOneLine(x)
+    if x == nil then return "nil" end
+    if type(x) == "string" then
+        local s = x:gsub("\n", " "):gsub("\r", " ")
+        if #s > 80 then s = s:sub(1, 80) .. "..." end
+        return s
+    end
+    if type(x) == "number" or type(x) == "boolean" then
+        return tostring(x)
+    end
+    if type(x) == "table" then
+        local n = 0
+        for _ in pairs(x) do n = n + 1 end
+        return "{table,count=" .. tostring(n) .. "}"
+    end
+    return tostring(x)
+end
+
+local function _formatPresenceState(state)
+    state = (type(state) == "table") and state or {}
+    local keys = _sortedKeys(state)
+
+    local lines = {}
+    lines[#lines + 1] = "DWKit presence_ui"
+    lines[#lines + 1] = "keys=" .. tostring(#keys)
+
+    -- Friendly fields if present
+    if type(state.selfName) == "string" and state.selfName ~= "" then
+        lines[#lines + 1] = "self=" .. tostring(state.selfName)
+    end
+
+    if type(state.nearbyPlayers) == "table" then
+        local cnt = #state.nearbyPlayers
+        lines[#lines + 1] = "nearbyPlayers=" .. tostring(cnt)
+    end
+
+    -- Show first few keys as a quick debug view
+    local shown = 0
+    for _, k in ipairs(keys) do
+        if shown >= 4 then break end
+        if k ~= "selfName" and k ~= "nearbyPlayers" then
+            lines[#lines + 1] = tostring(k) .. "=" .. _asOneLine(state[k])
+            shown = shown + 1
+        end
+    end
+
+    return table.concat(lines, "\n")
+end
 
 local _state = {
     inited = false,
@@ -66,7 +118,7 @@ local function _ensureWidgets()
             x = 30,
             y = 220,
             width = 280,
-            height = 60,
+            height = 80,
         })
 
         local label = G.Label:new({
@@ -117,8 +169,6 @@ function M.init(opts)
         return false, _state.lastError
     end
 
-    -- Seed UI id here (does NOT overwrite existing record)
-    -- Default enabled=false so it won't suddenly enter enabled-scope validation unless user enables it.
     if type(gs.register) == "function" then
         local okSeed, errSeed = gs.register(M.UI_ID, { enabled = false }, { save = false })
         if not okSeed then
@@ -133,7 +183,6 @@ function M.init(opts)
         return false, _state.lastError
     end
 
-    -- Start hidden until apply() decides
     U.safeHide(_state.widgets.container)
 
     _state.inited = true
@@ -157,7 +206,6 @@ function M.apply(opts)
         end
     end
 
-    -- Enabled defaults true, Visible defaults false unless persisted ON
     local enabled = true
     local visible = false
 
@@ -179,7 +227,15 @@ function M.apply(opts)
     local action = "hide"
     if enabled and visible then
         action = "show"
-        _setLabelText("DWKit presence_ui (scaffold)\n(enabled=ON, visible=ON)")
+
+        local okS, S = _safeRequire("dwkit.services.presence_service")
+        local state = {}
+        if okS and type(S) == "table" and type(S.getState) == "function" then
+            local okGet, v = pcall(S.getState)
+            if okGet and type(v) == "table" then state = v end
+        end
+
+        _setLabelText(_formatPresenceState(state))
         U.safeShow(_state.widgets.container)
     else
         U.safeHide(_state.widgets.container)
