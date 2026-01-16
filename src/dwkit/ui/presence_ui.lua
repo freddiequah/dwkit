@@ -1,11 +1,12 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.presence_ui
 -- Owner       : UI
--- Version     : v2026-01-16B
+-- Version     : v2026-01-16D
 -- Purpose     :
 --   - SAFE Presence UI scaffold with live render from PresenceService (data only).
 --   - Creates a small Geyser container + label.
 --   - Demonstrates gui_settings self-seeding (register) + apply()/dispose() lifecycle.
+--   - Subscribes to PresenceService "updated" event to auto-refresh when state changes.
 --   - No timers, no send(), no automation.
 --
 -- Public API  :
@@ -19,7 +20,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-16B"
+M.VERSION = "v2026-01-16D"
 M.UI_ID = "presence_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -93,6 +94,10 @@ local _state = {
     lastError = nil,
     enabled = nil,
     visible = nil,
+
+    -- Centralized subscription record (from U.subscribeServiceUpdates)
+    subscription = nil,
+
     widgets = {
         container = nil,
         label = nil,
@@ -154,6 +159,77 @@ end
 
 local function _setLabelText(txt)
     U.safeSetLabelText(_state.widgets.label, txt)
+end
+
+local function _resolveUpdatedEventName(S)
+    if type(S) ~= "table" then return nil end
+    if type(S.getUpdatedEventName) == "function" then
+        local ok, v = pcall(S.getUpdatedEventName)
+        if ok and type(v) == "string" and v ~= "" then
+            return v
+        end
+    end
+    if type(S.EV_UPDATED) == "string" and S.EV_UPDATED ~= "" then
+        return S.EV_UPDATED
+    end
+    return nil
+end
+
+local function _renderFromService()
+    local okS, S = _safeRequire("dwkit.services.presence_service")
+    if not okS or type(S) ~= "table" then
+        return false, "PresenceService not available"
+    end
+
+    local state = {}
+    if type(S.getState) == "function" then
+        local okGet, v = pcall(S.getState)
+        if okGet and type(v) == "table" then state = v end
+    end
+
+    _setLabelText(_formatPresenceState(state))
+    return true, nil
+end
+
+local function _ensureSubscription()
+    if type(_state.subscription) == "table" and _state.subscription.handlerId ~= nil then
+        return true, nil
+    end
+
+    local okS, S = _safeRequire("dwkit.services.presence_service")
+    if not okS or type(S) ~= "table" then
+        return false, "PresenceService not available"
+    end
+
+    if type(S.onUpdated) ~= "function" then
+        return false, "PresenceService.onUpdated() not available"
+    end
+
+    local evName = _resolveUpdatedEventName(S)
+    if type(evName) ~= "string" or evName == "" then
+        return false, "Presence updated event name not available"
+    end
+
+    local handlerFn = function(payload)
+        -- Only render when we are supposed to be visible.
+        if _state.enabled == true and _state.visible == true and type(_state.widgets.label) == "table" then
+            _renderFromService()
+        end
+    end
+
+    local okSub, sub, errSub = U.subscribeServiceUpdates(
+        M.UI_ID,
+        S.onUpdated,
+        handlerFn,
+        { eventName = evName, debugPrefix = "[DWKit UI] presence_ui" }
+    )
+
+    if not okSub then
+        return false, tostring(errSub or "subscribe failed")
+    end
+
+    _state.subscription = sub
+    return true, nil
 end
 
 function M.getModuleVersion() return M.VERSION end
@@ -228,14 +304,16 @@ function M.apply(opts)
     if enabled and visible then
         action = "show"
 
-        local okS, S = _safeRequire("dwkit.services.presence_service")
-        local state = {}
-        if okS and type(S) == "table" and type(S.getState) == "function" then
-            local okGet, v = pcall(S.getState)
-            if okGet and type(v) == "table" then state = v end
+        local okSub, errSub = _ensureSubscription()
+        if not okSub then
+            _state.lastError = tostring(errSub)
         end
 
-        _setLabelText(_formatPresenceState(state))
+        local okR, errR = _renderFromService()
+        if not okR then
+            _state.lastError = tostring(errR)
+        end
+
         U.safeShow(_state.widgets.container)
     else
         U.safeHide(_state.widgets.container)
@@ -252,6 +330,8 @@ function M.apply(opts)
 end
 
 function M.getState()
+    local sub = (type(_state.subscription) == "table") and _state.subscription or {}
+
     return {
         uiId = M.UI_ID,
         version = M.VERSION,
@@ -260,6 +340,10 @@ function M.getState()
         visible = _state.visible,
         lastApply = _state.lastApply,
         lastError = _state.lastError,
+        subscription = {
+            handlerId = sub.handlerId,
+            updatedEventName = sub.updatedEventName,
+        },
         widgets = {
             hasContainer = (type(_state.widgets.container) == "table"),
             hasLabel = (type(_state.widgets.label) == "table"),
@@ -269,6 +353,10 @@ end
 
 function M.dispose(opts)
     opts = (type(opts) == "table") and opts or {}
+
+    -- Best-effort centralized unsubscribe
+    U.unsubscribeServiceUpdates(_state.subscription)
+    _state.subscription = nil
 
     U.clearUiStoreEntry(M.UI_ID)
 

@@ -1,17 +1,18 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-01-16B
+-- Version     : v2026-01-16E
 -- Purpose     :
 --   - SAFE RoomEntities UI scaffold with live render from RoomEntitiesService (data only).
 --   - Creates a small Geyser container + label.
 --   - Demonstrates gui_settings self-seeding (register) + apply()/dispose() lifecycle.
+--   - Subscribes to RoomEntitiesService Updated event to auto-refresh label.
 --   - No timers, no send(), no automation.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-16B"
+M.VERSION = "v2026-01-16E"
 M.UI_ID = "roomentities_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -53,6 +54,10 @@ local _state = {
     lastError = nil,
     enabled = nil,
     visible = nil,
+
+    -- Centralized subscription record (from U.subscribeServiceUpdates)
+    subscription = nil,
+
     widgets = {
         container = nil,
         label = nil,
@@ -114,6 +119,100 @@ end
 
 local function _setLabelText(txt)
     U.safeSetLabelText(_state.widgets.label, txt)
+end
+
+local function _getServiceStateBestEffort()
+    local okS, S = _safeRequire("dwkit.services.roomentities_service")
+    if not okS or type(S) ~= "table" then
+        return {}
+    end
+
+    if type(S.getState) == "function" then
+        local okGet, v = pcall(S.getState)
+        if okGet and type(v) == "table" then
+            return v
+        end
+    end
+
+    return {}
+end
+
+local function _renderNow(state)
+    state = (type(state) == "table") and state or {}
+    _setLabelText(_formatRoomEntitiesState(state))
+end
+
+local function _renderFromService()
+    local state = _getServiceStateBestEffort()
+    _renderNow(state)
+end
+
+local function _resolveUpdatedEventName(S)
+    if type(S) ~= "table" then return nil end
+    if type(S.getUpdatedEventName) == "function" then
+        local ok, v = pcall(S.getUpdatedEventName)
+        if ok and type(v) == "string" and v ~= "" then
+            return v
+        end
+    end
+    if type(S.EV_UPDATED) == "string" and S.EV_UPDATED ~= "" then
+        return S.EV_UPDATED
+    end
+    return nil
+end
+
+local function _ensureSubscription()
+    if type(_state.subscription) == "table" and _state.subscription.handlerId ~= nil then
+        return true, nil
+    end
+
+    local okS, S = _safeRequire("dwkit.services.roomentities_service")
+    if not okS or type(S) ~= "table" then
+        _state.lastError = "RoomEntitiesService not available"
+        return false, _state.lastError
+    end
+
+    if type(S.onUpdated) ~= "function" then
+        _state.lastError = "RoomEntitiesService.onUpdated not available"
+        return false, _state.lastError
+    end
+
+    local evName = _resolveUpdatedEventName(S)
+    if type(evName) ~= "string" or evName == "" then
+        _state.lastError = "RoomEntities updated event name not available"
+        return false, _state.lastError
+    end
+
+    local handlerFn = function(payload)
+        -- Only update UI when it is actually visible+enabled
+        if _state.enabled ~= true or _state.visible ~= true then
+            return
+        end
+
+        payload = (type(payload) == "table") and payload or {}
+
+        -- Prefer payload.state if present; fallback to service.getState
+        if type(payload.state) == "table" then
+            _renderNow(payload.state)
+        else
+            _renderFromService()
+        end
+    end
+
+    local okSub, sub, errSub = U.subscribeServiceUpdates(
+        M.UI_ID,
+        S.onUpdated,
+        handlerFn,
+        { eventName = evName, debugPrefix = "[DWKit UI] roomentities_ui" }
+    )
+
+    if not okSub then
+        _state.lastError = tostring(errSub or "subscribe failed")
+        return false, _state.lastError
+    end
+
+    _state.subscription = sub
+    return true, nil
 end
 
 function M.getModuleVersion() return M.VERSION end
@@ -188,14 +287,13 @@ function M.apply(opts)
     if enabled and visible then
         action = "show"
 
-        local okS, S = _safeRequire("dwkit.services.roomentities_service")
-        local state = {}
-        if okS and type(S) == "table" and type(S.getState) == "function" then
-            local okGet, v = pcall(S.getState)
-            if okGet and type(v) == "table" then state = v end
+        local okSub, errSub = _ensureSubscription()
+        if not okSub then
+            -- Still show UI, but it will only refresh on manual apply/reload
+            _out("[DWKit UI] roomentities_ui WARN: " .. tostring(errSub))
         end
 
-        _setLabelText(_formatRoomEntitiesState(state))
+        _renderFromService()
         U.safeShow(_state.widgets.container)
     else
         U.safeHide(_state.widgets.container)
@@ -212,6 +310,8 @@ function M.apply(opts)
 end
 
 function M.getState()
+    local sub = (type(_state.subscription) == "table") and _state.subscription or {}
+
     return {
         uiId = M.UI_ID,
         version = M.VERSION,
@@ -220,6 +320,10 @@ function M.getState()
         visible = _state.visible,
         lastApply = _state.lastApply,
         lastError = _state.lastError,
+        subscription = {
+            handlerId = sub.handlerId,
+            updatedEventName = sub.updatedEventName,
+        },
         widgets = {
             hasContainer = (type(_state.widgets.container) == "table"),
             hasLabel = (type(_state.widgets.label) == "table"),
@@ -229,6 +333,10 @@ end
 
 function M.dispose(opts)
     opts = (type(opts) == "table") and opts or {}
+
+    -- Best-effort centralized unsubscribe
+    U.unsubscribeServiceUpdates(_state.subscription)
+    _state.subscription = nil
 
     U.clearUiStoreEntry(M.UI_ID)
 
