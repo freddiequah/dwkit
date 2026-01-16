@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.roomentities_service
 -- Owner       : Services
--- Version     : v2026-01-16C
+-- Version     : v2026-01-16D
 -- Purpose     :
 --   - SAFE, profile-portable RoomEntitiesService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
@@ -28,7 +28,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-16C"
+M.VERSION = "v2026-01-16D"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -42,6 +42,8 @@ local STATE = {
     state = {},
     lastTs = nil,
     updates = 0,
+    emits = 0,
+    suppressedEmits = 0,
 }
 
 local function _trim(s)
@@ -114,6 +116,64 @@ local function _addBucket(bucket, key)
     if type(bucket) ~= "table" then return end
     if type(key) ~= "string" or key == "" then return end
     bucket[key] = true
+end
+
+local function _bucketKeysEqual(a, b)
+    if type(a) ~= "table" then a = {} end
+    if type(b) ~= "table" then b = {} end
+
+    -- count a
+    local ca = 0
+    for _ in pairs(a) do ca = ca + 1 end
+
+    -- count b + ensure all keys exist in a
+    local cb = 0
+    for k in pairs(b) do
+        cb = cb + 1
+        if a[k] ~= true then
+            return false
+        end
+    end
+
+    if ca ~= cb then
+        return false
+    end
+
+    -- ensure all keys exist in b
+    for k in pairs(a) do
+        if b[k] ~= true then
+            return false
+        end
+    end
+
+    return true
+end
+
+local function _statesEqual(s1, s2)
+    if type(s1) ~= "table" then s1 = {} end
+    if type(s2) ~= "table" then s2 = {} end
+
+    -- treat missing buckets as empty
+    if not _bucketKeysEqual(s1.players, s2.players) then return false end
+    if not _bucketKeysEqual(s1.mobs, s2.mobs) then return false end
+    if not _bucketKeysEqual(s1.items, s2.items) then return false end
+    if not _bucketKeysEqual(s1.unknown, s2.unknown) then return false end
+
+    -- if there are extra top-level keys beyond buckets, compare them shallowly
+    local known = { players = true, mobs = true, items = true, unknown = true }
+
+    for k, v in pairs(s1) do
+        if not known[k] then
+            if s2[k] ~= v then return false end
+        end
+    end
+    for k, v in pairs(s2) do
+        if not known[k] then
+            if s1[k] ~= v then return false end
+        end
+    end
+
+    return true
 end
 
 -- Very light, SAFE heuristics for look-line classification.
@@ -193,12 +253,19 @@ function M.getState()
 end
 
 function M.setState(newState, opts)
-    opts = opts or {}
+    opts = (type(opts) == "table") and opts or {}
     if type(newState) ~= "table" then
         return false, "setState(newState): newState must be a table"
     end
 
-    STATE.state = _copyOneLevel(newState)
+    local nextState = _copyOneLevel(newState)
+
+    if opts.forceEmit ~= true and _statesEqual(STATE.state, nextState) then
+        STATE.suppressedEmits = STATE.suppressedEmits + 1
+        return true, nil
+    end
+
+    STATE.state = nextState
     STATE.lastTs = os.time()
     STATE.updates = STATE.updates + 1
 
@@ -207,16 +274,26 @@ function M.setState(newState, opts)
         return false, errEmit
     end
 
+    STATE.emits = STATE.emits + 1
     return true, nil
 end
 
 function M.update(delta, opts)
-    opts = opts or {}
+    opts = (type(opts) == "table") and opts or {}
     if type(delta) ~= "table" then
         return false, "update(delta): delta must be a table"
     end
 
+    local before = _copyOneLevel(STATE.state)
+
     _merge(STATE.state, delta)
+    local after = _copyOneLevel(STATE.state)
+
+    if opts.forceEmit ~= true and _statesEqual(before, after) then
+        STATE.suppressedEmits = STATE.suppressedEmits + 1
+        return true, nil
+    end
+
     STATE.lastTs = os.time()
     STATE.updates = STATE.updates + 1
 
@@ -225,12 +302,23 @@ function M.update(delta, opts)
         return false, errEmit
     end
 
+    STATE.emits = STATE.emits + 1
     return true, nil
 end
 
 function M.clear(opts)
-    opts = opts or {}
+    opts = (type(opts) == "table") and opts or {}
+
+    local before = _copyOneLevel(STATE.state)
+
     STATE.state = {}
+    local after = _copyOneLevel(STATE.state)
+
+    if opts.forceEmit ~= true and _statesEqual(before, after) then
+        STATE.suppressedEmits = STATE.suppressedEmits + 1
+        return true, nil
+    end
+
     STATE.lastTs = os.time()
     STATE.updates = STATE.updates + 1
 
@@ -239,6 +327,7 @@ function M.clear(opts)
         return false, errEmit
     end
 
+    STATE.emits = STATE.emits + 1
     return true, nil
 end
 
@@ -250,6 +339,7 @@ end
 -- opts:
 --   - source: string
 --   - assumeCapitalizedAsPlayer: boolean
+--   - forceEmit: boolean
 function M.ingestLookLines(lines, opts)
     opts = (type(opts) == "table") and opts or {}
     if type(lines) ~= "table" then
@@ -265,7 +355,7 @@ function M.ingestLookLines(lines, opts)
         end
     end
 
-    return M.setState(buckets, { source = opts.source or "ingestLookLines" })
+    return M.setState(buckets, { source = opts.source or "ingestLookLines", forceEmit = (opts.forceEmit == true) })
 end
 
 -- Manual ingest helper: takes full look text, splits into lines
@@ -289,6 +379,8 @@ function M.getStats()
         version = M.VERSION,
         lastTs = STATE.lastTs,
         updates = STATE.updates,
+        emits = STATE.emits,
+        suppressedEmits = STATE.suppressedEmits,
         keys = (function()
             local n = 0
             for _ in pairs(STATE.state) do n = n + 1 end
