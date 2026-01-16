@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.presence_service
 -- Owner       : Services
--- Version     : v2026-01-09A
+-- Version     : v2026-01-16A
 -- Purpose     :
 --   - SAFE, profile-portable PresenceService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
@@ -12,8 +12,10 @@
 --   - getState() -> table copy
 --   - setState(newState, opts?) -> boolean ok, string|nil err
 --   - update(delta, opts?) -> boolean ok, string|nil err
---   - clear(opts?) -> boolean ok
+--   - clear(opts?) -> boolean ok, string|nil err
 --   - onUpdated(handlerFn) -> boolean ok, number|nil token, string|nil err
+--   - getStats() -> table
+--   - getUpdatedEventName() -> string
 --
 -- Events Emitted:
 --   - DWKit:Service:Presence:Updated
@@ -21,16 +23,19 @@
 -- Dependencies     : dwkit.core.identity, dwkit.bus.event_bus
 -- #########################################################################
 
-local M          = {}
+local M = {}
 
-M.VERSION        = "v2026-01-09A"
+M.VERSION = "v2026-01-16A"
 
-local ID         = require("dwkit.core.identity")
-local BUS        = require("dwkit.bus.event_bus")
+local ID = require("dwkit.core.identity")
+local BUS = require("dwkit.bus.event_bus")
 
 local EV_UPDATED = tostring(ID.eventPrefix or "DWKit:") .. "Service:Presence:Updated"
 
-local STATE      = {
+-- Expose event name for UIs and consumers (contract)
+M.EV_UPDATED = EV_UPDATED
+
+local STATE = {
     state = {},
     lastTs = nil,
     updates = 0,
@@ -70,6 +75,10 @@ end
 
 function M.getVersion()
     return tostring(M.VERSION)
+end
+
+function M.getUpdatedEventName()
+    return tostring(EV_UPDATED)
 end
 
 function M.getState()

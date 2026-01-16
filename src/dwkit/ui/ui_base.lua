@@ -1,11 +1,13 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_base
 -- Owner       : UI
--- Version     : v2026-01-15A
+-- Version     : v2026-01-16B
 -- Purpose     :
 --   - Shared SAFE helper utilities for DWKit UI modules.
 --   - Avoids copy/paste across UI modules (store, widgets, show/hide/delete, etc).
 --   - Provides best-effort access to guiSettings and Geyser.
+--   - Provides SAFE subscription helpers for service "Updated" events
+--     (centralized pattern for auto-refresh UIs).
 --
 -- Public API  :
 --   - getModuleVersion() -> string
@@ -19,17 +21,19 @@
 --   - safeSetLabelText(label, text)
 --   - ensureWidgets(uiId, requiredKeys, createFn) -> boolean ok, table|nil widgets, string|nil err
 --   - clearUiStoreEntry(uiId)
+--   - subscribeServiceUpdates(uiId, onUpdatedFn, handlerFn, opts?) -> boolean ok, table|nil sub, string|nil err
+--   - unsubscribeServiceUpdates(sub) -> boolean ok
 --
 -- SAFE Constraints:
 --   - No gameplay commands
 --   - No timers
 --   - No automation
---   - No event emits/consumes
+--   - Best-effort event subscription/unsubscription ONLY (no emits here)
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-15A"
+M.VERSION = "v2026-01-16B"
 
 local function _isNonEmptyString(s)
     return type(s) == "string" and s ~= ""
@@ -167,6 +171,112 @@ function M.ensureWidgets(uiId, requiredKeys, createFn)
     end
 
     return true, widgetsOrErr, nil
+end
+
+-- =========================================================================
+-- Service Updated Event Subscription Helpers (SAFE)
+-- =========================================================================
+
+local function _bestEffortBusOff(handlerId)
+    if handlerId == nil then return true end
+
+    local okBus, BUS = pcall(require, "dwkit.bus.event_bus")
+    if not okBus or type(BUS) ~= "table" then
+        return false
+    end
+
+    -- Try common unsubscribe/off patterns (best-effort, no hard dependency)
+    local candidates = { "off", "unsubscribe", "unsub", "remove", "removeHandler", "removeListener" }
+    for _, fnName in ipairs(candidates) do
+        if type(BUS[fnName]) == "function" then
+            local ok = pcall(BUS[fnName], handlerId)
+            if ok then return true end
+        end
+    end
+
+    return false
+end
+
+-- subscribeServiceUpdates
+-- - Centralized helper for service event subscriptions used by UIs
+--
+-- Params:
+--   uiId        : string (for state/debug)
+--   onUpdatedFn : function(handlerFn) -> ok, token|any, err?  (e.g. service.onUpdated)
+--   handlerFn   : function(payload, subscription?)           (UI refresh logic)
+--   opts        : table? { eventName=string, debugPrefix=string }
+--
+-- Returns:
+--   ok, sub, err
+--   sub = { uiId, handlerId, updatedEventName, debugPrefix }
+function M.subscribeServiceUpdates(uiId, onUpdatedFn, handlerFn, opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    if not _isNonEmptyString(uiId) then
+        return false, nil, "uiId invalid"
+    end
+    if type(onUpdatedFn) ~= "function" then
+        return false, nil, "onUpdatedFn invalid"
+    end
+    if type(handlerFn) ~= "function" then
+        return false, nil, "handlerFn invalid"
+    end
+
+    local sub = {
+        uiId = uiId,
+        handlerId = nil,
+        updatedEventName = (_isNonEmptyString(opts.eventName) and opts.eventName) or nil,
+        debugPrefix = (_isNonEmptyString(opts.debugPrefix) and opts.debugPrefix) or "DWKit",
+    }
+
+    local function _wrapped(payload)
+        -- handlerFn should never throw; protect UI from breaking the event bus
+        pcall(handlerFn, payload, sub)
+    end
+
+    -- IMPORTANT:
+    -- service.onUpdated typically returns: ok(bool), token(any), err(string|nil)
+    -- pcall returns: pOk, ret1, ret2, ret3...
+    local pOk, ret1, ret2, ret3 = pcall(onUpdatedFn, _wrapped)
+    if not pOk then
+        return false, nil, "onUpdatedFn pcall failed"
+    end
+
+    -- Common: (true, token, nil)
+    if ret1 == false then
+        return false, nil, tostring(ret2 or "subscribe failed")
+    end
+
+    local token = nil
+    if type(ret1) ~= "boolean" then
+        -- onUpdated returned only token (non-standard but supported)
+        token = ret1
+    else
+        -- onUpdated returned ok(bool) first; token likely ret2
+        token = ret2
+        if token == nil and ret3 ~= nil then
+            -- some odd shapes: (true, nil, token)
+            token = ret3
+        end
+    end
+
+    sub.handlerId = token
+    return true, sub, nil
+end
+
+-- unsubscribeServiceUpdates
+-- - Best-effort unsubscribe using known bus patterns.
+-- - Safe if unsubscribe not supported yet.
+function M.unsubscribeServiceUpdates(sub)
+    if type(sub) ~= "table" then
+        return true
+    end
+    local handlerId = sub.handlerId
+    if handlerId == nil then
+        return true
+    end
+    _bestEffortBusOff(handlerId)
+    return true
 end
 
 return M
