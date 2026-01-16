@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_base
 -- Owner       : UI
--- Version     : v2026-01-15A
+-- Version     : v2026-01-16A
 -- Purpose     :
 --   - Shared SAFE helper utilities for DWKit UI modules.
 --   - Avoids copy/paste across UI modules (store, widgets, show/hide/delete, etc).
@@ -29,7 +29,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-15A"
+M.VERSION = "v2026-01-16A"
 
 local function _isNonEmptyString(s)
     return type(s) == "string" and s ~= ""
@@ -113,10 +113,50 @@ function M.safeDelete(w)
     M.safeHide(w)
 end
 
+-- #########################################################################
+-- Label text helper
+-- Notes:
+-- - Geyser Labels typically render HTML.
+-- - Plain "\n" may not render as a newline unless converted to "<br/>".
+-- - We HTML-escape to avoid breaking label render with special characters.
+-- #########################################################################
+
+local function _htmlEscape(s)
+    s = tostring(s or "")
+    s = s:gsub("&", "&amp;")
+    s = s:gsub("<", "&lt;")
+    s = s:gsub(">", "&gt;")
+    return s
+end
+
+local function _toGeyserLabelHtml(txt)
+    txt = tostring(txt or "")
+    txt = _htmlEscape(txt)
+
+    -- Normalize newlines
+    txt = txt:gsub("\r\n", "\n"):gsub("\r", "\n")
+
+    -- Convert to HTML line breaks
+    txt = txt:gsub("\n", "<br/>")
+
+    return txt
+end
+
 function M.safeSetLabelText(label, txt)
     if type(label) ~= "table" then return end
+
+    local html = _toGeyserLabelHtml(txt)
+
+    -- Prefer setText() when available (replaces content cleanly)
+    if type(label.setText) == "function" then
+        pcall(label.setText, label, html)
+        return
+    end
+
+    -- Fallback to echo() if setText() is missing
     if type(label.echo) == "function" then
-        pcall(label.echo, label, tostring(txt or ""))
+        pcall(label.echo, label, html)
+        return
     end
 end
 

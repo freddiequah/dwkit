@@ -1,20 +1,22 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-01-16B
+-- Version     : v2026-01-16D
 -- Purpose     :
 --   - SAFE RoomEntities UI scaffold with live render from RoomEntitiesService (data only).
 --   - Creates a small Geyser container + label.
 --   - Demonstrates gui_settings self-seeding (register) + apply()/dispose() lifecycle.
---   - No timers, no send(), no automation.
+--   - Event-driven refresh via RoomEntitiesService.onUpdated() when visible (no timers).
+--   - No send(), no automation.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-16B"
+M.VERSION = "v2026-01-16D"
 M.UI_ID = "roomentities_ui"
 
 local U = require("dwkit.ui.ui_base")
+local BUS = require("dwkit.bus.event_bus")
 
 local function _safeRequire(modName)
     local ok, mod = pcall(require, modName)
@@ -53,6 +55,9 @@ local _state = {
     lastError = nil,
     enabled = nil,
     visible = nil,
+
+    subToken = nil,
+
     widgets = {
         container = nil,
         label = nil,
@@ -78,7 +83,7 @@ local function _ensureWidgets()
             x = 30,
             y = 310,
             width = 280,
-            height = 80,
+            height = 120, -- was 80; increased so multi-line content is always visible
         })
 
         local label = G.Label:new({
@@ -114,6 +119,57 @@ end
 
 local function _setLabelText(txt)
     U.safeSetLabelText(_state.widgets.label, txt)
+end
+
+local function _getRoomEntitiesService()
+    local okS, S = _safeRequire("dwkit.services.roomentities_service")
+    if okS and type(S) == "table" then return S end
+    return nil
+end
+
+local function _renderFromState(state)
+    _setLabelText(_formatRoomEntitiesState(state))
+end
+
+local function _unsubscribe()
+    if type(_state.subToken) == "number" then
+        pcall(BUS.off, _state.subToken)
+    end
+    _state.subToken = nil
+end
+
+local function _subscribeIfNeeded()
+    if type(_state.subToken) == "number" then
+        return true, nil
+    end
+
+    local S = _getRoomEntitiesService()
+    if not S or type(S.onUpdated) ~= "function" then
+        return true, nil
+    end
+
+    local ok, token, err = S.onUpdated(function(payload)
+        if not (_state.enabled == true and _state.visible == true) then return end
+
+        local nextState = nil
+        if type(payload) == "table" and type(payload.state) == "table" then
+            nextState = payload.state
+        elseif type(S.getState) == "function" then
+            local okGet, v = pcall(S.getState)
+            if okGet and type(v) == "table" then nextState = v end
+        end
+
+        if type(nextState) == "table" then
+            _renderFromState(nextState)
+        end
+    end)
+
+    if ok and type(token) == "number" then
+        _state.subToken = token
+        return true, nil
+    end
+
+    return false, err or "subscribe failed"
 end
 
 function M.getModuleVersion() return M.VERSION end
@@ -188,16 +244,22 @@ function M.apply(opts)
     if enabled and visible then
         action = "show"
 
-        local okS, S = _safeRequire("dwkit.services.roomentities_service")
+        local okSub, errSub = _subscribeIfNeeded()
+        if not okSub then
+            _state.lastError = tostring(errSub)
+        end
+
+        local S = _getRoomEntitiesService()
         local state = {}
-        if okS and type(S) == "table" and type(S.getState) == "function" then
+        if S and type(S.getState) == "function" then
             local okGet, v = pcall(S.getState)
             if okGet and type(v) == "table" then state = v end
         end
 
-        _setLabelText(_formatRoomEntitiesState(state))
+        _renderFromState(state)
         U.safeShow(_state.widgets.container)
     else
+        _unsubscribe()
         U.safeHide(_state.widgets.container)
     end
 
@@ -220,6 +282,7 @@ function M.getState()
         visible = _state.visible,
         lastApply = _state.lastApply,
         lastError = _state.lastError,
+        subscribed = (type(_state.subToken) == "number"),
         widgets = {
             hasContainer = (type(_state.widgets.container) == "table"),
             hasLabel = (type(_state.widgets.label) == "table"),
@@ -229,6 +292,8 @@ end
 
 function M.dispose(opts)
     opts = (type(opts) == "table") and opts or {}
+
+    _unsubscribe()
 
     U.clearUiStoreEntry(M.UI_ID)
 

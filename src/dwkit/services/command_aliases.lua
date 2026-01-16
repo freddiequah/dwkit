@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-15M
+-- Version     : v2026-01-16A
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -44,7 +44,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-15M"
+M.VERSION = "v2026-01-16A"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -1995,12 +1995,14 @@ function M.install(opts)
                     for _, id in ipairs(enabledIds) do
                         local okCall, a, b, c, err = _callBestEffort(v, "validateOne", id,
                             { source = "dwgui", scope = "enabled" })
-                        if not okCall then
+
+                        if (not okCall) or (a ~= true) then
+                            local msg = b or c or err or "validateOne failed"
                             results[#results + 1] = {
                                 uiId = tostring(id),
                                 moduleName = "dwkit.ui." .. tostring(id),
                                 status = "FAIL",
-                                errors = { "validateOne call failed: " .. tostring(err) },
+                                errors = { "validateOne failed: " .. tostring(msg) },
                                 warnings = {},
                                 notes = {},
                                 has = {},

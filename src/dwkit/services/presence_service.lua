@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.presence_service
 -- Owner       : Services
--- Version     : v2026-01-09A
+-- Version     : v2026-01-16C
 -- Purpose     :
 --   - SAFE, profile-portable PresenceService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
@@ -14,6 +14,8 @@
 --   - update(delta, opts?) -> boolean ok, string|nil err
 --   - clear(opts?) -> boolean ok
 --   - onUpdated(handlerFn) -> boolean ok, number|nil token, string|nil err
+--   - getStats() -> table
+--   - getKnownPlayersSet(opts?) -> table map(name->true)   [NEW]
 --
 -- Events Emitted:
 --   - DWKit:Service:Presence:Updated
@@ -23,7 +25,7 @@
 
 local M          = {}
 
-M.VERSION        = "v2026-01-09A"
+M.VERSION        = "v2026-01-16C"
 
 local ID         = require("dwkit.core.identity")
 local BUS        = require("dwkit.bus.event_bus")
@@ -68,12 +70,42 @@ local function _emit(stateCopy, deltaCopy, source)
     return true, nil
 end
 
+local function _isNonEmptyString(s)
+    return type(s) == "string" and s ~= ""
+end
+
 function M.getVersion()
     return tostring(M.VERSION)
 end
 
 function M.getState()
     return _shallowCopy(STATE.state)
+end
+
+-- NEW: returns map(name -> true) built from presence state.
+-- Sources:
+--   - state.selfName (optional includeSelf=true)
+--   - state.nearbyPlayers (array of strings)
+function M.getKnownPlayersSet(opts)
+    opts = (type(opts) == "table") and opts or {}
+    local includeSelf = (opts.includeSelf == true)
+
+    local st = STATE.state
+    local out = {}
+
+    if includeSelf and _isNonEmptyString(st.selfName) then
+        out[tostring(st.selfName)] = true
+    end
+
+    if type(st.nearbyPlayers) == "table" then
+        for _, name in ipairs(st.nearbyPlayers) do
+            if _isNonEmptyString(name) then
+                out[tostring(name)] = true
+            end
+        end
+    end
+
+    return out
 end
 
 function M.setState(newState, opts)
