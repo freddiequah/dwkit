@@ -110,6 +110,7 @@ local REG = {
             "dwtest  (or: lua DWKit.test.run())  (quiet: lua local T=require(\"dwkit.tests.self_test_runner\"); T.run({quiet=true}))",
             examples    = {
                 "dwtest",
+                "dwtest ui",
                 "lua DWKit.test.run()",
                 "lua local T=require(\"dwkit.tests.self_test_runner\"); T.run({quiet=true})",
             },
@@ -121,6 +122,7 @@ local REG = {
                 "Requires loader init to have run (so DWKit.test.run is attached).",
                 "If missing, check DWKit.test._selfTestLoadError.",
                 "Quiet mode MUST avoid full registry listing output and prefer count-only registry checks (no list spam).",
+                "Upcoming scope: dwtest ui runs UI Safety Gate checks (validator wiring + contract compliance).",
             },
         },
 
@@ -162,31 +164,32 @@ local REG = {
             },
         },
 
-dwgui = {
-    command     = "dwgui",
-    aliases     = {},
-    ownerModule = "dwkit.services.command_aliases",
-    description = "Manage GUI settings flags (enabled/visible) per UI id (SAFE config only; no UI actions).",
-    syntax      = "dwgui [status|list|enable <uiId>|disable <uiId>|visible <uiId> on|off]",
-    examples    = {
-        "dwgui",
-        "dwgui status",
-        "dwgui list",
-        "dwgui enable test_ui",
-        "dwgui disable test_ui",
-        "dwgui visible test_ui on",
-        "dwgui visible test_ui off",
-    },
-    safety      = "SAFE",
-    mode        = "manual",
-    sendsToGame = false,
-    notes       = {
-        "Typed alias implemented by dwkit.services.command_aliases.",
-        "Backed by DWKit.config.guiSettings (dwkit.config.gui_settings).",
-        "This command only changes stored flags; it does NOT show/hide UI elements directly.",
-        "Visible control requires visible persistence to be enabled in guiSettings; dwgui enables it on-demand for visible subcommands.",
-    },
-},
+        dwgui = {
+            command     = "dwgui",
+            aliases     = {},
+            ownerModule = "dwkit.services.command_aliases",
+            description = "Manage GUI settings flags (enabled/visible) per UI id (SAFE config only; no UI actions).",
+            syntax      = "dwgui [status|list|enable <uiId>|disable <uiId>|visible <uiId> on|off]",
+            examples    = {
+                "dwgui",
+                "dwgui status",
+                "dwgui list",
+                "dwgui enable test_ui",
+                "dwgui disable test_ui",
+                "dwgui visible test_ui on",
+                "dwgui visible test_ui off",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Typed alias implemented by dwkit.services.command_aliases.",
+                "Backed by DWKit.config.guiSettings (dwkit.config.gui_settings).",
+                "This command only changes stored flags; it does NOT show/hide UI elements directly.",
+                "Visible control requires visible persistence to be enabled in guiSettings; dwgui enables it on-demand for visible subcommands.",
+            },
+        },
+
         dwevents = {
             command     = "dwevents",
             aliases     = {},
@@ -910,4 +913,3 @@ function M.validateAll(opts)
 end
 
 return M
-
