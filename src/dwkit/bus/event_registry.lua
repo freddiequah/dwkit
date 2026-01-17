@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.event_registry
 -- Owner       : Bus
--- Version     : v2026-01-16A
+-- Version     : v2026-01-17A
 -- Purpose     :
 --   - Canonical registry for all DWKit events (code mirror of docs/Event_Registry_v1.0.md).
 --   - No events are emitted here. Registry only.
@@ -33,7 +33,7 @@
 
 local M                           = {}
 
-M.VERSION                         = "v2026-01-16A"
+M.VERSION                         = "v2026-01-17A"
 
 local ID                          = require("dwkit.core.identity")
 
@@ -45,6 +45,7 @@ local EV_SVC_ACTIONMODEL_UPDATED  = PREFIX .. "Service:ActionModel:Updated"
 local EV_SVC_SKILLREG_UPDATED     = PREFIX .. "Service:SkillRegistry:Updated"
 local EV_SVC_SCORESTORE_UPDATED   = PREFIX .. "Service:ScoreStore:Updated"
 local EV_SVC_ROOMENTITIES_UPDATED = PREFIX .. "Service:RoomEntities:Updated"
+local EV_SVC_WHOSTORE_UPDATED     = PREFIX .. "Service:WhoStore:Updated"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -194,6 +195,29 @@ local REG = {
         "SAFE internal event (no gameplay commands).",
         "Manual-only: emitted only when service API is invoked.",
         "Primary consumer is ui_autorefresh and RoomEntities UI modules.",
+      },
+    },
+
+    [EV_SVC_WHOSTORE_UPDATED] = {
+      name = EV_SVC_WHOSTORE_UPDATED,
+      description =
+      "Emitted when WhoStoreService updates its authoritative player-name set derived from WHO parsing (SAFE; no gameplay sends).",
+      payloadSchema = {
+        ts = "number",
+        state = "table",
+        delta = "table (optional)",
+        source = "string (optional)",
+      },
+      producers = {
+        "dwkit.services.whostore_service",
+      },
+      consumers = {
+        "internal (roomentities_service/ui/tests/integrations)",
+      },
+      notes = {
+        "SAFE internal event (no gameplay commands).",
+        "Manual-only: emitted only when service API is invoked.",
+        "Primary consumer is RoomEntitiesService for best-effort player reclassification.",
       },
     },
   }

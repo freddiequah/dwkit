@@ -1,19 +1,20 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-01-17A
+-- Version     : v2026-01-17B
 -- Purpose     :
 --   - SAFE RoomEntities UI scaffold with live render from RoomEntitiesService (data only).
 --   - Creates a small Geyser container + label.
 --   - Demonstrates gui_settings self-seeding (register) + apply()/dispose() lifecycle.
 --   - Subscribes to RoomEntitiesService Updated event to auto-refresh label.
+--   - ALSO subscribes to WhoStoreService Updated event to re-render on player-cache changes.
 --   - Renders compact counts + top N names per bucket (players/mobs/items/unknown).
 --   - No timers, no send(), no automation.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-17A"
+M.VERSION = "v2026-01-17B"
 M.UI_ID = "roomentities_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -99,8 +100,9 @@ local _state = {
     enabled = nil,
     visible = nil,
 
-    -- Centralized subscription record (from U.subscribeServiceUpdates)
-    subscription = nil,
+    -- Centralized subscription records (from U.subscribeServiceUpdates)
+    subscriptionRoomEntities = nil,
+    subscriptionWhoStore = nil,
 
     widgets = {
         container = nil,
@@ -165,7 +167,7 @@ local function _setLabelText(txt)
     U.safeSetLabelText(_state.widgets.label, txt)
 end
 
-local function _getServiceStateBestEffort()
+local function _getRoomEntitiesStateBestEffort()
     local okS, S = _safeRequire("dwkit.services.roomentities_service")
     if not okS or type(S) ~= "table" then
         return {}
@@ -187,7 +189,7 @@ local function _renderNow(state)
 end
 
 local function _renderFromService()
-    local state = _getServiceStateBestEffort()
+    local state = _getRoomEntitiesStateBestEffort()
     _renderNow(state)
 end
 
@@ -205,8 +207,8 @@ local function _resolveUpdatedEventName(S)
     return nil
 end
 
-local function _ensureSubscription()
-    if type(_state.subscription) == "table" and _state.subscription.handlerId ~= nil then
+local function _ensureRoomEntitiesSubscription()
+    if type(_state.subscriptionRoomEntities) == "table" and _state.subscriptionRoomEntities.handlerId ~= nil then
         return true, nil
     end
 
@@ -255,7 +257,67 @@ local function _ensureSubscription()
         return false, _state.lastError
     end
 
-    _state.subscription = sub
+    _state.subscriptionRoomEntities = sub
+    return true, nil
+end
+
+local function _ensureWhoStoreSubscription()
+    if type(_state.subscriptionWhoStore) == "table" and _state.subscriptionWhoStore.handlerId ~= nil then
+        return true, nil
+    end
+
+    local okW, W = _safeRequire("dwkit.services.whostore_service")
+    if not okW or type(W) ~= "table" then
+        -- No hard fail: UI can still run without WhoStore
+        return true, nil
+    end
+
+    if type(W.onUpdated) ~= "function" then
+        -- No hard fail: UI can still run without WhoStore onUpdated surface
+        return true, nil
+    end
+
+    local evName = _resolveUpdatedEventName(W)
+    if type(evName) ~= "string" or evName == "" then
+        return true, nil
+    end
+
+    local handlerFn = function(payload)
+        -- Only update UI when it is actually visible+enabled
+        if _state.enabled ~= true or _state.visible ~= true then
+            return
+        end
+
+        -- WhoStore updated: we re-render from RoomEntitiesService (best-effort).
+        -- Note: RoomEntities classification changes on ingest, not on WhoStore update alone.
+        _renderFromService()
+    end
+
+    local okSub, sub, errSub = U.subscribeServiceUpdates(
+        M.UI_ID,
+        W.onUpdated,
+        handlerFn,
+        { eventName = evName, debugPrefix = "[DWKit UI] roomentities_ui (WhoStore)" }
+    )
+
+    if not okSub then
+        -- No hard fail: UI still works; it just won't react to WhoStore updates
+        return true, nil
+    end
+
+    _state.subscriptionWhoStore = sub
+    return true, nil
+end
+
+local function _ensureSubscriptions()
+    local ok1, err1 = _ensureRoomEntitiesSubscription()
+    if not ok1 then
+        return false, err1
+    end
+    local ok2, err2 = _ensureWhoStoreSubscription()
+    if not ok2 then
+        return false, err2
+    end
     return true, nil
 end
 
@@ -331,7 +393,7 @@ function M.apply(opts)
     if enabled and visible then
         action = "show"
 
-        local okSub, errSub = _ensureSubscription()
+        local okSub, errSub = _ensureSubscriptions()
         if not okSub then
             -- Still show UI, but it will only refresh on manual apply/reload
             _out("[DWKit UI] roomentities_ui WARN: " .. tostring(errSub))
@@ -354,7 +416,8 @@ function M.apply(opts)
 end
 
 function M.getState()
-    local sub = (type(_state.subscription) == "table") and _state.subscription or {}
+    local subR = (type(_state.subscriptionRoomEntities) == "table") and _state.subscriptionRoomEntities or {}
+    local subW = (type(_state.subscriptionWhoStore) == "table") and _state.subscriptionWhoStore or {}
 
     return {
         uiId = M.UI_ID,
@@ -364,9 +427,15 @@ function M.getState()
         visible = _state.visible,
         lastApply = _state.lastApply,
         lastError = _state.lastError,
-        subscription = {
-            handlerId = sub.handlerId,
-            updatedEventName = sub.updatedEventName,
+        subscriptions = {
+            roomentities = {
+                handlerId = subR.handlerId,
+                updatedEventName = subR.updatedEventName,
+            },
+            whostore = {
+                handlerId = subW.handlerId,
+                updatedEventName = subW.updatedEventName,
+            },
         },
         widgets = {
             hasContainer = (type(_state.widgets.container) == "table"),
@@ -379,8 +448,11 @@ function M.dispose(opts)
     opts = (type(opts) == "table") and opts or {}
 
     -- Best-effort centralized unsubscribe
-    U.unsubscribeServiceUpdates(_state.subscription)
-    _state.subscription = nil
+    U.unsubscribeServiceUpdates(_state.subscriptionRoomEntities)
+    U.unsubscribeServiceUpdates(_state.subscriptionWhoStore)
+
+    _state.subscriptionRoomEntities = nil
+    _state.subscriptionWhoStore = nil
 
     U.clearUiStoreEntry(M.UI_ID)
 
