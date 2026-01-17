@@ -1,12 +1,16 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_autorefresh
 -- Owner       : UI
--- Version     : v2026-01-16B
+-- Version     : v2026-01-17A
 -- Purpose     :
 --   - SAFE, opt-in UI auto-refresh watcher.
 --   - Subscribes to DWKit service update events (Presence + RoomEntities).
 --   - When a watched service emits an update, auto-applies the corresponding UI
 --     ONLY if that UI is enabled + visible (best-effort).
+--   - Presence-assisted reclassify:
+--       If PresenceService updates and RoomEntities has unknown entries that match
+--       Presence players, promote those entries unknown -> players (best-effort),
+--       letting RoomEntitiesService emit its own Updated event (no forced emits).
 --
 -- Public API  :
 --   - getModuleVersion() -> string
@@ -23,7 +27,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-16B"
+M.VERSION = "v2026-01-17A"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -50,6 +54,11 @@ local _state = {
         lastSource = nil,
         lastUiId = nil,
         lastEvent = nil,
+
+        -- Presence-assisted reclassify stats
+        reclassifyAttempts = 0,
+        reclassifyPromoted = 0,
+        lastReclassifyTs = nil,
     },
 }
 
@@ -194,6 +203,105 @@ local function _resolveRoomEntitiesEvents()
     return _dedupe(candidates)
 end
 
+local function _copySet(t)
+    local out = {}
+    if type(t) ~= "table" then return out end
+    for k, v in pairs(t) do
+        if v == true and type(k) == "string" and k ~= "" then
+            out[k] = true
+        end
+    end
+    return out
+end
+
+local function _countSet(t)
+    if type(t) ~= "table" then return 0 end
+    local n = 0
+    for _ in pairs(t) do n = n + 1 end
+    return n
+end
+
+local function _extractPresencePlayers(payload)
+    payload = (type(payload) == "table") and payload or {}
+
+    -- Prefer payload.state.players if present
+    if type(payload.state) == "table" and type(payload.state.players) == "table" then
+        return payload.state.players
+    end
+
+    -- Best-effort fallback to PresenceService.getState()
+    local okP, P = _safeRequire("dwkit.services.presence_service")
+    if okP and type(P) == "table" and type(P.getState) == "function" then
+        local okS, st = pcall(P.getState)
+        if okS and type(st) == "table" and type(st.players) == "table" then
+            return st.players
+        end
+    end
+
+    return {}
+end
+
+-- Presence-assisted reclassify:
+-- Promote any RoomEntities unknown entries that match Presence players set.
+-- Best-effort only. We do NOT forceEmit. RoomEntitiesService will suppress emits if no changes.
+local function _presenceAssistReclassifyRoomEntities(payload)
+    _state.stats.reclassifyAttempts = _state.stats.reclassifyAttempts + 1
+
+    local presencePlayers = _extractPresencePlayers(payload)
+    if type(presencePlayers) ~= "table" or _countSet(presencePlayers) == 0 then
+        return
+    end
+
+    local okR, R = _safeRequire("dwkit.services.roomentities_service")
+    if not okR or type(R) ~= "table" then
+        return
+    end
+
+    if type(R.getState) ~= "function" or type(R.setState) ~= "function" then
+        return
+    end
+
+    local okGet, rs = pcall(R.getState)
+    if not okGet or type(rs) ~= "table" then
+        return
+    end
+
+    local unknown = rs.unknown
+    if type(unknown) ~= "table" then
+        return
+    end
+
+    local promote = {}
+    for name, v in pairs(unknown) do
+        if v == true and presencePlayers[name] == true then
+            promote[name] = true
+        end
+    end
+
+    local promoteCount = _countSet(promote)
+    if promoteCount == 0 then
+        return
+    end
+
+    local nextState = {
+        players = _copySet(rs.players),
+        mobs = _copySet(rs.mobs),
+        items = _copySet(rs.items),
+        unknown = _copySet(rs.unknown),
+    }
+
+    for name in pairs(promote) do
+        nextState.players[name] = true
+        nextState.unknown[name] = nil
+    end
+
+    local okSet = pcall(R.setState, nextState, { source = "presence_reclassify" })
+    if okSet then
+        _state.stats.reclassifyPromoted = _state.stats.reclassifyPromoted + promoteCount
+        _state.stats.lastReclassifyTs = os.time()
+    end
+end
+
 function M.getModuleVersion()
     return M.VERSION
 end
@@ -219,6 +327,10 @@ function M.getState()
             lastSource = _state.stats.lastSource,
             lastUiId = _state.stats.lastUiId,
             lastEvent = _state.stats.lastEvent,
+
+            reclassifyAttempts = _state.stats.reclassifyAttempts,
+            reclassifyPromoted = _state.stats.reclassifyPromoted,
+            lastReclassifyTs = _state.stats.lastReclassifyTs,
         },
     }
 end
@@ -234,6 +346,9 @@ function M.start(opts)
     local ok1, tok1 = BUS.on(EV_PRESENCE_UPDATED, function(...)
         local payload = select(1, ...)
         _handle("presence_ui", EV_PRESENCE_UPDATED, payload)
+
+        -- Best-effort: Presence-assisted unknown->players promotion in RoomEntities
+        _presenceAssistReclassifyRoomEntities(payload)
     end)
 
     if ok1 ~= true then
