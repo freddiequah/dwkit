@@ -1,12 +1,15 @@
 -- #########################################################################
 -- Module Name : dwkit.services.roomentities_service
 -- Owner       : Services
--- Version     : v2026-01-16D
+-- Version     : v2026-01-17A
 -- Purpose     :
 --   - SAFE, profile-portable RoomEntitiesService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
 --   - Emits a registered internal event when state changes.
 --   - Provides manual ingestion helpers for "look" output parsing.
+--   - Presence-assisted classification (best-effort):
+--       If PresenceService exposes known nearby player names, we classify those
+--       names as players even if look heuristics are otherwise conservative.
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -28,7 +31,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-16D"
+M.VERSION = "v2026-01-17A"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -49,6 +52,12 @@ local STATE = {
 local function _trim(s)
     if type(s) ~= "string" then return "" end
     return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function _normName(s)
+    s = _trim(s or "")
+    if s == "" then return "" end
+    return s:lower()
 end
 
 local function _shallowCopy(t)
@@ -176,9 +185,129 @@ local function _statesEqual(s1, s2)
     return true
 end
 
+-- Presence-assisted known-player extraction (best-effort, SAFE)
+-- We do NOT assume any specific PresenceService schema.
+-- If PresenceService is unavailable or state shape is unknown, we return empty set.
+local function _safeRequire(modName)
+    local ok, mod = pcall(require, modName)
+    if ok then return true, mod end
+    return false, mod
+end
+
+local function _addToSet(set, name)
+    if type(set) ~= "table" then return end
+    if type(name) ~= "string" then return end
+    local key = _normName(name)
+    if key == "" then return end
+    set[key] = true
+end
+
+local function _isArrayTable(t)
+    if type(t) ~= "table" then return false end
+    for k in pairs(t) do
+        if type(k) ~= "number" then
+            return false
+        end
+    end
+    return true
+end
+
+local function _absorbNamesFromTable(set, t)
+    if type(set) ~= "table" or type(t) ~= "table" then return end
+
+    if _isArrayTable(t) then
+        for _, v in ipairs(t) do
+            if type(v) == "string" then
+                _addToSet(set, v)
+            elseif type(v) == "table" and type(v.name) == "string" then
+                _addToSet(set, v.name)
+            end
+        end
+        return
+    end
+
+    for k, v in pairs(t) do
+        if type(k) == "string" then
+            if v == true then
+                _addToSet(set, k)
+            elseif type(v) == "string" then
+                _addToSet(set, v)
+            elseif type(v) == "table" then
+                if type(v.name) == "string" then
+                    _addToSet(set, v.name)
+                end
+            end
+        elseif type(v) == "string" then
+            _addToSet(set, v)
+        elseif type(v) == "table" and type(v.name) == "string" then
+            _addToSet(set, v.name)
+        end
+    end
+end
+
+local function _extractKnownPlayersSetFromPresenceState(pState)
+    local set = {}
+    if type(pState) ~= "table" then
+        return set
+    end
+
+    -- If presence state itself is already a set/list of names
+    _absorbNamesFromTable(set, pState)
+
+    -- Common candidate keys (best-effort)
+    local keys = { "players", "nearby", "present", "who", "names", "list" }
+    for _, k in ipairs(keys) do
+        local v = pState[k]
+        if type(v) == "table" then
+            _absorbNamesFromTable(set, v)
+        end
+    end
+
+    return set
+end
+
+local function _getKnownPlayersSetBestEffort(opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    -- Caller may explicitly supply known players (highest priority)
+    if type(opts.knownPlayers) == "table" then
+        local set = {}
+        _absorbNamesFromTable(set, opts.knownPlayers)
+        return set
+    end
+
+    -- Opt-out switch (if caller wants pure heuristics)
+    if opts.usePresence ~= nil and opts.usePresence ~= true then
+        return {}
+    end
+
+    local okP, P = _safeRequire("dwkit.services.presence_service")
+    if not okP or type(P) ~= "table" then
+        return {}
+    end
+
+    if type(P.getState) ~= "function" then
+        return {}
+    end
+
+    local okS, pState = pcall(P.getState)
+    if not okS or type(pState) ~= "table" then
+        return {}
+    end
+
+    return _extractKnownPlayersSetFromPresenceState(pState)
+end
+
+local function _isKnownPlayer(name, knownPlayersSet)
+    if type(knownPlayersSet) ~= "table" then return false end
+    local key = _normName(name)
+    if key == "" then return false end
+    return (knownPlayersSet[key] == true)
+end
+
 -- Very light, SAFE heuristics for look-line classification.
--- This is intentionally conservative; we will improve later using PresenceService / WhoStore.
-local function _classifyLookLine(line, opts)
+-- This is intentionally conservative; improved using PresenceService / WhoStore over time.
+local function _classifyLookLine(line, opts, knownPlayersSet)
     opts = (type(opts) == "table") and opts or {}
     line = _trim(line or "")
     if line == "" then return nil, nil end
@@ -194,13 +323,19 @@ local function _classifyLookLine(line, opts)
         if type(name) == "string" then
             name = _trim(name)
             if name ~= "" then
-                -- default assumption: capitalized -> player (opt-in)
+                -- Presence-assisted classification (preferred)
+                if _isKnownPlayer(name, knownPlayersSet) then
+                    return "players", _asKey(name)
+                end
+
+                -- optional heuristic: capitalized => player
                 if opts.assumeCapitalizedAsPlayer == true then
                     local first = name:sub(1, 1)
                     if first:match("%u") then
                         return "players", _asKey(name)
                     end
                 end
+
                 -- otherwise unknown until Presence/Who is integrated
                 return "unknown", _asKey(name)
             end
@@ -213,6 +348,11 @@ local function _classifyLookLine(line, opts)
         if type(thing) == "string" then
             thing = _trim(thing)
             if thing ~= "" then
+                -- Presence-assisted: if this matches a known player, treat as player
+                if _isKnownPlayer(thing, knownPlayersSet) then
+                    return "players", _asKey(thing)
+                end
+
                 -- corpses/items are usually not mobs
                 if lower:find("corpse") then
                     return "items", _asKey(thing)
@@ -339,6 +479,8 @@ end
 -- opts:
 --   - source: string
 --   - assumeCapitalizedAsPlayer: boolean
+--   - usePresence: boolean (default true)
+--   - knownPlayers: table (optional override; set/list of names)
 --   - forceEmit: boolean
 function M.ingestLookLines(lines, opts)
     opts = (type(opts) == "table") and opts or {}
@@ -346,10 +488,11 @@ function M.ingestLookLines(lines, opts)
         return false, "ingestLookLines(lines): lines must be a table"
     end
 
+    local knownPlayersSet = _getKnownPlayersSetBestEffort(opts)
     local buckets = _newBuckets()
 
     for _, raw in ipairs(lines) do
-        local bucketName, key = _classifyLookLine(raw, opts)
+        local bucketName, key = _classifyLookLine(raw, opts, knownPlayersSet)
         if bucketName and key then
             _addBucket(buckets[bucketName], key)
         end
