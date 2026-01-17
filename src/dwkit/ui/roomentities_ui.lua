@@ -1,18 +1,19 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-01-16E
+-- Version     : v2026-01-17A
 -- Purpose     :
 --   - SAFE RoomEntities UI scaffold with live render from RoomEntitiesService (data only).
 --   - Creates a small Geyser container + label.
 --   - Demonstrates gui_settings self-seeding (register) + apply()/dispose() lifecycle.
 --   - Subscribes to RoomEntitiesService Updated event to auto-refresh label.
+--   - Renders compact counts + top N names per bucket (players/mobs/items/unknown).
 --   - No timers, no send(), no automation.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-16E"
+M.VERSION = "v2026-01-17A"
 M.UI_ID = "roomentities_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -30,6 +31,49 @@ local function _countAny(x)
     return n
 end
 
+local function _sortedKeysFromSet(t)
+    if type(t) ~= "table" then return {} end
+    local keys = {}
+    for k, v in pairs(t) do
+        if v == true and type(k) == "string" and k ~= "" then
+            keys[#keys + 1] = k
+        end
+    end
+    table.sort(keys, function(a, b)
+        return tostring(a):lower() < tostring(b):lower()
+    end)
+    return keys
+end
+
+local function _formatBucketLine(label, bucket, maxNames)
+    maxNames = tonumber(maxNames) or 3
+    if maxNames < 0 then maxNames = 0 end
+
+    local total = _countAny(bucket)
+    local keys = _sortedKeysFromSet(bucket)
+
+    local shown = {}
+    local showCount = 0
+
+    if maxNames > 0 then
+        for i = 1, #keys do
+            if showCount >= maxNames then break end
+            shown[#shown + 1] = keys[i]
+            showCount = showCount + 1
+        end
+    end
+
+    local suffix = ""
+    if #shown > 0 then
+        suffix = " [" .. table.concat(shown, ", ") .. "]"
+        if total > #shown then
+            suffix = suffix .. " (+" .. tostring(total - #shown) .. ")"
+        end
+    end
+
+    return tostring(label) .. "=" .. tostring(total) .. suffix
+end
+
 local function _formatRoomEntitiesState(state)
     state = (type(state) == "table") and state or {}
 
@@ -40,10 +84,10 @@ local function _formatRoomEntitiesState(state)
 
     local lines = {}
     lines[#lines + 1] = "DWKit roomentities_ui"
-    lines[#lines + 1] = "players=" .. tostring(_countAny(players))
-    lines[#lines + 1] = "mobs=" .. tostring(_countAny(mobs))
-    lines[#lines + 1] = "items=" .. tostring(_countAny(items))
-    lines[#lines + 1] = "unknown=" .. tostring(_countAny(unknown))
+    lines[#lines + 1] = _formatBucketLine("players", players, 2)
+    lines[#lines + 1] = _formatBucketLine("mobs", mobs, 2)
+    lines[#lines + 1] = _formatBucketLine("items", items, 2)
+    lines[#lines + 1] = _formatBucketLine("unknown", unknown, 2)
 
     return table.concat(lines, "\n")
 end
