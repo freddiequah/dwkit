@@ -1,15 +1,19 @@
 -- #########################################################################
 -- Module Name : dwkit.services.roomentities_service
 -- Owner       : Services
--- Version     : v2026-01-17A
+-- Version     : v2026-01-17B
 -- Purpose     :
 --   - SAFE, profile-portable RoomEntitiesService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
 --   - Emits a registered internal event when state changes.
 --   - Provides manual ingestion helpers for "look" output parsing.
---   - Presence-assisted classification (best-effort):
---       If PresenceService exposes known nearby player names, we classify those
---       names as players even if look heuristics are otherwise conservative.
+--   - Classification (best-effort, SAFE):
+--       - Presence-assisted classification during ingest (existing).
+--       - WhoStore-assisted classification during ingest (NEW).
+--       - AUTO reclassify on WhoStore updates (NEW "superpower"):
+--           When WhoStore player set updates, we re-bucket current entities
+--           (unknown/mobs/items -> players) when names are now known players,
+--           and emit RoomEntities Updated only if state actually changes.
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -22,16 +26,17 @@
 --   - getUpdatedEventName() -> string
 --   - ingestLookLines(lines, opts?) -> boolean ok, string|nil err
 --   - ingestLookText(text, opts?) -> boolean ok, string|nil err
+--   - reclassifyFromWhoStore(opts?) -> boolean ok, string|nil err
 --
 -- Events Emitted:
 --   - DWKit:Service:RoomEntities:Updated
--- Automation Policy: Manual only
+-- Automation Policy: Manual only (no gameplay commands). WhoStore reclassify is event-driven.
 -- Dependencies     : dwkit.core.identity, dwkit.bus.event_bus
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-17A"
+M.VERSION = "v2026-01-17B"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -305,6 +310,70 @@ local function _isKnownPlayer(name, knownPlayersSet)
     return (knownPlayersSet[key] == true)
 end
 
+-- WhoStore-assisted known-player extraction (best-effort, SAFE)
+-- We treat WhoStore player set as authoritative for "is this a player name".
+local function _extractKnownPlayersSetFromWhoStoreState(wState)
+    local set = {}
+    if type(wState) ~= "table" then
+        return set
+    end
+
+    -- Common shape: wState.players is map {Name=true} or list {"Name", ...}
+    if type(wState.players) == "table" then
+        _absorbNamesFromTable(set, wState.players)
+    else
+        -- Sometimes the state table itself might be a set/list
+        _absorbNamesFromTable(set, wState)
+    end
+
+    return set
+end
+
+local function _getWhoStoreKnownPlayersSetBestEffort()
+    local okW, W = _safeRequire("dwkit.services.whostore_service")
+    if not okW or type(W) ~= "table" then
+        return {}
+    end
+    if type(W.getState) ~= "function" then
+        return {}
+    end
+
+    local okS, wState = pcall(W.getState)
+    if not okS or type(wState) ~= "table" then
+        return {}
+    end
+
+    return _extractKnownPlayersSetFromWhoStoreState(wState)
+end
+
+-- Combine known players from Presence + WhoStore (WhoStore is authoritative when present)
+local function _getKnownPlayersSetCombined(opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    -- Caller may override explicitly (highest priority)
+    if type(opts.knownPlayers) == "table" then
+        local set = {}
+        _absorbNamesFromTable(set, opts.knownPlayers)
+        return set
+    end
+
+    local set = {}
+
+    -- Presence (optional)
+    if opts.usePresence == nil or opts.usePresence == true then
+        local pSet = _getKnownPlayersSetBestEffort(opts)
+        _merge(set, pSet)
+    end
+
+    -- WhoStore (optional; default true)
+    if opts.useWhoStore == nil or opts.useWhoStore == true then
+        local wSet = _getWhoStoreKnownPlayersSetBestEffort()
+        _merge(set, wSet)
+    end
+
+    return set
+end
+
 -- Very light, SAFE heuristics for look-line classification.
 -- This is intentionally conservative; improved using PresenceService / WhoStore over time.
 local function _classifyLookLine(line, opts, knownPlayersSet)
@@ -323,7 +392,7 @@ local function _classifyLookLine(line, opts, knownPlayersSet)
         if type(name) == "string" then
             name = _trim(name)
             if name ~= "" then
-                -- Presence-assisted classification (preferred)
+                -- Known player classification (Presence/WhoStore)
                 if _isKnownPlayer(name, knownPlayersSet) then
                     return "players", _asKey(name)
                 end
@@ -348,7 +417,7 @@ local function _classifyLookLine(line, opts, knownPlayersSet)
         if type(thing) == "string" then
             thing = _trim(thing)
             if thing ~= "" then
-                -- Presence-assisted: if this matches a known player, treat as player
+                -- Known player classification (Presence/WhoStore)
                 if _isKnownPlayer(thing, knownPlayersSet) then
                     return "players", _asKey(thing)
                 end
@@ -378,6 +447,184 @@ local function _classifyLookLine(line, opts, knownPlayersSet)
     end
 
     return "unknown", _asKey(line)
+end
+
+-- ############################################################
+-- WhoStore "superpower" wiring (SAFE):
+--   - Subscribe to WhoStore Updated event (best-effort)
+--   - Reclassify current buckets when new players become known
+-- ############################################################
+
+local _who = {
+    subscribed = false,
+    token = nil,
+    eventName = nil,
+    lastErr = nil,
+    reclassifyRunning = false,
+}
+
+local function _resolveWhoStoreUpdatedEventName(W)
+    if type(W) ~= "table" then return nil end
+    if type(W.getUpdatedEventName) == "function" then
+        local ok, v = pcall(W.getUpdatedEventName)
+        if ok and type(v) == "string" and v ~= "" then
+            return v
+        end
+    end
+    if type(W.EV_UPDATED) == "string" and W.EV_UPDATED ~= "" then
+        return W.EV_UPDATED
+    end
+    return nil
+end
+
+local function _reclassifyBucketsWithKnownPlayers(current, knownPlayersSet)
+    current = (type(current) == "table") and current or {}
+    knownPlayersSet = (type(knownPlayersSet) == "table") and knownPlayersSet or {}
+
+    local next = _newBuckets()
+
+    local function moveIfKnown(name)
+        if type(name) ~= "string" or name == "" then return false end
+        local key = _normName(name)
+        if key == "" then return false end
+        if knownPlayersSet[key] == true then
+            next.players[name] = true
+            return true
+        end
+        return false
+    end
+
+    local moved = 0
+
+    -- players bucket always preserved
+    if type(current.players) == "table" then
+        for k, v in pairs(current.players) do
+            if v == true and type(k) == "string" and k ~= "" then
+                next.players[k] = true
+            end
+        end
+    end
+
+    -- unknown -> players if known; else unknown
+    if type(current.unknown) == "table" then
+        for k, v in pairs(current.unknown) do
+            if v == true and type(k) == "string" and k ~= "" then
+                if moveIfKnown(k) then
+                    moved = moved + 1
+                else
+                    next.unknown[k] = true
+                end
+            end
+        end
+    end
+
+    -- mobs -> players if known; else mobs
+    if type(current.mobs) == "table" then
+        for k, v in pairs(current.mobs) do
+            if v == true and type(k) == "string" and k ~= "" then
+                if moveIfKnown(k) then
+                    moved = moved + 1
+                else
+                    next.mobs[k] = true
+                end
+            end
+        end
+    end
+
+    -- items -> players if known; else items
+    if type(current.items) == "table" then
+        for k, v in pairs(current.items) do
+            if v == true and type(k) == "string" and k ~= "" then
+                if moveIfKnown(k) then
+                    moved = moved + 1
+                else
+                    next.items[k] = true
+                end
+            end
+        end
+    end
+
+    return next, moved
+end
+
+local function _applyReclassifyNow(opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    if _who.reclassifyRunning == true then
+        return true, nil
+    end
+
+    _who.reclassifyRunning = true
+
+    local knownPlayersSet = _getWhoStoreKnownPlayersSetBestEffort()
+    local before = _copyOneLevel(STATE.state)
+
+    local next, moved = _reclassifyBucketsWithKnownPlayers(before, knownPlayersSet)
+
+    if opts.forceEmit ~= true and _statesEqual(before, next) then
+        STATE.suppressedEmits = STATE.suppressedEmits + 1
+        _who.reclassifyRunning = false
+        return true, nil
+    end
+
+    STATE.state = _copyOneLevel(next)
+    STATE.lastTs = os.time()
+    STATE.updates = STATE.updates + 1
+
+    local src = tostring(opts.source or "reclassify:whostore")
+    local delta = { reclassified = moved }
+
+    local okEmit, errEmit = _emit(_copyOneLevel(STATE.state), delta, src)
+    if not okEmit then
+        _who.reclassifyRunning = false
+        return false, errEmit
+    end
+
+    STATE.emits = STATE.emits + 1
+    _who.reclassifyRunning = false
+    return true, nil
+end
+
+local function _ensureWhoStoreSubscription()
+    if _who.subscribed == true then
+        return true, nil
+    end
+
+    -- Must have an event bus with .on
+    if type(BUS) ~= "table" or type(BUS.on) ~= "function" then
+        _who.lastErr = "event bus .on not available"
+        return false, _who.lastErr
+    end
+
+    local okW, W = _safeRequire("dwkit.services.whostore_service")
+    if not okW or type(W) ~= "table" then
+        _who.lastErr = "WhoStoreService not available"
+        return false, _who.lastErr
+    end
+
+    local evName = _resolveWhoStoreUpdatedEventName(W)
+    if type(evName) ~= "string" or evName == "" then
+        _who.lastErr = "WhoStore updated event name not available"
+        return false, _who.lastErr
+    end
+
+    local handlerFn = function(payload)
+        -- SAFE: reclassify current state if WhoStore changed
+        -- No printing, no gameplay commands, no timers.
+        _applyReclassifyNow({ source = "whostore:updated" })
+    end
+
+    local okSub, tokenOrErr, maybeErr = BUS.on(evName, handlerFn)
+    if okSub ~= true then
+        _who.lastErr = tostring(maybeErr or tokenOrErr or "WhoStore subscribe failed")
+        return false, _who.lastErr
+    end
+
+    _who.subscribed = true
+    _who.token = tokenOrErr
+    _who.eventName = evName
+    _who.lastErr = nil
+    return true, nil
 end
 
 function M.getVersion()
@@ -475,11 +722,23 @@ function M.onUpdated(handlerFn)
     return BUS.on(EV_UPDATED, handlerFn)
 end
 
+-- Manual / callable "superpower": reclassify buckets from WhoStore right now
+-- opts:
+--   - source: string
+--   - forceEmit: boolean
+function M.reclassifyFromWhoStore(opts)
+    opts = (type(opts) == "table") and opts or {}
+    -- Ensure subscription exists (best-effort; no hard fail)
+    _ensureWhoStoreSubscription()
+    return _applyReclassifyNow({ source = opts.source or "manual:reclassify", forceEmit = (opts.forceEmit == true) })
+end
+
 -- Manual ingest helper: takes array of look lines
 -- opts:
 --   - source: string
 --   - assumeCapitalizedAsPlayer: boolean
 --   - usePresence: boolean (default true)
+--   - useWhoStore: boolean (default true)
 --   - knownPlayers: table (optional override; set/list of names)
 --   - forceEmit: boolean
 function M.ingestLookLines(lines, opts)
@@ -488,7 +747,10 @@ function M.ingestLookLines(lines, opts)
         return false, "ingestLookLines(lines): lines must be a table"
     end
 
-    local knownPlayersSet = _getKnownPlayersSetBestEffort(opts)
+    -- Best-effort: enable WhoStore subscription once module is used
+    _ensureWhoStoreSubscription()
+
+    local knownPlayersSet = _getKnownPlayersSetCombined(opts)
     local buckets = _newBuckets()
 
     for _, raw in ipairs(lines) do
@@ -529,6 +791,12 @@ function M.getStats()
             for _ in pairs(STATE.state) do n = n + 1 end
             return n
         end)(),
+        who = {
+            subscribed = (_who.subscribed == true),
+            eventName = _who.eventName,
+            hasToken = (_who.token ~= nil),
+            lastErr = _who.lastErr,
+        },
     }
 end
 
