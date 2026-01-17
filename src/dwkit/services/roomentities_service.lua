@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.roomentities_service
 -- Owner       : Services
--- Version     : v2026-01-17B
+-- Version     : v2026-01-18A
 -- Purpose     :
 --   - SAFE, profile-portable RoomEntitiesService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
@@ -14,6 +14,34 @@
 --           When WhoStore player set updates, we re-bucket current entities
 --           (unknown/mobs/items -> players) when names are now known players,
 --           and emit RoomEntities Updated only if state actually changes.
+--
+--   - NEW (v2026-01-17E):
+--       - Known-player prefix matching:
+--           "Scynox the adventurer" becomes player "Scynox" if WhoStore knows Scynox.
+--           "Borai hates ..." becomes player "Borai" if WhoStore knows Borai.
+--       - Reclassify also canonicalizes keys (renames bucket entries) when prefix matches.
+--
+--   - NEW (v2026-01-17F):
+--       - Ignore non-entity look lines:
+--           room title, indented description lines, and exit direction rows.
+--       - Better items classification for common room objects:
+--           board/bulletin/keg/mechanism/etc => items
+--
+--   - FIX (v2026-01-17G):
+--       - Do NOT discard indented entity lines.
+--         Some clipboard/capture flows indent ALL lines.
+--         If an indented line contains "is here." or "standing here.", treat as entity.
+--
+--   - NEW (v2026-01-17H):
+--       - Support more player postures:
+--           standing/sitting/sleeping/resting/kneeling/meditating.
+--       - Opt-in ingestion noise filters (caller-controlled):
+--           opts.ignorePatterns (Lua patterns) + opts.ignoreSubstrings (plain contains).
+--
+--   - NEW (v2026-01-18A):
+--       - Normalize internal state to ALWAYS contain the 4 buckets:
+--           players/mobs/items/unknown (even after clear()).
+--         This avoids consumers handling nil buckets and makes state equality stable.
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -36,7 +64,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-17B"
+M.VERSION = "v2026-01-18A"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -46,12 +74,42 @@ local EV_UPDATED = tostring(ID.eventPrefix or "DWKit:") .. "Service:RoomEntities
 -- Expose event name for UIs and consumers (contract)
 M.EV_UPDATED = EV_UPDATED
 
+local function _newBuckets()
+    return {
+        players = {},
+        mobs = {},
+        items = {},
+        unknown = {},
+    }
+end
+
+local function _ensureBucketsPresent(s)
+    if type(s) ~= "table" then
+        return _newBuckets()
+    end
+    if type(s.players) ~= "table" then s.players = {} end
+    if type(s.mobs) ~= "table" then s.mobs = {} end
+    if type(s.items) ~= "table" then s.items = {} end
+    if type(s.unknown) ~= "table" then s.unknown = {} end
+    return s
+end
+
 local STATE = {
-    state = {},
+    state = _newBuckets(),
     lastTs = nil,
     updates = 0,
     emits = 0,
     suppressedEmits = 0,
+}
+
+-- Supported player postures in "is <posture> here."
+local POSTURES = {
+    standing = true,
+    sitting = true,
+    sleeping = true,
+    resting = true,
+    kneeling = true,
+    meditating = true,
 }
 
 local function _trim(s)
@@ -63,13 +121,6 @@ local function _normName(s)
     s = _trim(s or "")
     if s == "" then return "" end
     return s:lower()
-end
-
-local function _shallowCopy(t)
-    local out = {}
-    if type(t) ~= "table" then return out end
-    for k, v in pairs(t) do out[k] = v end
-    return out
 end
 
 -- shallow copy with 1-level copy for nested tables (good enough for buckets)
@@ -111,15 +162,6 @@ local function _emit(stateCopy, deltaCopy, source)
     return true, nil
 end
 
-local function _newBuckets()
-    return {
-        players = {},
-        mobs = {},
-        items = {},
-        unknown = {},
-    }
-end
-
 local function _asKey(s)
     s = _trim(s or "")
     if s == "" then return nil end
@@ -136,11 +178,9 @@ local function _bucketKeysEqual(a, b)
     if type(a) ~= "table" then a = {} end
     if type(b) ~= "table" then b = {} end
 
-    -- count a
     local ca = 0
     for _ in pairs(a) do ca = ca + 1 end
 
-    -- count b + ensure all keys exist in a
     local cb = 0
     for k in pairs(b) do
         cb = cb + 1
@@ -153,7 +193,6 @@ local function _bucketKeysEqual(a, b)
         return false
     end
 
-    -- ensure all keys exist in b
     for k in pairs(a) do
         if b[k] ~= true then
             return false
@@ -164,16 +203,14 @@ local function _bucketKeysEqual(a, b)
 end
 
 local function _statesEqual(s1, s2)
-    if type(s1) ~= "table" then s1 = {} end
-    if type(s2) ~= "table" then s2 = {} end
+    s1 = _ensureBucketsPresent((type(s1) == "table") and s1 or {})
+    s2 = _ensureBucketsPresent((type(s2) == "table") and s2 or {})
 
-    -- treat missing buckets as empty
     if not _bucketKeysEqual(s1.players, s2.players) then return false end
     if not _bucketKeysEqual(s1.mobs, s2.mobs) then return false end
     if not _bucketKeysEqual(s1.items, s2.items) then return false end
     if not _bucketKeysEqual(s1.unknown, s2.unknown) then return false end
 
-    -- if there are extra top-level keys beyond buckets, compare them shallowly
     local known = { players = true, mobs = true, items = true, unknown = true }
 
     for k, v in pairs(s1) do
@@ -190,9 +227,6 @@ local function _statesEqual(s1, s2)
     return true
 end
 
--- Presence-assisted known-player extraction (best-effort, SAFE)
--- We do NOT assume any specific PresenceService schema.
--- If PresenceService is unavailable or state shape is unknown, we return empty set.
 local function _safeRequire(modName)
     local ok, mod = pcall(require, modName)
     if ok then return true, mod end
@@ -256,10 +290,8 @@ local function _extractKnownPlayersSetFromPresenceState(pState)
         return set
     end
 
-    -- If presence state itself is already a set/list of names
     _absorbNamesFromTable(set, pState)
 
-    -- Common candidate keys (best-effort)
     local keys = { "players", "nearby", "present", "who", "names", "list" }
     for _, k in ipairs(keys) do
         local v = pState[k]
@@ -274,14 +306,12 @@ end
 local function _getKnownPlayersSetBestEffort(opts)
     opts = (type(opts) == "table") and opts or {}
 
-    -- Caller may explicitly supply known players (highest priority)
     if type(opts.knownPlayers) == "table" then
         local set = {}
         _absorbNamesFromTable(set, opts.knownPlayers)
         return set
     end
 
-    -- Opt-out switch (if caller wants pure heuristics)
     if opts.usePresence ~= nil and opts.usePresence ~= true then
         return {}
     end
@@ -310,19 +340,15 @@ local function _isKnownPlayer(name, knownPlayersSet)
     return (knownPlayersSet[key] == true)
 end
 
--- WhoStore-assisted known-player extraction (best-effort, SAFE)
--- We treat WhoStore player set as authoritative for "is this a player name".
 local function _extractKnownPlayersSetFromWhoStoreState(wState)
     local set = {}
     if type(wState) ~= "table" then
         return set
     end
 
-    -- Common shape: wState.players is map {Name=true} or list {"Name", ...}
     if type(wState.players) == "table" then
         _absorbNamesFromTable(set, wState.players)
     else
-        -- Sometimes the state table itself might be a set/list
         _absorbNamesFromTable(set, wState)
     end
 
@@ -346,11 +372,9 @@ local function _getWhoStoreKnownPlayersSetBestEffort()
     return _extractKnownPlayersSetFromWhoStoreState(wState)
 end
 
--- Combine known players from Presence + WhoStore (WhoStore is authoritative when present)
 local function _getKnownPlayersSetCombined(opts)
     opts = (type(opts) == "table") and opts or {}
 
-    -- Caller may override explicitly (highest priority)
     if type(opts.knownPlayers) == "table" then
         local set = {}
         _absorbNamesFromTable(set, opts.knownPlayers)
@@ -359,13 +383,11 @@ local function _getKnownPlayersSetCombined(opts)
 
     local set = {}
 
-    -- Presence (optional)
     if opts.usePresence == nil or opts.usePresence == true then
         local pSet = _getKnownPlayersSetBestEffort(opts)
         _merge(set, pSet)
     end
 
-    -- WhoStore (optional; default true)
     if opts.useWhoStore == nil or opts.useWhoStore == true then
         local wSet = _getWhoStoreKnownPlayersSetBestEffort()
         _merge(set, wSet)
@@ -374,85 +396,238 @@ local function _getKnownPlayersSetCombined(opts)
     return set
 end
 
--- Very light, SAFE heuristics for look-line classification.
--- This is intentionally conservative; improved using PresenceService / WhoStore over time.
+local function _extractKnownPlayerPrefixName(phrase, knownPlayersSet)
+    if type(phrase) ~= "string" then return nil end
+    if type(knownPlayersSet) ~= "table" then return nil end
+
+    local raw = _trim(phrase)
+    if raw == "" then return nil end
+
+    local lower = raw:lower()
+
+    for knownLower in pairs(knownPlayersSet) do
+        if type(knownLower) == "string" and knownLower ~= "" then
+            if lower:sub(1, #knownLower) == knownLower then
+                local nextChar = lower:sub(#knownLower + 1, #knownLower + 1)
+                if nextChar == "" or nextChar:match("%s") then
+                    return _trim(raw:sub(1, #knownLower))
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function _looksLikeExitRow(lineLower)
+    if type(lineLower) ~= "string" then return false end
+    return (lineLower:match("^(north|south|east|west|up|down)%s+%-%s+") ~= nil)
+end
+
+local function _looksLikeRoomTitle(line)
+    if type(line) ~= "string" then return false end
+    if line:find("%.") then return false end
+    if #line > 60 then return false end
+    if line:match("^%s+") then return false end
+    if line:lower():find(" is here") or line:lower():find("standing here") then return false end
+    if line:lower():find("^obvious exits:") then return false end
+    if line:lower():find("^exits:") then return false end
+
+    if line:match("^[%a%s']+$") then
+        return true
+    end
+    return false
+end
+
+local function _isProbablyItemPhrase(phraseLower)
+    if type(phraseLower) ~= "string" then return false end
+
+    local itemKeys = {
+        "board", "bulletin", "announcement", "keg", "mechanism", "altar",
+        "portal", "sign", "plaque", "statue", "fountain", "table", "chair",
+        "bench", "door", "gate", "lever", "switch", "chest", "bag",
+        "scroll", "potion", "sword", "shield", "corpse",
+    }
+
+    for _, k in ipairs(itemKeys) do
+        if phraseLower:find(k, 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function _isEntityishPostureLine(lowerTrimmed)
+    if type(lowerTrimmed) ~= "string" then return false end
+
+    -- quick accept "is here."
+    if lowerTrimmed:find("is here%.", 1, true) ~= nil then
+        return true
+    end
+
+    -- accept "is <posture> here."
+    local posture = lowerTrimmed:match("^.-%s+is%s+(%a+)%s+here%.$")
+    if type(posture) == "string" and posture ~= "" then
+        if POSTURES[posture] == true then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function _shouldIgnoreByCallerRules(trimmed, opts)
+    opts = (type(opts) == "table") and opts or {}
+    if type(trimmed) ~= "string" or trimmed == "" then
+        return false
+    end
+
+    -- plain contains rules
+    if type(opts.ignoreSubstrings) == "table" then
+        for _, sub in ipairs(opts.ignoreSubstrings) do
+            if type(sub) == "string" and sub ~= "" then
+                if trimmed:find(sub, 1, true) ~= nil then
+                    return true
+                end
+            end
+        end
+    end
+
+    -- Lua pattern rules
+    if type(opts.ignorePatterns) == "table" then
+        for _, pat in ipairs(opts.ignorePatterns) do
+            if type(pat) == "string" and pat ~= "" then
+                local okMatch, res = pcall(function()
+                    return (trimmed:match(pat) ~= nil)
+                end)
+                if okMatch and res == true then
+                    return true
+                end
+            end
+        end
+    end
+
+    return false
+end
+
+-- FIXED: indentation safety (v2026-01-17G)
+-- Enhanced postures + opt-in noise filtering (v2026-01-17H)
 local function _classifyLookLine(line, opts, knownPlayersSet)
     opts = (type(opts) == "table") and opts or {}
-    line = _trim(line or "")
-    if line == "" then return nil, nil end
+    if type(line) ~= "string" then return nil, nil end
+
+    local rawLine = line
+    local trimmed = _trim(line)
+    if trimmed == "" then return nil, nil end
+
+    -- Opt-in noise filter (caller-controlled)
+    if _shouldIgnoreByCallerRules(trimmed, opts) then
+        return nil, nil
+    end
+
+    local lowerTrimmed = trimmed:lower()
+
+    -- If line is indented, it might be a description line OR it might be an entity line
+    -- depending on clipboard/capture formatting.
+    if rawLine:match("^%s%s%s+") then
+        local isEntityish = _isEntityishPostureLine(lowerTrimmed)
+        if not isEntityish then
+            return nil, nil
+        end
+        -- else: allow it through as an entity line.
+    end
+
+    local lineClean = trimmed
+    local lower = lowerTrimmed
 
     -- ignore common non-entity look lines
-    local lower = line:lower()
     if lower == "you see nothing special." then return nil, nil end
     if lower:find("^exits:") then return nil, nil end
+    if lower:find("^obvious exits:") then return nil, nil end
+    if _looksLikeExitRow(lower) then return nil, nil end
 
-    -- pattern: "<Name> is standing here."
+    -- common systemic messages (not prompts, but noise)
+    if lower == "huh?!?" then return nil, nil end
+    if lower == "you are hungry." then return nil, nil end
+    if lower == "you are thirsty." then return nil, nil end
+
+    if _looksLikeRoomTitle(lineClean) then
+        return nil, nil
+    end
+
+    -- pattern: "<NamePhrase> is <posture> here."
     do
-        local name = line:match("^(.-)%s+is%s+standing%s+here%.$")
-        if type(name) == "string" then
-            name = _trim(name)
-            if name ~= "" then
-                -- Known player classification (Presence/WhoStore)
-                if _isKnownPlayer(name, knownPlayersSet) then
-                    return "players", _asKey(name)
-                end
-
-                -- optional heuristic: capitalized => player
-                if opts.assumeCapitalizedAsPlayer == true then
-                    local first = name:sub(1, 1)
-                    if first:match("%u") then
-                        return "players", _asKey(name)
+        local phrase, posture = lineClean:match("^(.-)%s+is%s+(%a+)%s+here%.$")
+        if type(phrase) == "string" and type(posture) == "string" then
+            posture = posture:lower()
+            if POSTURES[posture] == true then
+                phrase = _trim(phrase)
+                if phrase ~= "" then
+                    local canon = _extractKnownPlayerPrefixName(phrase, knownPlayersSet)
+                    if canon then
+                        return "players", _asKey(canon)
                     end
-                end
 
-                -- otherwise unknown until Presence/Who is integrated
-                return "unknown", _asKey(name)
+                    if _isKnownPlayer(phrase, knownPlayersSet) then
+                        return "players", _asKey(phrase)
+                    end
+
+                    if opts.assumeCapitalizedAsPlayer == true then
+                        local first = phrase:sub(1, 1)
+                        if first:match("%u") then
+                            return "players", _asKey(phrase)
+                        end
+                    end
+
+                    return "unknown", _asKey(phrase)
+                end
             end
         end
     end
 
     -- pattern: "<something> is here."
     do
-        local thing = line:match("^(.-)%s+is%s+here%.$")
-        if type(thing) == "string" then
-            thing = _trim(thing)
-            if thing ~= "" then
-                -- Known player classification (Presence/WhoStore)
-                if _isKnownPlayer(thing, knownPlayersSet) then
-                    return "players", _asKey(thing)
+        local phrase = lineClean:match("^(.-)%s+is%s+here%.$")
+        if type(phrase) == "string" then
+            phrase = _trim(phrase)
+            if phrase ~= "" then
+                local canon = _extractKnownPlayerPrefixName(phrase, knownPlayersSet)
+                if canon then
+                    return "players", _asKey(canon)
                 end
 
-                -- corpses/items are usually not mobs
+                if _isKnownPlayer(phrase, knownPlayersSet) then
+                    return "players", _asKey(phrase)
+                end
+
                 if lower:find("corpse") then
-                    return "items", _asKey(thing)
+                    return "items", _asKey(phrase)
                 end
 
-                -- crude: "a/an/the ..." tends to be NPC/mob, but can be items too.
-                if thing:lower():match("^(a%s+)") or thing:lower():match("^(an%s+)") or thing:lower():match("^(the%s+)") then
-                    -- if it looks like an object keyword, push to items (very light)
-                    if lower:find("sword") or lower:find("shield") or lower:find("scroll") or lower:find("potion") then
-                        return "items", _asKey(thing)
+                local pLower = phrase:lower()
+
+                if pLower:match("^(a%s+)") or pLower:match("^(an%s+)") or pLower:match("^(the%s+)") then
+                    if _isProbablyItemPhrase(pLower) then
+                        return "items", _asKey(phrase)
                     end
-                    return "mobs", _asKey(thing)
+                    return "mobs", _asKey(phrase)
                 end
 
-                return "unknown", _asKey(thing)
+                return "unknown", _asKey(phrase)
             end
         end
     end
 
-    -- fallback rules
     if lower:find("corpse") then
-        return "items", _asKey(line)
+        return "items", _asKey(lineClean)
     end
 
-    return "unknown", _asKey(line)
+    return "unknown", _asKey(lineClean)
 end
 
 -- ############################################################
--- WhoStore "superpower" wiring (SAFE):
---   - Subscribe to WhoStore Updated event (best-effort)
---   - Reclassify current buckets when new players become known
+-- WhoStore "superpower" wiring (SAFE)
 -- ############################################################
 
 local _who = {
@@ -478,68 +653,71 @@ local function _resolveWhoStoreUpdatedEventName(W)
 end
 
 local function _reclassifyBucketsWithKnownPlayers(current, knownPlayersSet)
-    current = (type(current) == "table") and current or {}
+    current = _ensureBucketsPresent((type(current) == "table") and current or {})
     knownPlayersSet = (type(knownPlayersSet) == "table") and knownPlayersSet or {}
 
     local next = _newBuckets()
 
     local function moveIfKnown(name)
-        if type(name) ~= "string" or name == "" then return false end
+        if type(name) ~= "string" or name == "" then return false, nil end
+
         local key = _normName(name)
-        if key == "" then return false end
-        if knownPlayersSet[key] == true then
+        if key ~= "" and knownPlayersSet[key] == true then
             next.players[name] = true
-            return true
+            return true, name
         end
-        return false
+
+        local canon = _extractKnownPlayerPrefixName(name, knownPlayersSet)
+        if canon then
+            next.players[canon] = true
+            return true, canon
+        end
+
+        return false, nil
     end
 
     local moved = 0
 
-    -- players bucket always preserved
-    if type(current.players) == "table" then
-        for k, v in pairs(current.players) do
-            if v == true and type(k) == "string" and k ~= "" then
+    for k, v in pairs(current.players) do
+        if v == true and type(k) == "string" and k ~= "" then
+            local okMove, canon = moveIfKnown(k)
+            if okMove then
+                if canon ~= k then moved = moved + 1 end
+            else
                 next.players[k] = true
             end
         end
     end
 
-    -- unknown -> players if known; else unknown
-    if type(current.unknown) == "table" then
-        for k, v in pairs(current.unknown) do
-            if v == true and type(k) == "string" and k ~= "" then
-                if moveIfKnown(k) then
-                    moved = moved + 1
-                else
-                    next.unknown[k] = true
-                end
+    for k, v in pairs(current.unknown) do
+        if v == true and type(k) == "string" and k ~= "" then
+            local okMove, canon = moveIfKnown(k)
+            if okMove then
+                moved = moved + 1
+            else
+                next.unknown[k] = true
             end
         end
     end
 
-    -- mobs -> players if known; else mobs
-    if type(current.mobs) == "table" then
-        for k, v in pairs(current.mobs) do
-            if v == true and type(k) == "string" and k ~= "" then
-                if moveIfKnown(k) then
-                    moved = moved + 1
-                else
-                    next.mobs[k] = true
-                end
+    for k, v in pairs(current.mobs) do
+        if v == true and type(k) == "string" and k ~= "" then
+            local okMove, canon = moveIfKnown(k)
+            if okMove then
+                moved = moved + 1
+            else
+                next.mobs[k] = true
             end
         end
     end
 
-    -- items -> players if known; else items
-    if type(current.items) == "table" then
-        for k, v in pairs(current.items) do
-            if v == true and type(k) == "string" and k ~= "" then
-                if moveIfKnown(k) then
-                    moved = moved + 1
-                else
-                    next.items[k] = true
-                end
+    for k, v in pairs(current.items) do
+        if v == true and type(k) == "string" and k ~= "" then
+            local okMove, canon = moveIfKnown(k)
+            if okMove then
+                moved = moved + 1
+            else
+                next.items[k] = true
             end
         end
     end
@@ -557,7 +735,7 @@ local function _applyReclassifyNow(opts)
     _who.reclassifyRunning = true
 
     local knownPlayersSet = _getWhoStoreKnownPlayersSetBestEffort()
-    local before = _copyOneLevel(STATE.state)
+    local before = _copyOneLevel(_ensureBucketsPresent(STATE.state))
 
     local next, moved = _reclassifyBucketsWithKnownPlayers(before, knownPlayersSet)
 
@@ -567,7 +745,7 @@ local function _applyReclassifyNow(opts)
         return true, nil
     end
 
-    STATE.state = _copyOneLevel(next)
+    STATE.state = _copyOneLevel(_ensureBucketsPresent(next))
     STATE.lastTs = os.time()
     STATE.updates = STATE.updates + 1
 
@@ -590,7 +768,6 @@ local function _ensureWhoStoreSubscription()
         return true, nil
     end
 
-    -- Must have an event bus with .on
     if type(BUS) ~= "table" or type(BUS.on) ~= "function" then
         _who.lastErr = "event bus .on not available"
         return false, _who.lastErr
@@ -609,8 +786,6 @@ local function _ensureWhoStoreSubscription()
     end
 
     local handlerFn = function(payload)
-        -- SAFE: reclassify current state if WhoStore changed
-        -- No printing, no gameplay commands, no timers.
         _applyReclassifyNow({ source = "whostore:updated" })
     end
 
@@ -636,7 +811,7 @@ function M.getUpdatedEventName()
 end
 
 function M.getState()
-    return _copyOneLevel(STATE.state)
+    return _copyOneLevel(_ensureBucketsPresent(STATE.state))
 end
 
 function M.setState(newState, opts)
@@ -646,8 +821,11 @@ function M.setState(newState, opts)
     end
 
     local nextState = _copyOneLevel(newState)
+    nextState = _ensureBucketsPresent(nextState)
 
-    if opts.forceEmit ~= true and _statesEqual(STATE.state, nextState) then
+    local before = _ensureBucketsPresent(STATE.state)
+
+    if opts.forceEmit ~= true and _statesEqual(before, nextState) then
         STATE.suppressedEmits = STATE.suppressedEmits + 1
         return true, nil
     end
@@ -671,9 +849,13 @@ function M.update(delta, opts)
         return false, "update(delta): delta must be a table"
     end
 
+    STATE.state = _ensureBucketsPresent(STATE.state)
+
     local before = _copyOneLevel(STATE.state)
 
     _merge(STATE.state, delta)
+    STATE.state = _ensureBucketsPresent(STATE.state)
+
     local after = _copyOneLevel(STATE.state)
 
     if opts.forceEmit ~= true and _statesEqual(before, after) then
@@ -696,9 +878,10 @@ end
 function M.clear(opts)
     opts = (type(opts) == "table") and opts or {}
 
+    STATE.state = _ensureBucketsPresent(STATE.state)
     local before = _copyOneLevel(STATE.state)
 
-    STATE.state = {}
+    STATE.state = _newBuckets()
     local after = _copyOneLevel(STATE.state)
 
     if opts.forceEmit ~= true and _statesEqual(before, after) then
@@ -722,18 +905,12 @@ function M.onUpdated(handlerFn)
     return BUS.on(EV_UPDATED, handlerFn)
 end
 
--- Manual / callable "superpower": reclassify buckets from WhoStore right now
--- opts:
---   - source: string
---   - forceEmit: boolean
 function M.reclassifyFromWhoStore(opts)
     opts = (type(opts) == "table") and opts or {}
-    -- Ensure subscription exists (best-effort; no hard fail)
     _ensureWhoStoreSubscription()
     return _applyReclassifyNow({ source = opts.source or "manual:reclassify", forceEmit = (opts.forceEmit == true) })
 end
 
--- Manual ingest helper: takes array of look lines
 -- opts:
 --   - source: string
 --   - assumeCapitalizedAsPlayer: boolean
@@ -741,13 +918,14 @@ end
 --   - useWhoStore: boolean (default true)
 --   - knownPlayers: table (optional override; set/list of names)
 --   - forceEmit: boolean
+--   - ignorePatterns: table of Lua patterns (optional)
+--   - ignoreSubstrings: table of plain substrings (optional)
 function M.ingestLookLines(lines, opts)
     opts = (type(opts) == "table") and opts or {}
     if type(lines) ~= "table" then
         return false, "ingestLookLines(lines): lines must be a table"
     end
 
-    -- Best-effort: enable WhoStore subscription once module is used
     _ensureWhoStoreSubscription()
 
     local knownPlayersSet = _getKnownPlayersSetCombined(opts)
@@ -763,8 +941,6 @@ function M.ingestLookLines(lines, opts)
     return M.setState(buckets, { source = opts.source or "ingestLookLines", forceEmit = (opts.forceEmit == true) })
 end
 
--- Manual ingest helper: takes full look text, splits into lines
--- opts: same as ingestLookLines
 function M.ingestLookText(text, opts)
     opts = (type(opts) == "table") and opts or {}
     if type(text) ~= "string" then
@@ -780,6 +956,8 @@ function M.ingestLookText(text, opts)
 end
 
 function M.getStats()
+    local s = _ensureBucketsPresent(STATE.state)
+
     return {
         version = M.VERSION,
         lastTs = STATE.lastTs,
@@ -788,7 +966,7 @@ function M.getStats()
         suppressedEmits = STATE.suppressedEmits,
         keys = (function()
             local n = 0
-            for _ in pairs(STATE.state) do n = n + 1 end
+            for _ in pairs(s) do n = n + 1 end
             return n
         end)(),
         who = {
