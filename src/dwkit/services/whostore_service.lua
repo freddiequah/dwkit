@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.whostore_service
 -- Owner       : Services
--- Version     : v2026-01-17B
+-- Version     : v2026-01-18B
 -- Purpose     :
 --   - SAFE WhoStore service (manual-only) to cache authoritative player names
 --     derived from parsing WHO output (No-GMCP compatible).
@@ -22,6 +22,10 @@
 --   - hasPlayer(name) -> boolean
 --   - getAllPlayers() -> array (sorted)
 --
+-- ingestWho* behavior:
+--   - Default: REPLACE mode (authoritative snapshot) to match real WHO output.
+--   - Opt-in MERGE mode: pass opts.merge=true to add without removing existing.
+--
 -- SAFE Constraints:
 --   - No gameplay commands
 --   - No timers
@@ -30,7 +34,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-17B"
+M.VERSION = "v2026-01-18B"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -41,7 +45,7 @@ local _state = {
     players = {},        -- map: name -> true
     lastUpdatedTs = nil, -- os.time()
     source = nil,        -- string
-    rawCount = 0,        -- count of names parsed from last ingest
+    rawCount = 0,        -- count of names parsed from last ingest snapshot
     stats = {
         ingests = 0,
         updates = 0,
@@ -117,6 +121,8 @@ local _BLOCKED_TOKENS = {
     ["player"] = true,
     ["players"] = true,
     ["total"] = true,
+    ["characters"] = true,
+    ["displayed"] = true,
 }
 
 local function _isBlockedToken(name)
@@ -126,6 +132,21 @@ local function _isBlockedToken(name)
         return true
     end
     return false
+end
+
+local function _stripLeadingBracketTags(s)
+    if type(s) ~= "string" then return s end
+    -- WHO lines often start with tags like:
+    -- [48 War] Name ...
+    -- [ IMPL ] Name ...
+    -- [ MGOD ] Name ...
+    -- Strip one or more leading [ ... ] blocks safely.
+    for _ = 1, 4 do
+        local t = s:match("^%s*(%b[])%s*")
+        if not t then break end
+        s = s:gsub("^%s*%b[]%s*", "")
+    end
+    return s
 end
 
 local function _normalizeName(s)
@@ -143,6 +164,21 @@ local function _normalizeName(s)
     if s:match("^[-=_%*]+$") then
         return nil
     end
+
+    local lower = s:lower()
+
+    -- ignore WHO footer lines
+    -- e.g. "12 characters displayed."
+    if lower:match("^%d+%s+characters%s+displayed%.?$") then
+        return nil
+    end
+
+    -- Strip [..] class/level tags first so we don't capture "War/Cle/etc"
+    s = _stripLeadingBracketTags(s)
+
+    -- trim again after stripping
+    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+    if s == "" then return nil end
 
     -- Capture first plausible name token.
     -- Accept letters/numbers/' with leading letter.
@@ -286,6 +322,7 @@ function M.setState(newState, opts)
         ts = _state.lastUpdatedTs,
         state = M.getState(),
         source = _state.source,
+        delta = { added = _state.rawCount, removed = 0, total = _state.rawCount, mode = "setState" },
     })
 
     return true, nil
@@ -323,10 +360,13 @@ function M.update(delta, opts)
     local changed = (after ~= before)
 
     if changed then
+        local added = (after > before) and (after - before) or 0
+        local removed = (before > after) and (before - after) or 0
         _emitUpdated({
             ts = _state.lastUpdatedTs,
             state = M.getState(),
             source = _state.source,
+            delta = { added = added, removed = removed, total = after, mode = "update" },
         })
     end
 
@@ -336,7 +376,7 @@ end
 function M.clear(opts)
     opts = (type(opts) == "table") and opts or {}
 
-    local hadAny = (_countMap(_state.players) > 0)
+    local before = _countMap(_state.players)
 
     _state.players = {}
     _state.lastUpdatedTs = os.time()
@@ -344,11 +384,12 @@ function M.clear(opts)
     _state.rawCount = 0
     _state.stats.updates = _state.stats.updates + 1
 
-    if hadAny then
+    if before > 0 then
         _emitUpdated({
             ts = _state.lastUpdatedTs,
             state = M.getState(),
             source = _state.source,
+            delta = { added = 0, removed = before, total = 0, mode = "clear" },
         })
     end
 
@@ -362,7 +403,6 @@ function M.ingestWhoLines(lines, opts)
     end
 
     local names = {}
-    local added = 0
 
     for _, line in ipairs(lines) do
         local s = tostring(line or "")
@@ -374,28 +414,62 @@ function M.ingestWhoLines(lines, opts)
 
     _state.stats.ingests = _state.stats.ingests + 1
 
-    local before = _countMap(_state.players)
+    local mode = (opts.merge == true) and "merge" or "replace"
 
-    for n, _ in pairs(names) do
-        if _state.players[n] ~= true then
-            added = added + 1
+    local beforeMap = _state.players
+    local beforeCount = _countMap(beforeMap)
+
+    local afterMap = {}
+    if mode == "merge" then
+        -- merge = add-only
+        afterMap = _copyTable(beforeMap)
+        for n, _ in pairs(names) do
+            afterMap[n] = true
         end
-        _state.players[n] = true
+    else
+        -- replace = authoritative snapshot
+        afterMap = names
     end
 
-    local after = _countMap(_state.players)
+    local afterCount = _countMap(afterMap)
 
+    local added = 0
+    local removed = 0
+
+    if mode == "merge" then
+        for n, _ in pairs(afterMap) do
+            if beforeMap[n] ~= true then
+                added = added + 1
+            end
+        end
+        removed = 0
+    else
+        for n, _ in pairs(afterMap) do
+            if beforeMap[n] ~= true then
+                added = added + 1
+            end
+        end
+        for n, _ in pairs(beforeMap) do
+            if afterMap[n] ~= true then
+                removed = removed + 1
+            end
+        end
+    end
+
+    _state.players = afterMap
     _state.lastUpdatedTs = os.time()
     _state.source = tostring(opts.source or "ingestWhoLines")
     _state.rawCount = _countMap(names)
     _state.stats.updates = _state.stats.updates + 1
 
-    if after ~= before then
+    local changed = (added > 0) or (removed > 0)
+
+    if changed then
         _emitUpdated({
             ts = _state.lastUpdatedTs,
             state = M.getState(),
             source = _state.source,
-            delta = { added = added },
+            delta = { added = added, removed = removed, total = afterCount, mode = mode, rawCount = _state.rawCount },
         })
     end
 
