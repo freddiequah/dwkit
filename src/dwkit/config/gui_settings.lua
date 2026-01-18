@@ -346,10 +346,13 @@ function M.register(uiId, defaults, opts)
 end
 
 function M.isEnabled(uiId, default)
+    -- invalid uiId: return caller default if given; else safe fallback = false
     if type(uiId) ~= "string" or uiId == "" then
-        return (default == nil) and true or (default == true)
+        if default ~= nil then return (default == true) end
+        return false
     end
 
+    -- explicit record wins
     if type(_state.data) == "table" and type(_state.data.ui) == "table" then
         local rec = _state.data.ui[uiId]
         if type(rec) == "table" and rec.enabled ~= nil then
@@ -357,11 +360,21 @@ function M.isEnabled(uiId, default)
         end
     end
 
+    -- if caller provides default, use it
     if default ~= nil then
         return (default == true)
     end
 
-    return true
+    -- otherwise follow options.enabledDefault when available
+    if type(_state.data) == "table"
+        and type(_state.data.options) == "table"
+        and _state.data.options.enabledDefault ~= nil
+    then
+        return (_state.data.options.enabledDefault == true)
+    end
+
+    -- final safe fallback
+    return false
 end
 
 function M.setEnabled(uiId, enabled, opts)
