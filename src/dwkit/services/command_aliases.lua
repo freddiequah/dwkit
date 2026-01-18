@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-17A
+-- Version     : v2026-01-18A
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -46,7 +46,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-17A"
+M.VERSION = "v2026-01-18A"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -88,6 +88,16 @@ local STATE = {
         log = {},       -- ring buffer (simple trim)
         tapToken = nil, -- token from eventBus.tapOn
         subs = {},      -- eventName -> token (from eventBus.on)
+    },
+
+    -- Who capture session (manual; used by dwwho refresh)
+    whoCapture = {
+        active = false,
+        started = false,
+        lines = nil,
+        trigAny = nil,
+        timer = nil,
+        startedAt = nil,
     },
 }
 
@@ -312,6 +322,113 @@ local function _getClipboardTextBestEffort()
         end
     end
     return nil
+end
+
+-- ------------------------------------------------------------
+-- Who capture (GAME surface via dwwho refresh)
+-- ------------------------------------------------------------
+local function _killTriggerBestEffort(id)
+    if not id then return end
+    if type(killTrigger) ~= "function" then return end
+    pcall(killTrigger, id)
+end
+
+local function _killTimerBestEffort(id)
+    if not id then return end
+    if type(killTimer) ~= "function" then return end
+    pcall(killTimer, id)
+end
+
+local function _whoCaptureReset()
+    STATE.whoCapture.active = false
+    STATE.whoCapture.started = false
+    STATE.whoCapture.lines = nil
+    STATE.whoCapture.startedAt = nil
+
+    _killTriggerBestEffort(STATE.whoCapture.trigAny)
+    STATE.whoCapture.trigAny = nil
+
+    _killTimerBestEffort(STATE.whoCapture.timer)
+    STATE.whoCapture.timer = nil
+end
+
+local function _whoCaptureFinalize(ok, reason, svc)
+    local cap = STATE.whoCapture
+    local lines = cap.lines or {}
+
+    _whoCaptureReset()
+
+    if not ok then
+        _out("[DWKit Who] refresh FAILED reason=" .. tostring(reason or "unknown"))
+        return
+    end
+
+    if type(svc) ~= "table" or type(svc.ingestWhoLines) ~= "function" then
+        _out("[DWKit Who] refresh FAILED: WhoStoreService.ingestWhoLines not available")
+        return
+    end
+
+    local okIngest, err = svc.ingestWhoLines(lines, { source = "dwwho:refresh" })
+    if okIngest then
+        _out("[DWKit Who] refresh OK lines=" .. tostring(#lines))
+        _printWhoStatus(svc)
+    else
+        _out("[DWKit Who] refresh ingest FAILED err=" .. tostring(err))
+    end
+end
+
+local function _whoCaptureStart(svc, opts)
+    opts = opts or {}
+    local timeoutSec = tonumber(opts.timeoutSec or 4) or 4
+    if timeoutSec < 2 then timeoutSec = 2 end
+    if timeoutSec > 10 then timeoutSec = 10 end
+
+    local cap = STATE.whoCapture
+    if cap.active then
+        _out("[DWKit Who] refresh already running (canceling old session)")
+        _whoCaptureReset()
+    end
+
+    if type(send) ~= "function" then
+        _out("[DWKit Who] refresh FAILED: send() not available in this Mudlet environment")
+        return
+    end
+
+    cap.active = true
+    cap.started = false
+    cap.lines = {}
+    cap.startedAt = os.time()
+
+    -- capture ANY line; wait until we see WHO start marker
+    cap.trigAny = tempRegexTrigger([[^(.*)$]], function()
+        if not cap.active then return end
+        local line = (matches and matches[2]) and tostring(matches[2]) or ""
+
+        -- Start gate: wait for WHO header OR first actual player line
+        if not cap.started then
+            if line == "Players" or line:match("^%[") or line:match("^Total players:") then
+                cap.started = true
+            else
+                return
+            end
+        end
+
+        cap.lines[#cap.lines + 1] = line
+
+        -- End marker: "12 characters displayed."
+        if line:match("^%s*%d+%s+characters displayed%.%s*$") then
+            _whoCaptureFinalize(true, nil, svc)
+        end
+    end)
+
+    -- Timeout safety
+    cap.timer = tempTimer(timeoutSec, function()
+        if not cap.active then return end
+        _whoCaptureFinalize(false, "timeout(" .. tostring(timeoutSec) .. "s)", svc)
+    end)
+
+    _out("[DWKit Who] refresh: sending 'who' + capturing output...")
+    send("who")
 end
 
 local function _isArrayLike(t)
@@ -1737,8 +1854,8 @@ function M.install(opts)
         usage()
     end)
 
-    -- NEW: dwwho [status|clear|ingestclip|fixture]
-    local dwwhoPattern = [[^dwwho(?:\s+(status|clear|ingestclip|fixture))?\s*$]]
+    -- NEW: dwwho [status|clear|ingestclip|fixture|refresh]
+    local dwwhoPattern = [[^dwwho(?:\s+(status|clear|ingestclip|fixture|refresh))?\s*$]]
     local id11c = _mkAlias(dwwhoPattern, function()
         local svc = _getWhoStoreServiceBestEffort()
         if type(svc) ~= "table" then
@@ -1755,10 +1872,12 @@ function M.install(opts)
             _out("  dwwho clear")
             _out("  dwwho ingestclip")
             _out("  dwwho fixture")
+            _out("  dwwho refresh")
             _out("")
             _out("Notes:")
             _out("  - ingestclip reads your clipboard and parses it as WHO output")
-            _out("  - SAFE: does not send gameplay commands")
+            _out("  - SAFE: status/clear/ingestclip/fixture do not send gameplay commands")
+            _out("  - GAME: refresh sends 'who' to the MUD and captures output")
         end
 
         if sub == "" or sub == "status" then
@@ -1824,6 +1943,12 @@ function M.install(opts)
 
             _out("[DWKit Who] fixture ingested")
             _printWhoStatus(svc)
+            return
+        end
+
+        if sub == "refresh" then
+            -- GAME surface: send 'who' and capture output -> ingest into WhoStore (replace mode)
+            _whoCaptureStart(svc, { timeoutSec = 5 })
             return
         end
 
@@ -2319,12 +2444,13 @@ function M.install(opts)
                     for _, id in ipairs(enabledIds) do
                         local okCall, a, b, c, err = _callBestEffort(v, "validateOne", id,
                             { source = "dwgui", scope = "enabled" })
-                        if not okCall then
+                        if not okCall or a ~= true then
+                            local msg = tostring(c or err or b or "validateOne failed")
                             results[#results + 1] = {
                                 uiId = tostring(id),
                                 moduleName = "dwkit.ui." .. tostring(id),
                                 status = "FAIL",
-                                errors = { "validateOne call failed: " .. tostring(err) },
+                                errors = { "validateOne failed: " .. msg },
                                 warnings = {},
                                 notes = {},
                                 has = {},
@@ -2640,13 +2766,19 @@ function M.install(opts)
 
             local enable = (sub == "enable")
 
-            -- FIX: capture the 5th return value from _callBestEffort (err), not the 2nd (which may be true/false)
-            local ok, _, _, _, err = _callBestEffort(gs, "setEnabled", uiId, enable, { source = "dwgui" })
-            if not ok then
-                _err("setEnabled failed: " .. tostring(err))
+            -- UPDATED: validate return values (some implementations return ok, err)
+            local okCall, a, b, c, err = _callBestEffort(gs, "setEnabled", uiId, enable, { source = "dwgui" })
+            if not okCall then
+                _err("setEnabled call failed: " .. tostring(err))
+                return
+            end
+            if a == false then
+                local msg = b or c or err or "setEnabled failed"
+                _err("setEnabled failed: " .. tostring(msg))
                 return
             end
 
+            _out("[DWKit GUI] setEnabled uiId=" .. tostring(uiId) .. " enabled=" .. (enable and "ON" or "OFF"))
             _printGuiStatusAndList(gs)
             return
         end
@@ -2666,13 +2798,19 @@ function M.install(opts)
 
             local vis = (arg3 == "on")
 
-            -- FIX: capture the 5th return value from _callBestEffort (err), not the 2nd (which may be true/false)
-            local ok, _, _, _, err = _callBestEffort(gs, "setVisible", uiId, vis, { source = "dwgui" })
-            if not ok then
-                _err("setVisible failed: " .. tostring(err))
+            -- UPDATED: validate return values (some implementations return ok, err)
+            local okCall, a, b, c, err = _callBestEffort(gs, "setVisible", uiId, vis, { source = "dwgui" })
+            if not okCall then
+                _err("setVisible call failed: " .. tostring(err))
+                return
+            end
+            if a == false then
+                local msg = b or c or err or "setVisible failed"
+                _err("setVisible failed: " .. tostring(msg))
                 return
             end
 
+            _out("[DWKit GUI] setVisible uiId=" .. tostring(uiId) .. " visible=" .. (vis and "ON" or "OFF"))
             _printGuiStatusAndList(gs)
             return
         end
