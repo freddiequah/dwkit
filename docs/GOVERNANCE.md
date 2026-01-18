@@ -9,6 +9,8 @@ dwkit is built as a personal, product-grade Mudlet kit with a strict internal de
 - Per-profile persistence only; no hardcoded profile names/absolute paths
 - Event names are namespaced and treated as contracts
 - UI is consumer-only; logic lives in services
+- Command surface architecture (aliases + handlers):
+  - docs/Architecture_Command_Surface_v1.0.md
 - Changes are verification-gated (tests + expected results required)
 - Docs/runtime sync (required):
   - Any invocation variants, syntax, examples, or behavioral notes recorded in docs/Command_Registry_v1.0.md MUST be mirrored in src/dwkit/bus/command_registry.lua in the same change set (no drift).

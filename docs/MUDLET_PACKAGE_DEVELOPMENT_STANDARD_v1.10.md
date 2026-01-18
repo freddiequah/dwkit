@@ -1,6 +1,7 @@
 ============================================================
 FULL ANCHOR PACK — MUDLET KIT GOVERNANCE (STORE IN PROJECT)
 UPDATED: + Mudlet Input Line Paste Safety (single-line lua do...end)
+UPDATED: + Command Surface Architecture Standard (Router + Handlers, Phase 2 triggers)
 
 GitHub PR Workflow via PowerShell (GitHub CLI “gh”)
 
@@ -103,6 +104,8 @@ Baseline additions included:
 
 Compatibility Baseline (Mudlet 4.19.1 + Lua verification)
 
+Command Surface Architecture Standard (thin alias router + handlers; Phase 2 triggers)
+
 Section R Verification Gate + Confidence Policy
 
 Section W Hallucination-Risk Handoff
@@ -169,6 +172,8 @@ Enforce LF for hooks and docs via .gitattributes.
 Pre-commit must block BOM regressions and direct commits to main.
 
 2026-01-14: Added Branch Protection + gh merge policy notes:
+
+2026-01-18: Added Command Surface Architecture Standard (Router + Handlers) to prevent command_aliases.lua becoming a “god module”, and to provide a Phase 2 trigger checklist for registry migration.
 
 Solo-repo protection settings can block merges due to “review required” or “auto-merge disabled”.
 
@@ -1063,6 +1068,64 @@ A new chat does not replace verification. Section R still applies.
 
 ==================================================
 SECTION S — COMMAND & ALIAS REGISTRY (SINGLE SOURCE OF TRUTH)
+
+SECTION S.0 — COMMAND SURFACE ARCHITECTURE STANDARD (PHASE 1 -> PHASE 2)
+
+Problem:
+As DWKit grows, a single monolithic alias/command file becomes a “god module” that is hard to maintain, hard to test, and high risk to change.
+
+Decision (LOCKED):
+DWKit uses a two-layer Command Surface architecture:
+
+A) Alias Router Layer (transport)
+- File: src/dwkit/services/command_aliases.lua
+- Responsibilities (allowed):
+  - install/uninstall tempAliases
+  - parse user input patterns
+  - route to command handlers
+  - store alias IDs for cleanup
+- Responsibilities (NOT allowed):
+  - no heavy business logic
+  - no subsystem implementations
+  - no large shared utilities
+
+B) Command Handler Layer (application)
+- Location: src/dwkit/commands/
+- Responsibilities:
+  - implement command behavior (logic, formatting, calls into services)
+  - keep each command focused and small
+  - provide stable public handler API surface
+
+C) Shared Utility Layer (foundation)
+- Location: src/dwkit/util/ (or src/dwkit/core where appropriate)
+- Responsibilities:
+  - reusable helpers (safe printing, bounded table dump, formatting helpers)
+  - must NOT live inside command_aliases.lua
+
+Phase plan (forward compatible):
+PHASE 1 (NOW): Router + Handlers
+- Aliases route to handler modules.
+- Handler modules own implementation.
+- command_aliases.lua stays thin and stable.
+
+PHASE 2 (LATER): Metadata-backed Command Registry
+- Commands register metadata (id/description/usage/examples/safety/mode).
+- dwhelp/dwcommands output derives from registry data.
+- Docs sync is enforced from the same metadata structure.
+
+Phase 2 triggers (start migration when 2+ are true):
+- 25+ user-facing commands exist
+- dwhelp/dwcommands becomes painful to maintain manually
+- safety classification / permission tiers become necessary (SAFE vs gameplay wrappers)
+- argument parsing consistency becomes a recurring problem
+- automatic docs/help generation is desired
+
+Definition of Done (Command Surface):
+- New commands MUST be implemented as a handler module first.
+- command_aliases.lua MUST NOT grow with business logic.
+- Any new gameplay-sending command MUST still comply with Section S registry requirements.
+
+
 
 Problem:
 Large kits accumulate many aliases. Without a master list, usage becomes
