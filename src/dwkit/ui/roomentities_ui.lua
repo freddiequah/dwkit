@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-01-17B
+-- Version     : v2026-01-17C
 -- Purpose     :
 --   - SAFE RoomEntities UI scaffold with live render from RoomEntitiesService (data only).
 --   - Creates a small Geyser container + label.
@@ -14,8 +14,9 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-17B"
+M.VERSION = "v2026-01-17C"
 M.UI_ID = "roomentities_ui"
+M.id = M.UI_ID -- convenience alias (some tooling/debug expects ui.id)
 
 local U = require("dwkit.ui.ui_base")
 
@@ -36,6 +37,7 @@ local function _sortedKeysFromSet(t)
     if type(t) ~= "table" then return {} end
     local keys = {}
     for k, v in pairs(t) do
+        -- accept typical "set" style (key=true)
         if v == true and type(k) == "string" and k ~= "" then
             keys[#keys + 1] = k
         end
@@ -91,6 +93,22 @@ local function _formatRoomEntitiesState(state)
     lines[#lines + 1] = _formatBucketLine("unknown", unknown, 2)
 
     return table.concat(lines, "\n")
+end
+
+local function _escapeHtml(s)
+    s = tostring(s or "")
+    s = s:gsub("&", "&amp;")
+    s = s:gsub("<", "&lt;")
+    s = s:gsub(">", "&gt;")
+    s = s:gsub("\"", "&quot;")
+    return s
+end
+
+local function _toPreHtml(multilineText)
+    -- QLabel (and Geyser Label) render HTML; \n can be ignored.
+    -- Use <pre> so newlines always show.
+    local safe = _escapeHtml(multilineText)
+    return "<pre style='margin:0; white-space:pre-wrap;'>" .. safe .. "</pre>"
 end
 
 local _state = {
@@ -164,7 +182,18 @@ local function _ensureWidgets()
 end
 
 local function _setLabelText(txt)
-    U.safeSetLabelText(_state.widgets.label, txt)
+    local label = _state.widgets.label
+
+    -- Prefer HTML-safe rendering so \n always displays
+    if type(label) == "table" and type(label.setText) == "function" then
+        pcall(function()
+            label:setText(_toPreHtml(txt))
+        end)
+        return
+    end
+
+    -- Fallback to shared helper
+    U.safeSetLabelText(label, txt)
 end
 
 local function _getRoomEntitiesStateBestEffort()
