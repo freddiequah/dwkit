@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-19I
+-- Version     : v2026-01-19K
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -58,6 +58,14 @@
 --       * src/dwkit/commands/dwwho.lua
 --   - command_aliases now delegates to those handlers (keeps alias patterns stable).
 --
+-- Phase 2 Split (v2026-01-19J):
+--   - dwgui handler now delegates to src/dwkit/commands/dwgui.lua when available,
+--     with a safe inline fallback if the module signature differs or is missing.
+--
+-- Fixes (v2026-01-19K):
+--   - dwgui alias parsing no longer relies on optional capture groups (Mudlet matches[] can be stale).
+--     Instead, sub/uiId/arg3 are derived from tokenizing matches[1] (the full line).
+--
 -- Public API  :
 --   - install(opts?) -> boolean ok, string|nil err
 --   - uninstall() -> boolean ok, string|nil err
@@ -67,7 +75,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-19I"
+M.VERSION = "v2026-01-19K"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -1229,7 +1237,7 @@ function M.uninstall()
     _whoCaptureReset()
     _roomCaptureReset()
 
-    -- Phase 1 split: also reset extracted command modules (best-effort)
+    -- Phase splits: reset extracted command modules (best-effort)
     do
         local okR, roomMod = _safeRequire("dwkit.commands.dwroom")
         if okR and type(roomMod) == "table" and type(roomMod.reset) == "function" then
@@ -1238,6 +1246,10 @@ function M.uninstall()
         local okW, whoMod = _safeRequire("dwkit.commands.dwwho")
         if okW and type(whoMod) == "table" and type(whoMod.reset) == "function" then
             pcall(whoMod.reset)
+        end
+        local okG, guiMod = _safeRequire("dwkit.commands.dwgui")
+        if okG and type(guiMod) == "table" and type(guiMod.reset) == "function" then
+            pcall(guiMod.reset)
         end
     end
 
@@ -1972,6 +1984,7 @@ function M.install(opts)
     end)
 
     -- dwgui: SAFE config + optional lifecycle helpers
+    -- Phase 2 split: delegates to dwkit.commands.dwgui when available, with fallback here.
     local dwguiPattern =
     [[^dwgui(?:\s+(status|list|enable|disable|visible|validate|apply|dispose|reload|state))?(?:\s+(\S+))?(?:\s+(\S+))?\s*$]]
     local id20a = _mkAlias(dwguiPattern, function()
@@ -1991,10 +2004,58 @@ function M.install(opts)
             pcall(gs.load, { quiet = true })
         end
 
-        local sub = (matches and matches[2]) and tostring(matches[2]) or ""
-        local uiId = (matches and matches[3]) and tostring(matches[3]) or ""
-        local arg3 = (matches and matches[4]) and tostring(matches[4]) or ""
+        -- IMPORTANT: Mudlet optional capture groups can leave stale matches[n] values.
+        -- Use matches[1] (the full line) and tokenize instead.
+        local line = (matches and matches[1]) and tostring(matches[1]) or ""
+        local tokens = {}
+        for w in line:gmatch("%S+") do
+            tokens[#tokens + 1] = w
+        end
 
+        -- tokens[1] = "dwgui"
+        local sub  = tokens[2] or ""
+        local uiId = tokens[3] or ""
+        local arg3 = tokens[4] or ""
+
+        -- Try delegated handler FIRST (best-effort).
+        -- Signature tolerance:
+        --   dispatch(ctx, gs, sub, uiId, arg3)
+        --   dispatch(ctx, sub, uiId, arg3)
+        do
+            local okM, mod = _safeRequire("dwkit.commands.dwgui")
+            if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+                local ctx = {
+                    out = function(line2) _out(line2) end,
+                    err = function(msg) _err(msg) end,
+                    ppTable = function(t, opts) _ppTable(t, opts) end,
+                    callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
+
+                    getGuiSettings = function() return gs end,
+                    getUiValidator = function() return _getUiValidatorBestEffort() end,
+                    printGuiStatusAndList = function(x) _printGuiStatusAndList(x) end,
+                    printNoUiNote = function(context) _printNoUiNote(context) end,
+
+                    safeRequire = function(name) return _safeRequire(name) end,
+                }
+
+                local ok1, err1 = pcall(mod.dispatch, ctx, gs, sub, uiId, arg3)
+                if ok1 then
+                    return
+                end
+
+                local ok2, err2 = pcall(mod.dispatch, ctx, sub, uiId, arg3)
+                if ok2 then
+                    return
+                end
+
+                -- If delegation fails, we fall back to inline legacy handler below.
+                _out("[DWKit GUI] NOTE: dwgui delegate failed; falling back to inline handler")
+                _out("  err1=" .. tostring(err1))
+                _out("  err2=" .. tostring(err2))
+            end
+        end
+
+        -- Inline fallback (legacy behaviour)
         local function usage()
             _out("[DWKit GUI] Usage:")
             _out("  dwgui")
