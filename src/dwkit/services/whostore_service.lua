@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.whostore_service
 -- Owner       : Services
--- Version     : v2026-01-18B
+-- Version     : v2026-01-19C
 -- Purpose     :
 --   - SAFE WhoStore service (manual-only) to cache authoritative player names
 --     derived from parsing WHO output (No-GMCP compatible).
@@ -30,11 +30,19 @@
 --   - No gameplay commands
 --   - No timers
 --   - No automation by default
+--
+-- Fix (v2026-01-18C):
+--   - _emitUpdated MUST check BUS.emit() return ok flag.
+--     pcall() success only means no error, NOT that emit succeeded.
+--
+-- Fix (v2026-01-19C):
+--   - event_bus.emit() requires 3-arg signature: emit(eventName, payload, meta)
+--     Without meta, emit does not deliver (seen in live verification).
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-18B"
+M.VERSION = "v2026-01-19C"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -49,17 +57,12 @@ local _state = {
     stats = {
         ingests = 0,
         updates = 0,
-        emits = 0,
+        emits = 0, -- counts successful emits only (v2026-01-18C)
         lastEmitTs = nil,
         lastEmitSource = nil,
+        lastEmitErr = nil,
     },
 }
-
-local function _safeRequire(modName)
-    local ok, mod = pcall(require, modName)
-    if ok then return true, mod end
-    return false, mod
-end
 
 local function _copyTable(t)
     local out = {}
@@ -195,40 +198,6 @@ local function _normalizeName(s)
     return name
 end
 
-local function _emitUpdated(payload)
-    payload = (type(payload) == "table") and payload or {}
-
-    _state.stats.emits = _state.stats.emits + 1
-    _state.stats.lastEmitTs = os.time()
-    if type(payload.source) == "string" then
-        _state.stats.lastEmitSource = payload.source
-    end
-
-    if type(BUS) ~= "table" then
-        return false
-    end
-
-    -- Best-effort: event_bus emit signature may vary.
-    if type(BUS.emit) == "function" then
-        local ok1 = pcall(BUS.emit, M.EV_UPDATED, payload)
-        if ok1 then return true end
-        pcall(BUS.emit, payload, M.EV_UPDATED)
-        return true
-    end
-
-    -- Fall back to common alternates
-    if type(BUS.raise) == "function" then
-        pcall(BUS.raise, M.EV_UPDATED, payload)
-        return true
-    end
-    if type(BUS.publish) == "function" then
-        pcall(BUS.publish, M.EV_UPDATED, payload)
-        return true
-    end
-
-    return false
-end
-
 local function _asPlayersMap(players)
     -- Accept either map {Name=true} OR array {"Name", ...}
     local out = {}
@@ -255,6 +224,54 @@ local function _asPlayersMap(players)
     end
 
     return out
+end
+
+local function _emitUpdated(payload)
+    payload = (type(payload) == "table") and payload or {}
+
+    if type(BUS) ~= "table" then
+        _state.stats.lastEmitErr = "event bus not available"
+        return false
+    end
+
+    if type(BUS.emit) ~= "function" then
+        _state.stats.lastEmitErr = "event bus .emit not available"
+        return false
+    end
+
+    -- IMPORTANT:
+    -- In this DWKit environment, event_bus.emit requires:
+    --   emit(eventName, payload, meta)
+    -- If meta is missing, emit will not deliver (verified live).
+    local meta = {
+        source = tostring(payload.source or _state.source or "WhoStoreService"),
+        service = "dwkit.services.whostore_service",
+        ts = payload.ts,
+    }
+
+    local okCall, okEmit, delivered, errs = pcall(BUS.emit, M.EV_UPDATED, payload, meta)
+
+    if okCall and okEmit == true then
+        _state.stats.emits = _state.stats.emits + 1
+        _state.stats.lastEmitTs = os.time()
+        _state.stats.lastEmitSource = meta.source
+        _state.stats.lastEmitErr = nil
+        return true
+    end
+
+    local errMsg = nil
+    if okCall ~= true then
+        errMsg = tostring(okEmit)
+    else
+        if type(errs) == "table" and errs[1] ~= nil then
+            errMsg = tostring(errs[1])
+        else
+            errMsg = "emit returned ok=false"
+        end
+    end
+
+    _state.stats.lastEmitErr = errMsg
+    return false
 end
 
 function M.getVersion()
@@ -361,7 +378,7 @@ function M.update(delta, opts)
 
     if changed then
         local added = (after > before) and (after - before) or 0
-        local removed = (before > after) and (before - after) or 0
+        local removed = (before > after) and (before - after) or (0)
         _emitUpdated({
             ts = _state.lastUpdatedTs,
             state = M.getState(),

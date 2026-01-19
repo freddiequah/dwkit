@@ -1,13 +1,27 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.event_bus
 -- Owner       : Bus
--- Version     : v2026-01-11A
+-- Version     : v2026-01-19B
 -- Purpose     :
 --   - SAFE internal event bus (in-process publish/subscribe).
 --   - Enforces: events MUST be registered in dwkit.bus.event_registry first.
 --   - No Mudlet raiseEvent / tempTrigger / automation. Pure Lua dispatch.
 --   - Adds SAFE "tap" subscribers (observe every emit) to support diagnostics harness
 --     without changing runtime behavior for normal consumers.
+--
+--   - API NORMALIZATION (v2026-01-19B):
+--       Support both dot-call and colon-call styles for all public APIs:
+--         BUS.on(...)   and  BUS:on(...)
+--         BUS.emit(...) and  BUS:emit(...)
+--         BUS.off(...)  and  BUS:off(...)
+--         BUS.tapOn(...) and BUS:tapOn(...)
+--         BUS.tapOff(...) and BUS:tapOff(...)
+--
+--       Also supports swapped emit arg order (back-compat):
+--         BUS.emit(eventName, payload)
+--         BUS.emit(payload, eventName)
+--         BUS:emit(eventName, payload)
+--         BUS:emit(payload, eventName)
 --
 -- Public API  :
 --   - on(eventName, handlerFn) -> boolean ok, number|nil token, string|nil err
@@ -24,9 +38,9 @@
 -- Dependencies     : dwkit.core.identity, dwkit.bus.event_registry
 -- #########################################################################
 
-local M = {}
+local M   = {}
 
-M.VERSION = "v2026-01-11A"
+M.VERSION = "v2026-01-19B"
 
 local ID  = require("dwkit.core.identity")
 local REG = require("dwkit.bus.event_registry")
@@ -38,16 +52,21 @@ local function _startsWith(s, prefix)
   return s:sub(1, #prefix) == prefix
 end
 
+local function _eventPrefix()
+  -- defensive: identity is authoritative, but keep SAFE fallback
+  return tostring(ID.eventPrefix or "DWKit:")
+end
+
 local STATE = {
-  nextToken   = 1,
+  nextToken     = 1,
 
   -- Per-event subscriptions
-  subsByToken = {},    -- token -> { eventName=..., fn=... }
-  subsByEvent = {},    -- eventName -> { [token]=fn, ... }
+  subsByToken   = {}, -- token -> { eventName=..., fn=... }
+  subsByEvent   = {}, -- eventName -> { [token]=fn, ... }
 
   -- Tap subscriptions (observe every emitted registered event)
-  tapByToken  = {},    -- token -> fn(payload, eventName, token)
-  tapErrors   = 0,
+  tapByToken    = {}, -- token -> fn(payload, eventName, token)
+  tapErrors     = 0,
 
   -- Stats
   emitted       = 0,
@@ -59,12 +78,24 @@ local function _validateEventName(eventName)
   if not _isNonEmptyString(eventName) then
     return false, "eventName must be a non-empty string"
   end
-  if not _startsWith(eventName, ID.eventPrefix) then
-    return false, "eventName must start with EventPrefix (" .. tostring(ID.eventPrefix) .. ")"
+
+  local pref = _eventPrefix()
+  if not _startsWith(eventName, pref) then
+    return false, "eventName must start with EventPrefix (" .. tostring(pref) .. ")"
   end
-  if not REG.has(eventName) then
+
+  if type(REG) ~= "table" or type(REG.has) ~= "function" then
+    return false, "event registry not available"
+  end
+
+  local okHas, exists = pcall(REG.has, eventName)
+  if not okHas then
+    return false, "event registry check failed"
+  end
+  if not exists then
     return false, "eventName not registered: " .. tostring(eventName)
   end
+
   return true, nil
 end
 
@@ -74,7 +105,78 @@ local function _nextToken()
   return token
 end
 
-function M.on(eventName, handlerFn)
+-- Normalize dot vs colon calls:
+--   M.fn(a,b,...)     -> a,b
+--   M:fn(a,b,...)     -> self=M, a,b
+local function _isSelfCall(x)
+  return (x == M)
+end
+
+local function _norm_on(a, b, c)
+  -- returns: eventName, handlerFn
+  if _isSelfCall(a) then
+    return b, c
+  end
+  return a, b
+end
+
+local function _norm_off(a, b)
+  -- returns: token
+  if _isSelfCall(a) then
+    return b
+  end
+  return a
+end
+
+local function _norm_tapOn(a, b)
+  -- returns: handlerFn
+  if _isSelfCall(a) then
+    return b
+  end
+  return a
+end
+
+local function _norm_tapOff(a, b)
+  -- returns: token
+  if _isSelfCall(a) then
+    return b
+  end
+  return a
+end
+
+local function _norm_emit(a, b, c)
+  -- returns: eventName, payload
+  -- Support:
+  --   emit(eventName, payload)
+  --   emit(payload, eventName)
+  --   :emit(eventName, payload)
+  --   :emit(payload, eventName)
+  if _isSelfCall(a) then
+    -- colon call
+    if type(b) == "string" then
+      return b, c
+    end
+    if type(b) == "table" and type(c) == "string" then
+      return c, b
+    end
+    -- fall back (let validation error be meaningful)
+    return b, c
+  end
+
+  -- dot call
+  if type(a) == "string" then
+    return a, b
+  end
+  if type(a) == "table" and type(b) == "string" then
+    return b, a
+  end
+
+  return a, b
+end
+
+function M.on(a, b, c)
+  local eventName, handlerFn = _norm_on(a, b, c)
+
   local ok, err = _validateEventName(eventName)
   if not ok then return false, nil, err end
 
@@ -91,7 +193,9 @@ function M.on(eventName, handlerFn)
   return true, token, nil
 end
 
-function M.off(token)
+function M.off(a, b)
+  local token = _norm_off(a, b)
+
   if type(token) ~= "number" then
     return false, "token must be a number"
   end
@@ -109,7 +213,10 @@ function M.off(token)
 
     -- Clean up empty buckets (helps keep state tidy)
     local any = false
-    for _ in pairs(STATE.subsByEvent[ev]) do any = true break end
+    for _ in pairs(STATE.subsByEvent[ev]) do
+      any = true
+      break
+    end
     if not any then
       STATE.subsByEvent[ev] = nil
     end
@@ -120,7 +227,9 @@ end
 
 -- Tap API: observe every emitted (validated) event.
 -- This does NOT change delivery semantics; tap runs best-effort and is isolated via pcall.
-function M.tapOn(handlerFn)
+function M.tapOn(a, b)
+  local handlerFn = _norm_tapOn(a, b)
+
   if type(handlerFn) ~= "function" then
     return false, nil, "handlerFn must be a function"
   end
@@ -130,7 +239,9 @@ function M.tapOn(handlerFn)
   return true, token, nil
 end
 
-function M.tapOff(token)
+function M.tapOff(a, b)
+  local token = _norm_tapOff(a, b)
+
   if type(token) ~= "number" then
     return false, "token must be a number"
   end
@@ -163,7 +274,9 @@ local function _snapshotBucket(bucket)
   return snap
 end
 
-function M.emit(eventName, payload)
+function M.emit(a, b, c)
+  local eventName, payload = _norm_emit(a, b, c)
+
   local ok, err = _validateEventName(eventName)
   if not ok then
     return false, 0, { err }
@@ -177,13 +290,13 @@ function M.emit(eventName, payload)
   -- 1) Tap handlers (observe all emits). Best-effort; failures do not block.
   local tapSnap = _snapshotTap()
   for _, rec in ipairs(tapSnap) do
-    local token = rec.token
-    local fn    = rec.fn
-    local okTap, tapErr = pcall(fn, payload, eventName, token)
+    local token    = rec.token
+    local fn       = rec.fn
+
+    local okTap, _ = pcall(fn, payload, eventName, token)
     if not okTap then
       STATE.tapErrors = STATE.tapErrors + 1
-      -- Keep tap errors out of the main errors list to avoid changing emitter semantics.
-      -- Tap is diagnostics-only; emit() result should remain about core delivery.
+      -- Tap is diagnostics-only; keep tap errors out of main emit() errors list.
     end
   end
 
@@ -193,13 +306,13 @@ function M.emit(eventName, payload)
     return true, 0, errors
   end
 
-  -- Snapshot subscribers first (best practice):
+  -- Snapshot subscribers first:
   -- avoids undefined iteration behavior if handlers call off() during emit().
   local snapshot = _snapshotBucket(bucket)
 
   for _, rec in ipairs(snapshot) do
-    local token = rec.token
-    local fn    = rec.fn
+    local token           = rec.token
+    local fn              = rec.fn
 
     local okCall, callErr = pcall(fn, payload, eventName, token)
     if okCall then

@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.roomentities_service
 -- Owner       : Services
--- Version     : v2026-01-18A
+-- Version     : v2026-01-19D
 -- Purpose     :
 --   - SAFE, profile-portable RoomEntitiesService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
@@ -43,6 +43,14 @@
 --           players/mobs/items/unknown (even after clear()).
 --         This avoids consumers handling nil buckets and makes state equality stable.
 --
+--   - FIX (v2026-01-19D):
+--       - Ignore wrapped/unindented LOOK description lines.
+--         Only treat lines as entity candidates when they match entity-ish patterns:
+--           - "is here."
+--           - "is <posture> here."
+--           - contains "corpse"
+--         This prevents paragraph text from being misclassified into unknown bucket.
+--
 -- Public API  :
 --   - getVersion() -> string
 --   - getState() -> table copy
@@ -64,7 +72,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-18A"
+M.VERSION = "v2026-01-19D"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -513,6 +521,7 @@ end
 
 -- FIXED: indentation safety (v2026-01-17G)
 -- Enhanced postures + opt-in noise filtering (v2026-01-17H)
+-- FIXED: wrapped description lines should NOT be treated as entities (v2026-01-19D)
 local function _classifyLookLine(line, opts, knownPlayersSet)
     opts = (type(opts) == "table") and opts or {}
     if type(line) ~= "string" then return nil, nil end
@@ -623,7 +632,13 @@ local function _classifyLookLine(line, opts, knownPlayersSet)
         return "items", _asKey(lineClean)
     end
 
-    return "unknown", _asKey(lineClean)
+    -- v2026-01-19D:
+    -- If it doesn't look like an entity line, ignore it (prevents wrapped description lines).
+    if _isEntityishPostureLine(lower) then
+        return "unknown", _asKey(lineClean)
+    end
+
+    return nil, nil
 end
 
 -- ############################################################
