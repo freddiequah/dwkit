@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_manager
 -- Owner       : UI
--- Version     : v2026-01-15F
+-- Version     : v2026-01-19A
 -- Purpose     :
 --   - SAFE dispatcher for applying UI modules registered in gui_settings.
 --   - Provides manual-only "apply all" and "apply one" capability.
@@ -16,6 +16,7 @@
 --   - disposeOne(uiId, opts?) -> boolean ok, string|nil err
 --   - reloadOne(uiId, opts?) -> boolean ok, string|nil err
 --   - reloadAll(opts?) -> boolean ok, string|nil err
+--   - stateOne(uiId, opts?) -> boolean ok, string|nil err     (SAFE state snapshot)
 --
 -- Notes:
 --   - Gating:
@@ -25,11 +26,12 @@
 --       * init(opts?) optional
 --       * apply(opts?) optional but recommended
 --       * dispose(opts?) optional but recommended
+--       * getState() optional (recommended for diagnostics)
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-15F"
+M.VERSION = "v2026-01-19A"
 
 local function _out(line)
     line = tostring(line or "")
@@ -126,6 +128,15 @@ local function _isEnabled(gs, uiId)
     return enabled
 end
 
+local function _isVisibleBestEffort(gs, uiId)
+    if type(gs) ~= "table" then return nil end
+    if type(gs.isVisible) == "function" then
+        local okV, v = pcall(gs.isVisible, uiId, nil)
+        if okV then return v end
+    end
+    return nil
+end
+
 local function _clearModuleCache(modName)
     if type(modName) ~= "string" or modName == "" then
         return false, "module name invalid"
@@ -135,6 +146,76 @@ local function _clearModuleCache(modName)
     end
     package.loaded[modName] = nil
     return true, nil
+end
+
+-- Simple SAFE pretty printer (bounded) for state snapshots.
+-- No colors, no fancy formatting, and bounded depth/items to avoid spam.
+local function _ppValue(v)
+    local tv = type(v)
+    if tv == "string" then
+        return string.format("%q", v)
+    elseif tv == "number" or tv == "boolean" or tv == "nil" then
+        return tostring(v)
+    elseif tv == "function" then
+        return "<function>"
+    elseif tv == "userdata" then
+        return "<userdata>"
+    elseif tv == "thread" then
+        return "<thread>"
+    elseif tv == "table" then
+        return "<table>"
+    end
+    return "<" .. tv .. ">"
+end
+
+local function _ppTable(t, opts, depth, path, visited, itemCounter)
+    opts = (type(opts) == "table") and opts or {}
+    depth = depth or 0
+    path = path or ""
+    visited = visited or {}
+    itemCounter = itemCounter or { n = 0 }
+
+    local maxDepth = tonumber(opts.maxDepth or 4) or 4
+    local maxItems = tonumber(opts.maxItems or 80) or 80
+
+    if type(t) ~= "table" then
+        _out(path .. " = " .. _ppValue(t))
+        return
+    end
+
+    if visited[t] then
+        _out(path .. " = <table:cycle>")
+        return
+    end
+    visited[t] = true
+
+    if depth >= maxDepth then
+        _out(path .. " = <table:maxDepth>")
+        return
+    end
+
+    local keys = _sortedKeys(t)
+    for _, k in ipairs(keys) do
+        if itemCounter.n >= maxItems then
+            _out(path .. "  ... <maxItems reached>")
+            return
+        end
+
+        itemCounter.n = itemCounter.n + 1
+
+        local v = t[k]
+        local linePrefix = string.rep("  ", depth)
+        local keyStr = tostring(k)
+        local nextPath = (path == "") and keyStr or (path .. "." .. keyStr)
+
+        if type(v) == "table" then
+            _out(linePrefix .. keyStr .. " = {")
+            _ppTable(v, opts, depth + 1, nextPath, visited, itemCounter)
+            _out(linePrefix .. "}")
+        else
+            _out(linePrefix .. keyStr .. " = " .. _ppValue(v))
+        end
+    end
 end
 
 function M.getModuleVersion()
@@ -372,6 +453,85 @@ function M.reloadAll(opts)
         " failed=" .. tostring(failed))
 
     return true, nil
+end
+
+-- NEW: stateOne (SAFE diagnostics)
+-- Best-effort:
+--  - shows enabled/visible flags (if gui_settings supports isVisible)
+--  - calls ui.getState() if present
+--  - prints bounded table snapshot
+function M.stateOne(uiId, opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    if type(uiId) ~= "string" or uiId == "" then
+        return false, "uiId invalid"
+    end
+
+    local gs = _getGuiSettingsBestEffort()
+    if type(gs) ~= "table" then
+        return false, "DWKit.config.guiSettings not available"
+    end
+
+    local okLoad, loadErr = _ensureLoaded(gs)
+    if not okLoad then
+        return false, tostring(loadErr)
+    end
+
+    local enabled = _isEnabled(gs, uiId)
+    local visible = _isVisibleBestEffort(gs, uiId)
+
+    _out("[DWKit UI] state uiId=" .. tostring(uiId))
+    _out("  moduleVersion=" .. tostring(M.VERSION))
+    _out("  enabled=" .. tostring(enabled))
+    if visible ~= nil then
+        _out("  visible=" .. tostring(visible))
+    end
+
+    local modName = "dwkit.ui." .. tostring(uiId)
+    local okR, modOrErr = _safeRequire(modName)
+    if not okR or type(modOrErr) ~= "table" then
+        _out("  module=" .. tostring(modName))
+        _out("  note=no module yet")
+        return true, nil
+    end
+
+    local ui = modOrErr
+    _out("  module=" .. tostring(modName))
+    _out("  hasInit=" .. tostring(type(ui.init) == "function"))
+    _out("  hasApply=" .. tostring(type(ui.apply) == "function"))
+    _out("  hasDispose=" .. tostring(type(ui.dispose) == "function"))
+    _out("  hasGetState=" .. tostring(type(ui.getState) == "function"))
+
+    if type(ui.getState) ~= "function" then
+        _out("  note=getState() not implemented by UI module")
+        return true, nil
+    end
+
+    local okS, stateOrErr = pcall(ui.getState)
+    if not okS then
+        _err("ui.getState failed err=" .. tostring(stateOrErr))
+        return false, tostring(stateOrErr)
+    end
+
+    if type(stateOrErr) ~= "table" then
+        _out("  getState() returned non-table: " .. _ppValue(stateOrErr))
+        return true, nil
+    end
+
+    _out("{")
+    _ppTable(stateOrErr, { maxDepth = opts.maxDepth or 4, maxItems = opts.maxItems or 80 })
+    _out("}")
+
+    return true, nil
+end
+
+-- Compatibility shims (in case dwgui handler expects other names)
+function M.printState(uiId, opts)
+    return M.stateOne(uiId, opts)
+end
+
+function M.state(uiId, opts)
+    return M.stateOne(uiId, opts)
 end
 
 return M
