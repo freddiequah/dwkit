@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.tests.self_test_runner
 -- Owner       : Tests
--- Version     : v2026-01-16A
+-- Version     : v2026-01-19A
 -- Purpose     :
 --   - Provide a SAFE, manual-only self-test runner.
 --   - Prints PASS/FAIL summary + compatibility baseline output.
@@ -13,6 +13,8 @@
 --   - Includes SAFE persistence smoke checks (selftest-only files; cleanup best-effort).
 --   - Includes SAFE GUI Settings (enabled/visible) foundation checks (Section L).
 --   - Includes SAFE UI Safety Gate (UI contract validation; no UI creation) (Objective: dwtest ui gate).
+--   - Includes SAFE service integration smoke:
+--       WhoStore -> RoomEntities auto reclassify (event-driven, no gameplay).
 --   - DOES NOT send gameplay commands.
 --   - DOES NOT start timers or automation.
 --
@@ -37,11 +39,14 @@
 --       - require("dwkit.persist.store")
 --   - Optional (UI safety gate):
 --       - require("dwkit.ui.ui_validator")
+--   - Optional (service integration smoke):
+--       - require("dwkit.services.whostore_service")
+--       - require("dwkit.services.roomentities_service")
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-16A"
+M.VERSION = "v2026-01-19A"
 
 -- -------------------------
 -- Objective D1: Registry version drift locks
@@ -407,6 +412,40 @@ local function _callUiValidatorValidateAllBestEffort(v, opts)
     end
 
     return false, nil, "validateAll threw error"
+end
+
+-- -------------------------
+-- Service integration smoke helpers (SAFE)
+-- -------------------------
+local function _hasKey(setTbl, key)
+    if type(setTbl) ~= "table" then return false end
+    if type(key) ~= "string" or key == "" then return false end
+    return (setTbl[key] == true)
+end
+
+local function _tryRestoreServiceStates(W, R, ws0, re0)
+    local okW = true
+    local okR = true
+    local errW = nil
+    local errR = nil
+
+    if type(R) == "table" and type(R.setState) == "function" and type(re0) == "table" then
+        local ok, resOrErr = pcall(R.setState, re0, { source = "self_test_runner:restore" })
+        if not ok or resOrErr == false then
+            okR = false
+            errR = ok and "setState returned false" or tostring(resOrErr)
+        end
+    end
+
+    if type(W) == "table" and type(W.setState) == "function" and type(ws0) == "table" then
+        local ok, resOrErr = pcall(W.setState, ws0, { source = "self_test_runner:restore" })
+        if not ok or resOrErr == false then
+            okW = false
+            errW = ok and "setState returned false" or tostring(resOrErr)
+        end
+    end
+
+    return okW, errW, okR, errR
 end
 
 -- -------------------------
@@ -871,6 +910,95 @@ function M.run(opts)
         else
             _lineCheck(false, "guiSettings persistence smoke (SAFE)", "selfTestPersistenceSmoke() missing")
             check("guiSettings persistence smoke (SAFE)", false, "missing API")
+        end
+    end
+
+    _out("")
+
+    -- ------------------------------------------------------------
+    -- 5d) Service integration smoke (SAFE)
+    --   WhoStore -> RoomEntities auto reclassify
+    -- ------------------------------------------------------------
+    _out("[DWKit Test] Service integration smoke (SAFE):")
+
+    local okW, W = _safeRequire("dwkit.services.whostore_service")
+    local okR, R = _safeRequire("dwkit.services.roomentities_service")
+
+    local canRun = okW and okR
+        and type(W) == "table" and type(R) == "table"
+        and type(W.getState) == "function"
+        and type(W.update) == "function"
+        and type(R.getState) == "function"
+        and type(R.ingestLookText) == "function"
+
+    if not canRun then
+        _lineCheck(false, "WhoStore -> RoomEntities reclassify", "services not available")
+        check("WhoStore -> RoomEntities reclassify", false, "services not available")
+    else
+        -- Snapshot current states so we can restore afterwards (minimize side-effects)
+        local ws0 = nil
+        local re0 = nil
+        do
+            local okS1, s1 = pcall(W.getState)
+            if okS1 and type(s1) == "table" then ws0 = s1 end
+
+            local okS2, s2 = pcall(R.getState)
+            if okS2 and type(s2) == "table" then re0 = s2 end
+        end
+
+        -- Best-effort: clear caches first (these calls are SAFE; they may emit internal update events)
+        if type(W.clear) == "function" then
+            pcall(W.clear, { source = "self_test_runner:prep" })
+        end
+        if type(R.clear) == "function" then
+            pcall(R.clear, { source = "self_test_runner:prep" })
+        end
+
+        -- Ingest look line with suffix phrase; should start unknown
+        local okIngest, ingestErr = R.ingestLookText("Scynox the adventurer is here.\n",
+            { source = "self_test_runner:look1" })
+        if okIngest ~= true then
+            local detail = "ingestLookText failed err=" .. tostring(ingestErr)
+            _lineCheck(false, "WhoStore -> RoomEntities reclassify", detail)
+            check("WhoStore -> RoomEntities reclassify", false, detail)
+        else
+            -- Update WhoStore; RoomEntities should auto-reclassify via event handler
+            local okUpd, updErr = W.update({ players = { "Scynox" } }, { source = "self_test_runner:addScynox" })
+            if okUpd ~= true then
+                local detail = "WhoStore.update failed err=" .. tostring(updErr)
+                _lineCheck(false, "WhoStore -> RoomEntities reclassify", detail)
+                check("WhoStore -> RoomEntities reclassify", false, detail)
+            else
+                local s = nil
+                local okGS, sOrErr = pcall(R.getState)
+                if okGS and type(sOrErr) == "table" then
+                    s = sOrErr
+                end
+
+                local okPlayer = (s ~= nil and _hasKey(s.players, "Scynox"))
+                local okUnknownGone = (s ~= nil and not _hasKey(s.unknown, "Scynox the adventurer"))
+
+                local pass = okPlayer and okUnknownGone
+                local detail = "players.hasScynox=" .. tostring(okPlayer)
+                    .. " unknown.hasPhrase=" .. tostring(not okUnknownGone and true or false)
+
+                _lineCheck(pass, "WhoStore -> RoomEntities reclassify", detail)
+                check("WhoStore -> RoomEntities reclassify", pass, detail)
+            end
+        end
+
+        -- Restore previous states (best-effort)
+        if type(ws0) == "table" and type(re0) == "table" then
+            local okWRes, errWRes, okRRes, errRRes = _tryRestoreServiceStates(W, R, ws0, re0)
+            local okRestore = (okWRes == true) and (okRRes == true)
+            local detail = "whoStore=" .. (okWRes and "OK" or ("FAIL:" .. tostring(errWRes)))
+                .. " roomEntities=" .. (okRRes and "OK" or ("FAIL:" .. tostring(errRRes)))
+
+            _lineCheck(okRestore, "service state restore (best-effort)", detail)
+            check("service state restore (best-effort)", okRestore, detail)
+        else
+            _lineCheck(false, "service state restore (best-effort)", "snapshot missing; cannot restore")
+            check("service state restore (best-effort)", false, "snapshot missing; cannot restore")
         end
     end
 
