@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-19K
+-- Version     : v2026-01-20A
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -66,6 +66,10 @@
 --   - dwgui alias parsing no longer relies on optional capture groups (Mudlet matches[] can be stale).
 --     Instead, sub/uiId/arg3 are derived from tokenizing matches[1] (the full line).
 --
+-- Phase 3 Split (v2026-01-20A):
+--   - dwboot alias now delegates to src/dwkit/commands/dwboot.lua when available,
+--     with a safe inline fallback to the legacy boot health printer.
+--
 -- Public API  :
 --   - install(opts?) -> boolean ok, string|nil err
 --   - uninstall() -> boolean ok, string|nil err
@@ -75,7 +79,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-19K"
+M.VERSION = "v2026-01-20A"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -1251,6 +1255,10 @@ function M.uninstall()
         if okG and type(guiMod) == "table" and type(guiMod.reset) == "function" then
             pcall(guiMod.reset)
         end
+        local okB, bootMod = _safeRequire("dwkit.commands.dwboot")
+        if okB and type(bootMod) == "table" and type(bootMod.reset) == "function" then
+            pcall(bootMod.reset)
+        end
     end
 
     if not STATE.installed then
@@ -1594,6 +1602,31 @@ function M.install(opts)
 
     local dwbootPattern = [[^dwboot\s*$]]
     local id9 = _mkAlias(dwbootPattern, function()
+        -- Phase 3 split: try delegated handler FIRST (best-effort), then fallback to legacy inline output.
+        local okM, mod = _safeRequire("dwkit.commands.dwboot")
+        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+            local ctx = {
+                out = function(line) _out(line) end,
+                err = function(msg) _err(msg) end,
+                callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
+                legacyPrint = function() _printBootHealth() end,
+            }
+
+            local ok1, err1 = pcall(mod.dispatch, ctx)
+            if ok1 then
+                return
+            end
+
+            local ok2, err2 = pcall(mod.dispatch)
+            if ok2 then
+                return
+            end
+
+            _out("[DWKit Boot] NOTE: dwboot delegate failed; falling back to inline handler")
+            _out("  err1=" .. tostring(err1))
+            _out("  err2=" .. tostring(err2))
+        end
+
         _printBootHealth()
     end)
 
