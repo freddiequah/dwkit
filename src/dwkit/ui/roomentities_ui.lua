@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-01-17C
+-- Version     : v2026-01-20A
 -- Purpose     :
 --   - SAFE RoomEntities UI scaffold with live render from RoomEntitiesService (data only).
 --   - Creates a small Geyser container + label.
@@ -14,7 +14,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-17C"
+M.VERSION = "v2026-01-20A"
 M.UI_ID = "roomentities_ui"
 M.id = M.UI_ID -- convenience alias (some tooling/debug expects ui.id)
 
@@ -350,6 +350,28 @@ local function _ensureSubscriptions()
     return true, nil
 end
 
+local function _resolveVisibleBestEffort(gs, uiId, defaultValue)
+    defaultValue = (defaultValue == true)
+
+    if type(gs) ~= "table" then
+        return defaultValue
+    end
+
+    -- Prefer isVisible (canonical in ui_manager)
+    if type(gs.isVisible) == "function" then
+        local okV, v = pcall(gs.isVisible, uiId, defaultValue)
+        if okV then return (v == true) end
+    end
+
+    -- Back-compat: older gui_settings may expose getVisible()
+    if type(gs.getVisible) == "function" then
+        local okV, v = pcall(gs.getVisible, uiId, defaultValue)
+        if okV then return (v == true) end
+    end
+
+    return defaultValue
+end
+
 function M.getModuleVersion() return M.VERSION end
 
 function M.getUiId() return M.UI_ID end
@@ -408,10 +430,8 @@ function M.apply(opts)
         if okE then enabled = (v == true) end
     end
 
-    if type(gs.getVisible) == "function" then
-        local okV, v = pcall(gs.getVisible, M.UI_ID, false)
-        if okV then visible = (v == true) end
-    end
+    -- IMPORTANT: support both isVisible() and getVisible()
+    visible = _resolveVisibleBestEffort(gs, M.UI_ID, false)
 
     _state.enabled = enabled
     _state.visible = visible

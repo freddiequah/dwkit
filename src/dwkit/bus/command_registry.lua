@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-14H
+-- Version     : v2026-01-20A
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -38,7 +38,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-14H"
+M.VERSION = "v2026-01-20A"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -368,6 +368,45 @@ local REG = {
             notes       = {
                 "Implemented as a Mudlet alias (local only).",
                 "Prefers PresenceService.getState() if available; otherwise prints available API keys.",
+            },
+        },
+
+        dwwho = {
+            command     = "dwwho",
+            aliases     = {},
+            ownerModule = "dwkit.services.command_aliases",
+            description = "Shows and manages WhoStore state (SAFE diagnostics and fixtures; no gameplay commands).",
+            syntax      = "dwwho",
+            examples    = {
+                "dwwho",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Implemented as a Mudlet alias (local only).",
+                "Backed by WhoStoreService (dwkit.services.whostore_service) and SAFE helpers.",
+                "Intended for inspection, fixtures, and state debug; no automation.",
+            },
+        },
+
+        dwroom = {
+            command     = "dwroom",
+            aliases     = {},
+            ownerModule = "dwkit.services.command_aliases",
+            description =
+            "Shows and manages RoomEntities state (SAFE diagnostics/fixtures/refresh; no gameplay commands).",
+            syntax      = "dwroom",
+            examples    = {
+                "dwroom",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Implemented as a Mudlet alias (local only).",
+                "Backed by RoomEntitiesService (dwkit.services.roomentities_service) and SAFE helpers.",
+                "Used for fixture/ingest/refresh workflows; no gameplay commands are sent.",
             },
         },
 

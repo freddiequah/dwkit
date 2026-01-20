@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.roomentities_service
 -- Owner       : Services
--- Version     : v2026-01-19D
+-- Version     : v2026-01-20C
 -- Purpose     :
 --   - SAFE, profile-portable RoomEntitiesService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
@@ -51,6 +51,14 @@
 --           - contains "corpse"
 --         This prevents paragraph text from being misclassified into unknown bucket.
 --
+--   - NEW (v2026-01-20B):
+--       - Add public emitUpdated(meta) API so command surfaces can request an
+--         explicit RoomEntities Updated emission without relying on eventBus fallback.
+--
+--   - NEW (v2026-01-20C):
+--       - Add SAFE ingestFixture(opts) API for command surfaces (dwroom fixture).
+--         Provides deterministic bucket seeding for UI + pipeline validation.
+--
 -- Public API  :
 --   - getVersion() -> string
 --   - getState() -> table copy
@@ -60,6 +68,8 @@
 --   - onUpdated(handlerFn) -> boolean ok, number|nil token, string|nil err
 --   - getStats() -> table
 --   - getUpdatedEventName() -> string
+--   - emitUpdated(meta?) -> boolean ok, string|nil err
+--   - ingestFixture(opts?) -> boolean ok, string|nil err
 --   - ingestLookLines(lines, opts?) -> boolean ok, string|nil err
 --   - ingestLookText(text, opts?) -> boolean ok, string|nil err
 --   - reclassifyFromWhoStore(opts?) -> boolean ok, string|nil err
@@ -72,7 +82,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-19D"
+M.VERSION = "v2026-01-20C"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -827,6 +837,114 @@ end
 
 function M.getState()
     return _copyOneLevel(_ensureBucketsPresent(STATE.state))
+end
+
+-- NEW: explicit emitter surface for command/UI refresh (SAFE)
+-- meta can include: source, method, note, any small diagnostic flags
+function M.emitUpdated(meta)
+    meta = (type(meta) == "table") and meta or {}
+
+    local source = nil
+    if type(meta.source) == "string" and meta.source ~= "" then
+        source = meta.source
+    end
+
+    -- Keep delta small and safe: copy meta minus reserved keys
+    local delta = _copyOneLevel(meta)
+    delta.source = nil
+    delta.ts = nil
+    delta.state = nil
+    delta.delta = nil
+
+    -- If meta has no useful fields, avoid emitting an empty delta table
+    local hasAny = false
+    for _ in pairs(delta) do
+        hasAny = true
+        break
+    end
+    if not hasAny then
+        delta = nil
+    end
+
+    local okEmit, errEmit = _emit(_copyOneLevel(_ensureBucketsPresent(STATE.state)), delta, source)
+    if not okEmit then
+        return false, errEmit
+    end
+
+    STATE.emits = STATE.emits + 1
+    return true, nil
+end
+
+-- NEW: deterministic fixture ingestion (SAFE, no sends)
+-- opts:
+--   - source: string (optional)
+--   - players/mobs/items/unknown: table override (set/list supported)
+--   - forceEmit: boolean
+function M.ingestFixture(opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    _ensureWhoStoreSubscription()
+
+    local function absorb(dstSet, t)
+        if type(dstSet) ~= "table" then return end
+        if type(t) ~= "table" then return end
+
+        if _isArrayTable(t) then
+            for _, v in ipairs(t) do
+                if type(v) == "string" and v ~= "" then
+                    dstSet[v] = true
+                elseif type(v) == "table" and type(v.name) == "string" and v.name ~= "" then
+                    dstSet[v.name] = true
+                end
+            end
+            return
+        end
+
+        for k, v in pairs(t) do
+            if type(k) == "string" and k ~= "" then
+                if v == true then
+                    dstSet[k] = true
+                elseif type(v) == "string" and v ~= "" then
+                    dstSet[v] = true
+                elseif type(v) == "table" and type(v.name) == "string" and v.name ~= "" then
+                    dstSet[v.name] = true
+                end
+            elseif type(v) == "string" and v ~= "" then
+                dstSet[v] = true
+            elseif type(v) == "table" and type(v.name) == "string" and v.name ~= "" then
+                dstSet[v.name] = true
+            end
+        end
+    end
+
+    local buckets = _newBuckets()
+
+    -- defaults are intentionally "entity-ish" to validate UI rendering
+    buckets.players["FixturePlayer"] = true
+    buckets.mobs["a fixture goblin"] = true
+    buckets.items["a fixture chest"] = true
+    buckets.unknown["Mysterious figure"] = true
+
+    -- caller overrides (optional)
+    if type(opts.players) == "table" then
+        buckets.players = {}
+        absorb(buckets.players, opts.players)
+    end
+    if type(opts.mobs) == "table" then
+        buckets.mobs = {}
+        absorb(buckets.mobs, opts.mobs)
+    end
+    if type(opts.items) == "table" then
+        buckets.items = {}
+        absorb(buckets.items, opts.items)
+    end
+    if type(opts.unknown) == "table" then
+        buckets.unknown = {}
+        absorb(buckets.unknown, opts.unknown)
+    end
+
+    local src = tostring(opts.source or "fixture:roomentities")
+    return M.setState(buckets, { source = src, forceEmit = (opts.forceEmit == true) })
 end
 
 function M.setState(newState, opts)

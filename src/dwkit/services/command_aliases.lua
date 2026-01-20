@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-20A
+-- Version     : v2026-01-20B
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -70,6 +70,12 @@
 --   - dwboot alias now delegates to src/dwkit/commands/dwboot.lua when available,
 --     with a safe inline fallback to the legacy boot health printer.
 --
+-- Phase 4 Split (v2026-01-20B):
+--   - dwcommands + dwhelp aliases now delegate to:
+--       * src/dwkit/commands/dwcommands.lua
+--       * src/dwkit/commands/dwhelp.lua
+--     with safe inline fallback to the legacy alias implementation.
+--
 -- Public API  :
 --   - install(opts?) -> boolean ok, string|nil err
 --   - uninstall() -> boolean ok, string|nil err
@@ -79,7 +85,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-20A"
+M.VERSION = "v2026-01-20B"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -1259,6 +1265,14 @@ function M.uninstall()
         if okB and type(bootMod) == "table" and type(bootMod.reset) == "function" then
             pcall(bootMod.reset)
         end
+        local okC, cmdsMod = _safeRequire("dwkit.commands.dwcommands")
+        if okC and type(cmdsMod) == "table" and type(cmdsMod.reset) == "function" then
+            pcall(cmdsMod.reset)
+        end
+        local okH, helpMod = _safeRequire("dwkit.commands.dwhelp")
+        if okH and type(helpMod) == "table" and type(helpMod.reset) == "function" then
+            pcall(helpMod.reset)
+        end
     end
 
     if not STATE.installed then
@@ -1347,7 +1361,39 @@ function M.install(opts)
             return
         end
 
-        local mode = (matches and matches[2]) and tostring(matches[2]) or ""
+        -- Robust parse: optional capture groups can be stale; tokenize full line.
+        local line = (matches and matches[1]) and tostring(matches[1]) or ""
+        local tokens = {}
+        for w in line:gmatch("%S+") do
+            tokens[#tokens + 1] = w
+        end
+        local mode = tokens[2] or ""
+
+        -- Phase 4 split: try delegated handler FIRST (best-effort), then fallback to legacy inline output.
+        local okM, mod = _safeRequire("dwkit.commands.dwcommands")
+        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+            local ctx = {
+                out = function(line2) _out(line2) end,
+                err = function(msg) _err(msg) end,
+            }
+
+            local ok1, err1 = pcall(mod.dispatch, ctx, DWKit.cmd, mode)
+            if ok1 then
+                return
+            end
+
+            local ok2, err2 = pcall(mod.dispatch, nil, DWKit.cmd, mode)
+            if ok2 then
+                return
+            end
+
+            _out("[DWKit Commands] NOTE: dwcommands delegate failed; falling back to inline handler")
+            _out("  err1=" .. tostring(err1))
+            _out("  err2=" .. tostring(err2))
+        end
+
+        -- Inline fallback (legacy behaviour)
+        mode = tostring(mode or "")
         if mode == "safe" then
             DWKit.cmd.listSafe()
         elseif mode == "game" then
@@ -1381,6 +1427,30 @@ function M.install(opts)
             return
         end
 
+        -- Phase 4 split: try delegated handler FIRST (best-effort), then fallback to legacy inline output.
+        local okM, mod = _safeRequire("dwkit.commands.dwhelp")
+        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+            local ctx = {
+                out = function(line2) _out(line2) end,
+                err = function(msg) _err(msg) end,
+            }
+
+            local ok1, err1 = pcall(mod.dispatch, ctx, DWKit.cmd, name)
+            if ok1 then
+                return
+            end
+
+            local ok2, err2 = pcall(mod.dispatch, nil, DWKit.cmd, name)
+            if ok2 then
+                return
+            end
+
+            _out("[DWKit Help] NOTE: dwhelp delegate failed; falling back to inline handler")
+            _out("  err1=" .. tostring(err1))
+            _out("  err2=" .. tostring(err2))
+        end
+
+        -- Inline fallback (legacy behaviour)
         local ok, _, err = DWKit.cmd.help(name)
         if not ok then
             _err(err or ("Unknown command: " .. name))
