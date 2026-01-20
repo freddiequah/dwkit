@@ -1,293 +1,403 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwroom
 -- Owner       : Commands
--- Version     : v2026-01-19A
+-- Version     : v2026-01-20F
 -- Purpose     :
---   - Implements dwroom command handler (SAFE + GAME refresh capture).
---   - Split out from dwkit.services.command_aliases (Phase 1 split).
+--   - Command handler for "dwroom" alias (SAFE manual surface).
+--   - Implements RoomEntities SAFE inspection + helpers:
+--       * dwroom                -> status
+--       * dwroom status         -> status
+--       * dwroom clear          -> clear snapshot (service-defined)
+--       * dwroom ingestclip     -> ingest look-like text from clipboard (SAFE)
+--       * dwroom fixture [name] -> ingest fixture if service supports it (SAFE)
+--       * dwroom refresh        -> SAFE refresh (NO gameplay sends)
+--
+-- IMPORTANT:
+--   - MUST remain SAFE: no send(), no sendAll(), no gameplay commands.
+--   - refresh MUST NOT capture output or fire triggers/timers.
+--   - refresh is best-effort: it calls whichever SAFE refresh/reclassify APIs exist.
+--   - After successful refresh/reclassify, attempt to ensure UI refresh:
+--       1) svc.emitUpdated(meta) if available
+--       2) fallback to eventBus.emit(updatedEventName, payload) if available
 --
 -- Public API  :
---   - dispatch(ctx, roomEntitiesSvc, sub, arg)
---   - reset()  (best-effort cancel pending capture session)
---
--- Notes:
---   - ctx must provide:
---       * out(line), err(msg)
---       * callBestEffort(obj, fnName, ...) -> ok, a, b, c, err
---       * getClipboardText() -> string|nil
---       * resolveSendFn() -> function|nil
---       * looksLikePrompt(line) -> boolean
---       * killTrigger(id), killTimer(id)
---       * tempRegexTrigger(pattern, fn) -> id
---       * tempTimer(seconds, fn) -> id
+--   - dispatch(ctx, roomEntitiesService, sub, arg) -> nil
+--   - reset() -> nil
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-01-19A"
 
--- Room capture session local to this command handler
-local CAP = {
-    active = false,
-    started = false,
-    lines = nil,
-    trigAny = nil,
-    timer = nil,
-    startedAt = nil,
-    assumeCap = false,
-}
+M.VERSION = "v2026-01-20F"
 
-local function _reset(ctx)
-    CAP.active = false
-    CAP.started = false
-    CAP.lines = nil
-    CAP.startedAt = nil
-    CAP.assumeCap = false
-
-    if CAP.trigAny then
-        pcall(ctx.killTrigger, CAP.trigAny)
-        CAP.trigAny = nil
+local function _mkOut(ctx)
+    if type(ctx) == "table" and type(ctx.out) == "function" then
+        return ctx.out
     end
-    if CAP.timer then
-        pcall(ctx.killTimer, CAP.timer)
-        CAP.timer = nil
-    end
+    return function(line) print(tostring(line or "")) end
 end
 
-function M.reset()
-    -- best-effort if someone calls reset() without ctx (rare)
-    -- no-op if we cannot kill triggers/timers
-    CAP.active = false
-    CAP.started = false
-    CAP.lines = nil
-    CAP.startedAt = nil
-    CAP.assumeCap = false
-    CAP.trigAny = nil
-    CAP.timer = nil
+local function _mkErr(ctx)
+    if type(ctx) == "table" and type(ctx.err) == "function" then
+        return ctx.err
+    end
+    return function(msg) print("[DWKit Room] ERROR: " .. tostring(msg or "")) end
 end
 
-local function _usage(ctx)
-    ctx.out("[DWKit Room] Usage:")
-    ctx.out("  dwroom")
-    ctx.out("  dwroom status")
-    ctx.out("  dwroom clear")
-    ctx.out("  dwroom ingestclip [cap]")
-    ctx.out("  dwroom fixture")
-    ctx.out("  dwroom refresh [cap]")
-    ctx.out("")
-    ctx.out("Notes:")
-    ctx.out("  - ingestclip reads your clipboard and parses it as LOOK output")
-    ctx.out("  - refresh sends 'look' to the MUD and captures output (GAME)")
-    ctx.out("  - 'cap' treats Capitalized names as players (temporary heuristic)")
+local function _safeRequire(name)
+    local ok, mod = pcall(require, name)
+    if ok then return true, mod end
+    return false, mod
 end
 
-local function _ingestLook(ctx, svc, text, meta)
-    meta = (type(meta) == "table") and meta or {}
-
-    if type(svc) ~= "table" or type(svc.ingestLookText) ~= "function" then
-        ctx.err("RoomEntitiesService.ingestLookText not available.")
-        return false, "missing ingestLookText"
+local function _call(ctx, obj, fnName, ...)
+    if type(ctx) == "table" and type(ctx.callBestEffort) == "function" then
+        return ctx.callBestEffort(obj, fnName, ...)
     end
 
-    local okCall, a, b, c, err = ctx.callBestEffort(svc, "ingestLookText", text, meta)
-    if not okCall or a == false then
-        return false, tostring(b or c or err or "ingestLookText failed")
+    -- fallback: try obj.fn(...) then obj:fn(...)
+    if type(obj) ~= "table" then
+        return false, nil, nil, nil, "svc not table"
     end
-    return true, nil
+    local fn = obj[fnName]
+    if type(fn) ~= "function" then
+        return false, nil, nil, nil, "missing function: " .. tostring(fnName)
+    end
+
+    local ok1, a1, b1, c1 = pcall(fn, ...)
+    if ok1 then
+        return true, a1, b1, c1, nil
+    end
+
+    local ok2, a2, b2, c2 = pcall(fn, obj, ...)
+    if ok2 then
+        return true, a2, b2, c2, nil
+    end
+
+    return false, nil, nil, nil, "call failed: " .. tostring(a1) .. " | " .. tostring(a2)
 end
 
-local function _captureFinalize(ctx, ok, reason, svc)
-    local lines = CAP.lines or {}
-    local assumeCap = (CAP.assumeCap == true)
+local function _usage(out)
+    out("[DWKit Room] Usage:")
+    out("  dwroom")
+    out("  dwroom status")
+    out("  dwroom clear")
+    out("  dwroom ingestclip")
+    out("  dwroom fixture [name]")
+    out("  dwroom refresh")
+    out("")
+    out("Notes:")
+    out("  - SAFE only: does NOT send any gameplay commands.")
+    out("  - refresh best-effort: reclassify/emitUpdated or eventBus.emit if available.")
+end
 
-    _reset(ctx)
-
-    if not ok then
-        ctx.out("[DWKit Room] refresh FAILED reason=" .. tostring(reason or "unknown"))
+local function _printStatus(ctx, svc)
+    if type(ctx) == "table" and type(ctx.printRoomEntitiesStatus) == "function" then
+        ctx.printRoomEntitiesStatus(svc)
         return
     end
+
+    local out = _mkOut(ctx)
+    out("[DWKit Room] status (dwroom)")
+    out("  serviceVersion=" .. tostring((type(svc) == "table" and svc.VERSION) or "unknown"))
+end
+
+local function _doClear(ctx, svc)
+    local out = _mkOut(ctx)
+    local err = _mkErr(ctx)
 
     if type(svc) ~= "table" then
-        ctx.out("[DWKit Room] refresh FAILED: RoomEntitiesService not available")
+        err("RoomEntitiesService not available.")
         return
     end
 
-    -- Remove trailing prompt line if accidentally captured
-    if #lines > 0 and ctx.looksLikePrompt(lines[#lines]) then
-        table.remove(lines, #lines)
-    end
-
-    local text = table.concat(lines, "\n")
-    if text:gsub("%s+", "") == "" then
-        ctx.out("[DWKit Room] refresh FAILED: captured empty look output")
+    if type(svc.clear) ~= "function" then
+        err("RoomEntitiesService.clear not available.")
         return
     end
 
-    local okIngest, err = _ingestLook(ctx, svc, text, {
-        source = "dwroom:refresh",
-        assumeCapitalizedAsPlayer = assumeCap,
-    })
-
-    if not okIngest then
-        ctx.out("[DWKit Room] refresh ingest FAILED err=" .. tostring(err))
+    local ok, a, b, c, callErr = _call(ctx, svc, "clear", { source = "cmd:dwroom:clear" })
+    if not ok or a == false then
+        err("clear failed: " .. tostring(b or c or callErr or "unknown"))
         return
     end
 
-    ctx.out("[DWKit Room] refresh OK lines=" .. tostring(#lines) .. " cap=" .. tostring(assumeCap == true))
-
-    if type(ctx.printRoomEntitiesStatus) == "function" then
-        ctx.printRoomEntitiesStatus(svc)
-    end
+    out("[DWKit Room] clear OK")
+    _printStatus(ctx, svc)
 end
 
-local function _captureStart(ctx, svc, opts)
-    opts = opts or {}
-    local timeoutSec = tonumber(opts.timeoutSec or 5) or 5
-    if timeoutSec < 2 then timeoutSec = 2 end
-    if timeoutSec > 10 then timeoutSec = 10 end
+local function _doIngestClip(ctx, svc)
+    local out = _mkOut(ctx)
+    local err = _mkErr(ctx)
 
-    local assumeCap = (opts.assumeCap == true)
-
-    if CAP.active then
-        ctx.out("[DWKit Room] refresh already running (canceling old session)")
-        _reset(ctx)
-    end
-
-    local sendFn = ctx.resolveSendFn()
-    if type(sendFn) ~= "function" then
-        ctx.out("[DWKit Room] refresh FAILED: send/sendAll not available in this Mudlet environment")
+    if type(svc) ~= "table" then
+        err("RoomEntitiesService not available.")
         return
     end
 
-    CAP.active = true
-    CAP.started = false
-    CAP.lines = {}
-    CAP.startedAt = os.time()
-    CAP.assumeCap = assumeCap
+    if type(svc.ingestLookText) ~= "function" then
+        err("RoomEntitiesService.ingestLookText not available.")
+        return
+    end
 
-    CAP.trigAny = ctx.tempRegexTrigger([[^(.*)$]], function()
-        if not CAP.active then return end
-        local line = (matches and matches[2]) and tostring(matches[2]) or ""
+    local clip = nil
+    if type(ctx) == "table" and type(ctx.getClipboardText) == "function" then
+        clip = ctx.getClipboardText()
+    end
 
-        -- End condition: prompt-like line (best-effort)
-        if CAP.started and ctx.looksLikePrompt(line) then
-            _captureFinalize(ctx, true, nil, svc)
+    if type(clip) ~= "string" or clip == "" then
+        err("Clipboard is empty or clipboard API not available.")
+        return
+    end
+
+    local ok, a, b, c, callErr = _call(ctx, svc, "ingestLookText", clip, { source = "cmd:dwroom:ingestclip" })
+    if not ok or a == false then
+        err("ingestclip failed: " .. tostring(b or c or callErr or "unknown"))
+        return
+    end
+
+    out("[DWKit Room] ingestclip OK")
+    _printStatus(ctx, svc)
+end
+
+local function _doFixture(ctx, svc, name)
+    local out = _mkOut(ctx)
+    local err = _mkErr(ctx)
+
+    if type(svc) ~= "table" then
+        err("RoomEntitiesService not available.")
+        return
+    end
+
+    name = tostring(name or "")
+    if name == "" then name = "basic" end
+
+    if type(svc.ingestFixture) ~= "function" then
+        err("RoomEntitiesService.ingestFixture not available.")
+        return
+    end
+
+    local ok, a, b, c, callErr = _call(ctx, svc, "ingestFixture", name, { source = "cmd:dwroom:fixture" })
+    if not ok or a == false then
+        err("fixture failed: " .. tostring(b or c or callErr or "unknown"))
+        return
+    end
+
+    out("[DWKit Room] fixture OK name=" .. tostring(name))
+    _printStatus(ctx, svc)
+end
+
+local function _getEventBusBestEffort()
+    if type(_G.DWKit) == "table" and type(_G.DWKit.bus) == "table" and type(_G.DWKit.bus.eventBus) == "table" then
+        return _G.DWKit.bus.eventBus
+    end
+    local ok, mod = _safeRequire("dwkit.bus.event_bus")
+    if ok and type(mod) == "table" then
+        return mod
+    end
+    return nil
+end
+
+local function _resolveUpdatedEventNameBestEffort(svc)
+    if type(svc) == "table" then
+        if type(svc.getUpdatedEventName) == "function" then
+            local ok, v = pcall(svc.getUpdatedEventName)
+            if ok and type(v) == "string" and v ~= "" then
+                return v
+            end
+        end
+        if type(svc.EV_UPDATED) == "string" and svc.EV_UPDATED ~= "" then
+            return svc.EV_UPDATED
+        end
+    end
+    return "DWKit:Service:RoomEntities:Updated"
+end
+
+local function _emitUpdatedEnsure(ctx, svc, meta, methodName)
+    local out = _mkOut(ctx)
+
+    meta = (type(meta) == "table") and meta or {}
+    methodName = tostring(methodName or "unknown")
+
+    -- enrich meta so the service can embed it if it supports it
+    meta.method = meta.method or methodName
+    meta.note = meta.note or "dwroom refresh ensure emit"
+
+    -- 1) preferred: service owns the event emission
+    if type(svc) == "table" and type(svc.emitUpdated) == "function" then
+        local ok, a, b, c, callErr = _call(ctx, svc, "emitUpdated", meta)
+        if ok and a ~= false then
+            out("  emitUpdated=OK (svc.emitUpdated)")
+            return true
+        end
+        out("  emitUpdated=FAILED (svc.emitUpdated) err=" .. tostring(b or c or callErr or "unknown"))
+        -- continue to fallback
+    else
+        out("  emitUpdated=SKIP (svc.emitUpdated missing)")
+    end
+
+    -- 2) fallback: emit directly via eventBus
+    local eb = _getEventBusBestEffort()
+    if type(eb) ~= "table" then
+        out("  emitUpdated=SKIP (eventBus not available)")
+        return false
+    end
+
+    local evName = _resolveUpdatedEventNameBestEffort(svc)
+    local payload = {
+        source = meta.source or "cmd:dwroom:refresh",
+        method = meta.method or methodName,
+        note = meta.note or "fallback eventBus.emit",
+        ts = os.time(),
+    }
+
+    local ok1, a1, b1, c1, err1 = _call(ctx, eb, "emit", evName, payload)
+    if ok1 and a1 ~= false then
+        out("  emitUpdated=OK (eventBus.emit fallback)")
+        return true
+    end
+
+    out("  emitUpdated=FAILED (eventBus.emit fallback) err=" .. tostring(b1 or c1 or err1 or "unknown"))
+    return false
+end
+
+-- SAFE refresh:
+--  - no gameplay commands
+--  - best-effort call chain
+--  - ensure Updated event is emitted (svc.emitUpdated OR eventBus.emit fallback)
+local function _doRefreshSafe(ctx, svc)
+    local out = _mkOut(ctx)
+    local err = _mkErr(ctx)
+
+    if type(svc) ~= "table" then
+        err("RoomEntitiesService not available.")
+        return
+    end
+
+    local meta = {
+        source = "cmd:dwroom:refresh",
+        note = "manual SAFE refresh (dwroom refresh)",
+    }
+
+    out("[DWKit Room] refresh (SAFE)")
+    out("  NOTE: No gameplay sends; best-effort internal refresh/reclassify.")
+    out("  NOTE: Will ensure RoomEntities Updated event is emitted (svc.emitUpdated OR eventBus.emit fallback).")
+
+    local tried = {}
+
+    local function tryCall(fnName, ...)
+        if tried[fnName] then return false, "skipped (already tried)" end
+        tried[fnName] = true
+
+        if type(svc[fnName]) ~= "function" then
+            return false, "missing"
+        end
+
+        local ok, a, b, c, callErr = _call(ctx, svc, fnName, ...)
+        if not ok or a == false then
+            return false, tostring(b or c or callErr or "failed")
+        end
+        return true, nil
+    end
+
+    local function success(methodName)
+        methodName = tostring(methodName or "unknown")
+        meta.method = methodName
+
+        out("  method=" .. tostring(methodName) .. " OK")
+        _emitUpdatedEnsure(ctx, svc, meta, methodName)
+        _printStatus(ctx, svc)
+    end
+
+    -- Preferred: explicit SAFE refresh API (if service provides it)
+    do
+        local ok = tryCall("refresh", meta)
+        if ok then
+            success("refresh")
             return
         end
+    end
 
-        -- Ignore the echoed command itself if it appears
-        if not CAP.started then
-            if line == "" then return end
-            if line:lower() == "look" then return end
-            if ctx.looksLikePrompt(line) then return end
-            CAP.started = true
+    -- Next: reclassify using WhoStore (if service provides it)
+    do
+        local ok = tryCall("reclassifyFromWhoStore", meta)
+        if ok then
+            success("reclassifyFromWhoStore")
+            return
         end
+    end
 
-        CAP.lines[#CAP.lines + 1] = line
-    end)
+    -- Next: generic reclassify hooks (naming variations)
+    do
+        local ok = tryCall("reclassify", meta)
+        if ok then
+            success("reclassify")
+            return
+        end
+    end
 
-    CAP.timer = ctx.tempTimer(timeoutSec, function()
-        if not CAP.active then return end
-        _captureFinalize(ctx, false, "timeout(" .. tostring(timeoutSec) .. "s)", svc)
-    end)
+    do
+        local ok = tryCall("reclassifyAll", meta)
+        if ok then
+            success("reclassifyAll")
+            return
+        end
+    end
 
-    ctx.out("[DWKit Room] refresh: sending 'look' + capturing output...")
-    pcall(sendFn, "look")
+    -- Last: explicit emitUpdated hook only
+    do
+        local ok = tryCall("emitUpdated", meta)
+        if ok then
+            success("emitUpdated")
+            return
+        end
+    end
+
+    err("No SAFE refresh API found on RoomEntitiesService.")
+    out("  Expected one of:")
+    out("    - refresh(meta)")
+    out("    - reclassifyFromWhoStore(meta)")
+    out("    - reclassify(meta) / reclassifyAll(meta)")
+    out("    - emitUpdated(meta)")
+    out("")
+    out("  Tip: run dwroom status to confirm available APIs.")
 end
 
 function M.dispatch(ctx, svc, sub, arg)
-    ctx = ctx or {}
-    if type(ctx.out) ~= "function" or type(ctx.err) ~= "function" then
-        return
-    end
+    local out = _mkOut(ctx)
 
     sub = tostring(sub or "")
     arg = tostring(arg or "")
 
     if sub == "" or sub == "status" then
-        if type(ctx.printRoomEntitiesStatus) == "function" then
-            ctx.printRoomEntitiesStatus(svc)
-        else
-            ctx.err("printRoomEntitiesStatus ctx helper missing")
-        end
+        _printStatus(ctx, svc)
         return
     end
 
     if sub == "clear" then
-        if type(svc) ~= "table" or type(svc.clear) ~= "function" then
-            ctx.err("RoomEntitiesService.clear not available.")
-            return
-        end
-        local okCall, _, _, _, err = ctx.callBestEffort(svc, "clear", { source = "dwroom" })
-        if not okCall then
-            ctx.err("clear failed: " .. tostring(err))
-            return
-        end
-        if type(ctx.printRoomEntitiesStatus) == "function" then
-            ctx.printRoomEntitiesStatus(svc)
-        end
+        _doClear(ctx, svc)
         return
     end
 
     if sub == "ingestclip" then
-        local text = ctx.getClipboardText()
-        if type(text) ~= "string" or text:gsub("%s+", "") == "" then
-            ctx.err("clipboard is empty (copy LOOK output first).")
-            return
-        end
-
-        local cap = (arg == "cap" or arg == "playercap")
-        local okIngest, err = _ingestLook(ctx, svc, text, {
-            source = "dwroom:clipboard",
-            assumeCapitalizedAsPlayer = cap,
-        })
-
-        if not okIngest then
-            ctx.err("ingestclip failed: " .. tostring(err))
-            return
-        end
-
-        ctx.out("[DWKit Room] ingestclip OK (cap=" .. tostring(cap == true) .. ")")
-        if type(ctx.printRoomEntitiesStatus) == "function" then
-            ctx.printRoomEntitiesStatus(svc)
-        end
+        _doIngestClip(ctx, svc)
         return
     end
 
     if sub == "fixture" then
-        local fixture = table.concat({
-            "A quiet stone hallway.",
-            "Exits: north south",
-            "Zerath is standing here.",
-            "a city guard is standing here.",
-            "the corpse of a rat is here.",
-            "a rusty sword is here.",
-            "a small lantern is here.",
-        }, "\n")
-
-        local okIngest, err = _ingestLook(ctx, svc, fixture, {
-            source = "dwroom:fixture",
-            assumeCapitalizedAsPlayer = true,
-        })
-
-        if not okIngest then
-            ctx.err("fixture ingest failed: " .. tostring(err))
-            return
-        end
-
-        ctx.out("[DWKit Room] fixture ingested")
-        if type(ctx.printRoomEntitiesStatus) == "function" then
-            ctx.printRoomEntitiesStatus(svc)
-        end
+        _doFixture(ctx, svc, arg)
         return
     end
 
     if sub == "refresh" then
-        local cap = (arg == "cap" or arg == "playercap")
-        _captureStart(ctx, svc, { timeoutSec = 5, assumeCap = cap })
+        _doRefreshSafe(ctx, svc)
         return
     end
 
-    _usage(ctx)
+    _usage(out)
+end
+
+function M.reset()
+    -- No internal persistent state kept here (SAFE).
 end
 
 return M
