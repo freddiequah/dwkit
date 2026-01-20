@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-20F
+-- Version     : v2026-01-20H
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -98,6 +98,16 @@
 --       * src/dwkit/commands/dwversion.lua
 --     with safe inline fallbacks.
 --
+-- Phase 7 Split (v2026-01-20G):
+--   - dwevents / dwevent now delegate to:
+--       * src/dwkit/commands/dwevents.lua
+--       * src/dwkit/commands/dwevent.lua
+--     with safe inline fallbacks.
+--
+-- Fixes (v2026-01-20H):
+--   - dwevent parsing updated to match Phase 7 patch exactly: uses matches[2] (capture group),
+--     rather than tokenizing matches[1].
+--
 -- Public API  :
 --   - install(opts?) -> boolean ok, string|nil err
 --   - uninstall() -> boolean ok, string|nil err
@@ -107,7 +117,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-20F"
+M.VERSION = "v2026-01-20H"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -1324,6 +1334,16 @@ function M.uninstall()
         if okIN and type(infoMod) == "table" and type(infoMod.reset) == "function" then
             pcall(infoMod.reset)
         end
+
+        -- Phase 7 split: dwevents/dwevent handlers (best-effort reset)
+        local okE1, evsMod = _safeRequire("dwkit.commands.dwevents")
+        if okE1 and type(evsMod) == "table" and type(evsMod.reset) == "function" then
+            pcall(evsMod.reset)
+        end
+        local okE2, evMod = _safeRequire("dwkit.commands.dwevent")
+        if okE2 and type(evMod) == "table" and type(evMod.reset) == "function" then
+            pcall(evMod.reset)
+        end
     end
 
     if not STATE.installed then
@@ -1706,6 +1726,7 @@ function M.install(opts)
         _printVersionSummary()
     end)
 
+    -- Phase 7 split: dwevents delegates to dwkit.commands.dwevents (with fallback)
     local dweventsPattern = [[^dwevents(?:\s+(md))?\s*$]]
     local id7 = _mkAlias(dweventsPattern, function()
         if not _hasEventRegistry() then
@@ -1713,7 +1734,38 @@ function M.install(opts)
             return
         end
 
-        local mode = (matches and matches[2]) and tostring(matches[2]) or ""
+        -- Robust parse: optional capture groups can be stale; tokenize full line.
+        local line = (matches and matches[1]) and tostring(matches[1]) or ""
+        local tokens = {}
+        for w in line:gmatch("%S+") do
+            tokens[#tokens + 1] = w
+        end
+        local mode = tokens[2] or ""
+
+        -- Phase 7 split: delegate FIRST, fallback inline
+        local okM, mod = _safeRequire("dwkit.commands.dwevents")
+        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+            local ctx = {
+                out = function(line2) _out(line2) end,
+                err = function(msg) _err(msg) end,
+            }
+
+            local ok1, err1 = pcall(mod.dispatch, ctx, DWKit.bus.eventRegistry, mode)
+            if ok1 then
+                return
+            end
+
+            local ok2, err2 = pcall(mod.dispatch, nil, DWKit.bus.eventRegistry, mode)
+            if ok2 then
+                return
+            end
+
+            _out("[DWKit Events] NOTE: dwevents delegate failed; falling back to inline handler")
+            _out("  err1=" .. tostring(err1))
+            _out("  err2=" .. tostring(err2))
+        end
+
+        -- Inline fallback (legacy behaviour)
         if mode == "md" then
             if type(DWKit.bus.eventRegistry.toMarkdown) ~= "function" then
                 _err("DWKit.bus.eventRegistry.toMarkdown not available.")
@@ -1731,6 +1783,7 @@ function M.install(opts)
         DWKit.bus.eventRegistry.listAll()
     end)
 
+    -- Phase 7 split: dwevent delegates to dwkit.commands.dwevent (with fallback)
     local dweventPattern = [[^dwevent\s+(\S+)\s*$]]
     local id8 = _mkAlias(dweventPattern, function()
         if not _hasEventRegistry() then
@@ -1744,6 +1797,30 @@ function M.install(opts)
             return
         end
 
+        -- Phase 7 split: delegate FIRST, fallback inline
+        local okM, mod = _safeRequire("dwkit.commands.dwevent")
+        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+            local ctx = {
+                out = function(line2) _out(line2) end,
+                err = function(msg) _err(msg) end,
+            }
+
+            local ok1, err1 = pcall(mod.dispatch, ctx, DWKit.bus.eventRegistry, evName)
+            if ok1 then
+                return
+            end
+
+            local ok2, err2 = pcall(mod.dispatch, nil, DWKit.bus.eventRegistry, evName)
+            if ok2 then
+                return
+            end
+
+            _out("[DWKit Event] NOTE: dwevent delegate failed; falling back to inline handler")
+            _out("  err1=" .. tostring(err1))
+            _out("  err2=" .. tostring(err2))
+        end
+
+        -- Inline fallback (legacy behaviour)
         local ok, _, err = DWKit.bus.eventRegistry.help(evName)
         if not ok then
             _err(err or ("Unknown event: " .. evName))
