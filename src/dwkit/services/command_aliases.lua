@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-20E
+-- Version     : v2026-01-20F
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -91,6 +91,13 @@
 --       * dwtest / dwtest quiet runs DWKit.test.run when available, else falls back to self_test_runner.run()
 --   - Added _getKit() resolver to reliably reference DWKit inside alias callbacks
 --
+-- Phase 6 Split (v2026-01-20F):
+--   - dwid / dwinfo / dwversion now delegate to:
+--       * src/dwkit/commands/dwid.lua
+--       * src/dwkit/commands/dwinfo.lua
+--       * src/dwkit/commands/dwversion.lua
+--     with safe inline fallbacks.
+--
 -- Public API  :
 --   - install(opts?) -> boolean ok, string|nil err
 --   - uninstall() -> boolean ok, string|nil err
@@ -100,7 +107,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-20E"
+M.VERSION = "v2026-01-20F"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -1303,6 +1310,20 @@ function M.uninstall()
         if okT and type(testMod) == "table" and type(testMod.reset) == "function" then
             pcall(testMod.reset)
         end
+
+        -- Phase 6 split: new command modules (best-effort reset)
+        local okID, idMod = _safeRequire("dwkit.commands.dwid")
+        if okID and type(idMod) == "table" and type(idMod.reset) == "function" then
+            pcall(idMod.reset)
+        end
+        local okVI, vMod = _safeRequire("dwkit.commands.dwversion")
+        if okVI and type(vMod) == "table" and type(vMod.reset) == "function" then
+            pcall(vMod.reset)
+        end
+        local okIN, infoMod = _safeRequire("dwkit.commands.dwinfo")
+        if okIN and type(infoMod) == "table" and type(infoMod.reset) == "function" then
+            pcall(infoMod.reset)
+        end
     end
 
     if not STATE.installed then
@@ -1588,8 +1609,34 @@ function M.install(opts)
         end
     end)
 
+    -- Phase 6 split: dwinfo delegates to dwkit.commands.dwinfo (with fallback)
     local dwinfoPattern = [[^dwinfo\s*$]]
     local id4 = _mkAlias(dwinfoPattern, function()
+        local kit = _getKit()
+
+        local okM, mod = _safeRequire("dwkit.commands.dwinfo")
+        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+            local ctx = {
+                out = function(line2) _out(line2) end,
+                err = function(msg) _err(msg) end,
+            }
+
+            local ok1, err1 = pcall(mod.dispatch, ctx, kit)
+            if ok1 then
+                return
+            end
+
+            local ok2, err2 = pcall(mod.dispatch, nil, kit)
+            if ok2 then
+                return
+            end
+
+            _out("[DWKit Info] NOTE: dwinfo delegate failed; falling back to inline handler")
+            _out("  err1=" .. tostring(err1))
+            _out("  err2=" .. tostring(err2))
+        end
+
+        -- Inline fallback (legacy behaviour)
         if not _hasBaseline() then
             _err("DWKit.core.runtimeBaseline.printInfo not available. Run loader.init() first.")
             return
@@ -1597,13 +1644,65 @@ function M.install(opts)
         DWKit.core.runtimeBaseline.printInfo()
     end)
 
+    -- Phase 6 split: dwid delegates to dwkit.commands.dwid (with fallback)
     local dwidPattern = [[^dwid\s*$]]
     local id5 = _mkAlias(dwidPattern, function()
+        local kit = _getKit()
+
+        local okM, mod = _safeRequire("dwkit.commands.dwid")
+        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+            local ctx = {
+                out = function(line2) _out(line2) end,
+                err = function(msg) _err(msg) end,
+            }
+
+            local ok1, err1 = pcall(mod.dispatch, ctx, kit)
+            if ok1 then
+                return
+            end
+
+            local ok2, err2 = pcall(mod.dispatch, nil, kit)
+            if ok2 then
+                return
+            end
+
+            _out("[DWKit ID] NOTE: dwid delegate failed; falling back to inline handler")
+            _out("  err1=" .. tostring(err1))
+            _out("  err2=" .. tostring(err2))
+        end
+
+        -- Inline fallback (legacy behaviour)
         _printIdentity()
     end)
 
+    -- Phase 6 split: dwversion delegates to dwkit.commands.dwversion (with fallback)
     local dwversionPattern = [[^dwversion\s*$]]
     local id6 = _mkAlias(dwversionPattern, function()
+        local kit = _getKit()
+
+        local okM, mod = _safeRequire("dwkit.commands.dwversion")
+        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+            local ctx = {
+                out = function(line2) _out(line2) end,
+                err = function(msg) _err(msg) end,
+            }
+
+            local ok1, err1 = pcall(mod.dispatch, ctx, kit, M.VERSION)
+            if ok1 then
+                return
+            end
+
+            local ok2, err2 = pcall(mod.dispatch, nil, kit, M.VERSION)
+            if ok2 then
+                return
+            end
+
+            _out("[DWKit Version] NOTE: dwversion delegate failed; falling back to inline handler")
+            _out("  err1=" .. tostring(err1))
+            _out("  err2=" .. tostring(err2))
+        end
+
+        -- Inline fallback (legacy behaviour)
         _printVersionSummary()
     end)
 
