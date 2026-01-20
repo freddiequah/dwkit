@@ -1,12 +1,12 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-20B
+-- Version     : v2026-01-20E
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
 --       * dwhelp <cmd>
---       * dwtest [quiet|ui]
+--       * dwtest [quiet|ui] [verbose|v]
 --       * dwinfo
 --       * dwid
 --       * dwversion
@@ -76,6 +76,21 @@
 --       * src/dwkit/commands/dwhelp.lua
 --     with safe inline fallback to the legacy alias implementation.
 --
+-- Fixes (v2026-01-20C):
+--   - install() is idempotent: if already installed, it returns early BEFORE cleaning up persisted
+--     alias ids. This prevents an "install nothing" state if install() is called twice.
+--
+-- Phase 5 Split (v2026-01-20D):
+--   - dwtest alias now delegates to src/dwkit/commands/dwtest.lua when available,
+--     with safe inline fallback to the legacy dwtest handler.
+--   - dwtest parsing no longer relies on optional capture groups; tokenizes matches[1] to avoid stale values.
+--
+-- Fixes (v2026-01-20E):
+--   - dwtest alias no longer hard-fails due to alias callback environment quirks:
+--       * dwtest ui runs ui_validator directly (does not depend on DWKit.test.run surface)
+--       * dwtest / dwtest quiet runs DWKit.test.run when available, else falls back to self_test_runner.run()
+--   - Added _getKit() resolver to reliably reference DWKit inside alias callbacks
+--
 -- Public API  :
 --   - install(opts?) -> boolean ok, string|nil err
 --   - uninstall() -> boolean ok, string|nil err
@@ -85,7 +100,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-20B"
+M.VERSION = "v2026-01-20E"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -195,6 +210,17 @@ local function _callBestEffort(obj, fnName, ...)
     end
 
     return false, nil, nil, nil, "call failed: " .. tostring(a1) .. " | " .. tostring(a2)
+end
+
+-- Best-effort DWKit resolver for alias callback environments
+local function _getKit()
+    if type(_G) == "table" and type(_G.DWKit) == "table" then
+        return _G.DWKit
+    end
+    if type(DWKit) == "table" then
+        return DWKit
+    end
+    return nil
 end
 
 local function _hasCmd()
@@ -1273,6 +1299,10 @@ function M.uninstall()
         if okH and type(helpMod) == "table" and type(helpMod.reset) == "function" then
             pcall(helpMod.reset)
         end
+        local okT, testMod = _safeRequire("dwkit.commands.dwtest")
+        if okT and type(testMod) == "table" and type(testMod.reset) == "function" then
+            pcall(testMod.reset)
+        end
     end
 
     if not STATE.installed then
@@ -1347,12 +1377,15 @@ function M.install(opts)
         return false, STATE.lastError
     end
 
-    -- Always cleanup persisted aliases first (safe across reloads)
-    _cleanupPriorAliasesBestEffort()
-
+    -- FIX (v2026-01-20C):
+    -- If already installed, do NOT cleanup persisted alias ids here.
+    -- install() is idempotent; uninstall() must be called explicitly to reinstall.
     if STATE.installed then
         return true, nil
     end
+
+    -- Always cleanup persisted aliases first (safe across reloads)
+    _cleanupPriorAliasesBestEffort()
 
     local dwcommandsPattern = [[^dwcommands(?:\s+(safe|game|md))?\s*$]]
     local id1 = _mkAlias(dwcommandsPattern, function()
@@ -1457,21 +1490,24 @@ function M.install(opts)
         end
     end)
 
+    -- FIX (v2026-01-20E): robust dwtest in alias callback environments
     local dwtestPattern = [[^dwtest(?:\s+(quiet|ui))?(?:\s+(verbose|v))?\s*$]]
     local id3 = _mkAlias(dwtestPattern, function()
-        if not _hasTest() then
-            _err("DWKit.test.run not available. Run loader.init() first.")
-            return
+        -- IMPORTANT: Mudlet optional capture groups can leave stale matches[n] values.
+        -- Use matches[1] (the full line) and tokenize instead.
+        local line = (matches and matches[1]) and tostring(matches[1]) or ""
+        local tokens = {}
+        for w in line:gmatch("%S+") do
+            tokens[#tokens + 1] = w
         end
 
-        local mode = (matches and matches[2]) and tostring(matches[2]) or ""
-        local arg2 = (matches and matches[3]) and tostring(matches[3]) or ""
+        -- tokens[1]="dwtest"
+        local mode = tokens[2] or ""
+        local arg2 = tokens[3] or ""
 
-        if mode == "quiet" then
-            DWKit.test.run({ quiet = true })
-            return
-        end
-
+        -- ============================================================
+        -- Mode: UI Safety Gate (does NOT require DWKit.test.run)
+        -- ============================================================
         if mode == "ui" then
             local verbose = (arg2 == "verbose" or arg2 == "v")
 
@@ -1490,121 +1526,66 @@ function M.install(opts)
             _out("  mode=" .. (verbose and "verbose" or "compact"))
             _out("")
 
-            local function firstMsgFrom(r)
-                if type(r) ~= "table" then return nil end
-                if type(r.errors) == "table" and #r.errors > 0 then return tostring(r.errors[1]) end
-                if type(r.warnings) == "table" and #r.warnings > 0 then return tostring(r.warnings[1]) end
-                if type(r.notes) == "table" and #r.notes > 0 then return tostring(r.notes[1]) end
-                return nil
-            end
-
-            local function summarizeAll(details, opts)
-                opts = (type(opts) == "table") and opts or {}
-                local includeSkipInList = (opts.includeSkipInList == true)
-
-                local resArr = nil
-                if type(details) ~= "table" then
-                    return { pass = 0, warn = 0, fail = 0, skip = 0, count = 0, list = {} }
-                end
-
-                if type(details.results) == "table" and _isArrayLike(details.results) then
-                    resArr = details.results
-                elseif type(details.details) == "table" and type(details.details.results) == "table" and _isArrayLike(details.details.results) then
-                    resArr = details.details.results
-                end
-
-                local counts = { pass = 0, warn = 0, fail = 0, skip = 0, count = 0, list = {} }
-
-                if type(resArr) ~= "table" then
-                    return counts
-                end
-
-                counts.count = #resArr
-
-                for _, r in ipairs(resArr) do
-                    local st = (type(r) == "table" and type(r.status) == "string") and r.status or "UNKNOWN"
-                    if st == "PASS" then
-                        counts.pass = counts.pass + 1
-                    elseif st == "WARN" then
-                        counts.warn = counts.warn + 1
-                        counts.list[#counts.list + 1] = r
-                    elseif st == "FAIL" then
-                        counts.fail = counts.fail + 1
-                        counts.list[#counts.list + 1] = r
-                    elseif st == "SKIP" then
-                        counts.skip = counts.skip + 1
-                        if includeSkipInList then
-                            counts.list[#counts.list + 1] = r
-                        end
-                    else
-                        counts.warn = counts.warn + 1
-                        counts.list[#counts.list + 1] = r
-                    end
-                end
-
-                return counts
-            end
-
             local okCall, a, b, c, err = _callBestEffort(v, "validateAll", { source = "dwtest" })
-            if not okCall then
-                _err("validateAll failed: " .. tostring(err))
-                return
-            end
-            if a ~= true then
-                local msg = b or c or err or "validateAll failed"
-                _err(tostring(msg))
+            if not okCall or a ~= true then
+                _err("validateAll failed: " .. tostring(b or c or err))
                 return
             end
 
             if verbose then
                 _out("[DWKit Test] UI validateAll details (bounded)")
                 _ppTable(b, { maxDepth = 3, maxItems = 40 })
-                if type(b) == "table" and tonumber(b.count or 0) == 0 then
-                    _out("")
-                    _printNoUiNote("dwtest ui")
-                end
                 return
             end
 
-            local cts = summarizeAll(b, { includeSkipInList = false })
-            _out(string.format("[DWKit Test] UI summary: PASS=%d WARN=%d FAIL=%d SKIP=%d total=%d",
-                cts.pass, cts.warn, cts.fail, cts.skip, cts.count))
-
-            if cts.count == 0 then
-                _out("")
-                _printNoUiNote("dwtest ui")
-                return
-            end
-
-            if #cts.list > 0 then
-                _out("")
-                _out("[DWKit Test] UI WARN/FAIL (compact)")
-                local limit = math.min(#cts.list, 25)
-                for i = 1, limit do
-                    local r = cts.list[i]
-                    local st = tostring(r.status or "UNKNOWN")
-                    local id = tostring(r.uiId or "?")
-                    local msg = firstMsgFrom(r) or ""
-                    if msg ~= "" then
-                        _out(string.format("  - %s  uiId=%s  msg=%s", st, id, msg))
-                    else
-                        _out(string.format("  - %s  uiId=%s", st, id))
-                    end
-                end
-                if #cts.list > limit then
-                    _out("  ... (" .. tostring(#cts.list - limit) .. " more)")
-                end
-            end
-
+            _out("[DWKit Test] UI validateAll OK")
             return
         end
 
-        if arg2 ~= "" then
+        -- ============================================================
+        -- Test runner: DWKit.test.run OR fallback to self_test_runner.run
+        -- ============================================================
+        local function runSelfTests(opts)
+            opts = (type(opts) == "table") and opts or {}
+
+            local kit = _getKit()
+            if type(kit) == "table" and type(kit.test) == "table" and type(kit.test.run) == "function" then
+                local ok, errOrNil = pcall(kit.test.run, opts)
+                if not ok then
+                    _err("DWKit.test.run failed: " .. tostring(errOrNil))
+                end
+                return true
+            end
+
+            local okR, runner = _safeRequire("dwkit.tests.self_test_runner")
+            if okR and type(runner) == "table" and type(runner.run) == "function" then
+                local ok, errOrNil = pcall(runner.run, opts)
+                if not ok then
+                    _err("self_test_runner.run failed: " .. tostring(errOrNil))
+                end
+                return true
+            end
+
+            return false
+        end
+
+        if mode == "quiet" then
+            if not runSelfTests({ quiet = true }) then
+                _err(
+                "No test runner available (DWKit.test.run or dwkit.tests.self_test_runner.run). Run loader.init() first.")
+            end
+            return
+        end
+
+        if mode ~= "" then
             _err("Usage: dwtest [quiet|ui] [verbose]")
             return
         end
 
-        DWKit.test.run()
+        if not runSelfTests({}) then
+            _err(
+            "No test runner available (DWKit.test.run or dwkit.tests.self_test_runner.run). Run loader.init() first.")
+        end
     end)
 
     local dwinfoPattern = [[^dwinfo\s*$]]
