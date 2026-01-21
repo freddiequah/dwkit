@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwwho
 -- Owner       : Commands
--- Version     : v2026-01-20C
+-- Version     : v2026-01-21G
 -- Purpose     :
 --   - Implements dwwho command handler (SAFE + GAME refresh capture).
 --   - Split out from dwkit.services.command_aliases (Phase 1 split).
@@ -17,8 +17,13 @@
 --       * cooldown (skip if called too soon)
 --       * status shows refresh guard state/metadata
 --
+-- Phase 5B (v2026-01-21G):
+--   - Dispatch supports optional separate arg string:
+--       dispatch(ctx, svc, sub, arg)
+--     to align with alias router (matches[] tokenization fixes).
+--
 -- Public API  :
---   - dispatch(ctx, whoStoreSvc, sub)
+--   - dispatch(ctx, whoStoreSvc, sub, argOpt)
 --   - reset()  (best-effort cancel pending capture session)
 --
 -- Notes:
@@ -35,7 +40,7 @@
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-01-20C"
+M.VERSION = "v2026-01-21G"
 
 local CAP = {
     active = false,
@@ -289,6 +294,23 @@ local function _parseVerb(sub)
     return v:lower(), r
 end
 
+local function _mergeRestWithArg(rest, arg)
+    rest = _trim(tostring(rest or ""))
+    arg = _trim(tostring(arg or ""))
+
+    if arg == "" then
+        return rest
+    end
+
+    -- If caller provided a separate arg, prefer it when rest is empty.
+    if rest == "" then
+        return arg
+    end
+
+    -- If both exist, append (conservative, avoids dropping info).
+    return rest .. " " .. arg
+end
+
 local function _splitNamesCSV(rest)
     rest = _trim(tostring(rest or ""))
     if rest == "" then return {} end
@@ -464,13 +486,14 @@ local function _fixtureText(which)
     }, "\n"), "basic"
 end
 
-function M.dispatch(ctx, svc, sub)
+function M.dispatch(ctx, svc, sub, arg)
     ctx = ctx or {}
     if type(ctx.out) ~= "function" or type(ctx.err) ~= "function" then
         return
     end
 
     local verb, rest = _parseVerb(sub)
+    rest = _mergeRestWithArg(rest, arg)
 
     -- default: status
     if verb == "" or verb == "status" then
