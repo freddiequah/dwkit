@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwroom
 -- Owner       : Commands
--- Version     : v2026-01-20F
+-- Version     : v2026-01-20G
 -- Purpose     :
 --   - Command handler for "dwroom" alias (SAFE manual surface).
 --   - Implements RoomEntities SAFE inspection + helpers:
@@ -27,7 +27,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-20F"
+M.VERSION = "v2026-01-20G"
 
 local function _mkOut(ctx)
     if type(ctx) == "table" and type(ctx.out) == "function" then
@@ -197,10 +197,11 @@ local function _getEventBusBestEffort()
     return nil
 end
 
-local function _resolveUpdatedEventNameBestEffort(svc)
+local function _resolveUpdatedEventNameBestEffort(ctx, svc)
+    -- prefer service-provided name if available (support both svc.getUpdatedEventName() and svc:getUpdatedEventName())
     if type(svc) == "table" then
         if type(svc.getUpdatedEventName) == "function" then
-            local ok, v = pcall(svc.getUpdatedEventName)
+            local ok, v = _call(ctx, svc, "getUpdatedEventName")
             if ok and type(v) == "string" and v ~= "" then
                 return v
             end
@@ -242,7 +243,7 @@ local function _emitUpdatedEnsure(ctx, svc, meta, methodName)
         return false
     end
 
-    local evName = _resolveUpdatedEventNameBestEffort(svc)
+    local evName = _resolveUpdatedEventNameBestEffort(ctx, svc)
     local payload = {
         source = meta.source or "cmd:dwroom:refresh",
         method = meta.method or methodName,
@@ -308,16 +309,7 @@ local function _doRefreshSafe(ctx, svc)
         _printStatus(ctx, svc)
     end
 
-    -- Preferred: explicit SAFE refresh API (if service provides it)
-    do
-        local ok = tryCall("refresh", meta)
-        if ok then
-            success("refresh")
-            return
-        end
-    end
-
-    -- Next: reclassify using WhoStore (if service provides it)
+    -- SAFETY: prefer reclassify APIs first (these should NEVER send gameplay commands)
     do
         local ok = tryCall("reclassifyFromWhoStore", meta)
         if ok then
@@ -326,7 +318,6 @@ local function _doRefreshSafe(ctx, svc)
         end
     end
 
-    -- Next: generic reclassify hooks (naming variations)
     do
         local ok = tryCall("reclassify", meta)
         if ok then
@@ -343,6 +334,24 @@ local function _doRefreshSafe(ctx, svc)
         end
     end
 
+    -- Optional: explicit SAFE refresh API if service provides one
+    do
+        local ok = tryCall("refreshSafe", meta)
+        if ok then
+            success("refreshSafe")
+            return
+        end
+    end
+
+    -- LAST: "refresh" is ambiguous, so do it only after all SAFE reclassify hooks
+    do
+        local ok = tryCall("refresh", meta)
+        if ok then
+            success("refresh")
+            return
+        end
+    end
+
     -- Last: explicit emitUpdated hook only
     do
         local ok = tryCall("emitUpdated", meta)
@@ -354,9 +363,10 @@ local function _doRefreshSafe(ctx, svc)
 
     err("No SAFE refresh API found on RoomEntitiesService.")
     out("  Expected one of:")
-    out("    - refresh(meta)")
     out("    - reclassifyFromWhoStore(meta)")
     out("    - reclassify(meta) / reclassifyAll(meta)")
+    out("    - refreshSafe(meta)")
+    out("    - refresh(meta)  (LAST: name is ambiguous)")
     out("    - emitUpdated(meta)")
     out("")
     out("  Tip: run dwroom status to confirm available APIs.")

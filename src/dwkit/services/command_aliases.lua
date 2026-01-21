@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-20H
+-- Version     : v2026-01-21F
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -108,6 +108,20 @@
 --   - dwevent parsing updated to match Phase 7 patch exactly: uses matches[2] (capture group),
 --     rather than tokenizing matches[1].
 --
+-- Fixes (v2026-01-21B):
+--   - dwwho alias now captures and forwards optional arg (e.g. "dwwho fixture party").
+--     Previously pattern ended at subcommand and dropped the 2nd token, causing fixture to default to "basic".
+--
+-- Fixes (v2026-01-21D):
+--   - dwwho + dwroom aliases no longer rely on capture groups (Mudlet matches[] can be stale).
+--     Tokenizes matches[1] (full line) to derive sub + arg string.
+--   - dwwho set now supports multi-token names: "dwwho set Bob Alice" becomes "Bob,Alice".
+--
+-- Fixes (v2026-01-21F):
+--   - Tokenization now uses matches[0] when available (full match line).
+--     This fixes cases where capture groups exist and matches[1] is NOT the full line,
+--     causing args to be dropped (e.g. "dwwho fixture party" / "dwwho set Bob Alice").
+--
 -- Public API  :
 --   - install(opts?) -> boolean ok, string|nil err
 --   - uninstall() -> boolean ok, string|nil err
@@ -117,7 +131,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-20H"
+M.VERSION = "v2026-01-21F"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -196,6 +210,23 @@ end
 
 local function _err(msg)
     _out("[DWKit Alias] ERROR: " .. tostring(msg))
+end
+
+-- IMPORTANT:
+-- Mudlet alias callbacks set `matches[]` such that:
+--   - matches[0] is the full matched line (when provided)
+--   - matches[1..n] are capture groups
+-- For patterns with captures, matches[1] is NOT the full line.
+local function _getFullMatchLine()
+    if type(matches) == "table" then
+        if matches[0] ~= nil then
+            return tostring(matches[0])
+        end
+        if matches[1] ~= nil then
+            return tostring(matches[1])
+        end
+    end
+    return ""
 end
 
 local function _safeRequire(modName)
@@ -1436,7 +1467,7 @@ function M.install(opts)
         end
 
         -- Robust parse: optional capture groups can be stale; tokenize full line.
-        local line = (matches and matches[1]) and tostring(matches[1]) or ""
+        local line = _getFullMatchLine()
         local tokens = {}
         for w in line:gmatch("%S+") do
             tokens[#tokens + 1] = w
@@ -1535,8 +1566,8 @@ function M.install(opts)
     local dwtestPattern = [[^dwtest(?:\s+(quiet|ui))?(?:\s+(verbose|v))?\s*$]]
     local id3 = _mkAlias(dwtestPattern, function()
         -- IMPORTANT: Mudlet optional capture groups can leave stale matches[n] values.
-        -- Use matches[1] (the full line) and tokenize instead.
-        local line = (matches and matches[1]) and tostring(matches[1]) or ""
+        -- Use full matched line and tokenize instead.
+        local line = _getFullMatchLine()
         local tokens = {}
         for w in line:gmatch("%S+") do
             tokens[#tokens + 1] = w
@@ -1613,7 +1644,7 @@ function M.install(opts)
         if mode == "quiet" then
             if not runSelfTests({ quiet = true }) then
                 _err(
-                "No test runner available (DWKit.test.run or dwkit.tests.self_test_runner.run). Run loader.init() first.")
+                    "No test runner available (DWKit.test.run or dwkit.tests.self_test_runner.run). Run loader.init() first.")
             end
             return
         end
@@ -1625,7 +1656,7 @@ function M.install(opts)
 
         if not runSelfTests({}) then
             _err(
-            "No test runner available (DWKit.test.run or dwkit.tests.self_test_runner.run). Run loader.init() first.")
+                "No test runner available (DWKit.test.run or dwkit.tests.self_test_runner.run). Run loader.init() first.")
         end
     end)
 
@@ -1735,7 +1766,7 @@ function M.install(opts)
         end
 
         -- Robust parse: optional capture groups can be stale; tokenize full line.
-        local line = (matches and matches[1]) and tostring(matches[1]) or ""
+        local line = _getFullMatchLine()
         local tokens = {}
         for w in line:gmatch("%S+") do
             tokens[#tokens + 1] = w
@@ -1876,8 +1907,18 @@ function M.install(opts)
             return
         end
 
-        local sub = (matches and matches[2]) and tostring(matches[2]) or ""
-        local arg = (matches and matches[3]) and tostring(matches[3]) or ""
+        -- FIX (v2026-01-21F): tokenize FULL match line (matches[0]) when captures exist
+        local line = _getFullMatchLine()
+        local tokens = {}
+        for w in line:gmatch("%S+") do
+            tokens[#tokens + 1] = w
+        end
+
+        local sub = tokens[2] or ""
+        local arg = ""
+        if #tokens >= 3 then
+            arg = table.concat(tokens, " ", 3)
+        end
 
         local okM, mod = _safeRequire("dwkit.commands.dwroom")
         if not okM or type(mod) ~= "table" or type(mod.dispatch) ~= "function" then
@@ -1886,12 +1927,12 @@ function M.install(opts)
         end
 
         local ctx = {
-            out = function(line) _out(line) end,
+            out = function(line2) _out(line2) end,
             err = function(msg) _err(msg) end,
             callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
             getClipboardText = function() return _getClipboardTextBestEffort() end,
             resolveSendFn = function() return _resolveSendFn() end,
-            looksLikePrompt = function(line) return _looksLikePrompt(line) end,
+            looksLikePrompt = function(line2) return _looksLikePrompt(line2) end,
             killTrigger = function(id) _killTriggerBestEffort(id) end,
             killTimer = function(id) _killTimerBestEffort(id) end,
             tempRegexTrigger = function(pat, fn) return tempRegexTrigger(pat, fn) end,
@@ -1906,15 +1947,37 @@ function M.install(opts)
     end)
 
     -- Phase 1 split: dwwho delegates to dwkit.commands.dwwho
-    local dwwhoPattern = [[^dwwho(?:\s+(status|clear|ingestclip|fixture|refresh))?\s*$]]
+    local dwwhoPattern = [[^dwwho(?:\s+(status|clear|ingestclip|fixture|refresh|set))?(?:\s+(.+))?\s*$]]
     local id11c = _mkAlias(dwwhoPattern, function()
         local svc = _getWhoStoreServiceBestEffort()
-        local sub = (matches and matches[2]) and tostring(matches[2]) or ""
 
         if type(svc) ~= "table" then
             _err(
                 "WhoStoreService not available or incomplete. Create/repair src/dwkit/services/whostore_service.lua, then loader.init().")
             return
+        end
+
+        -- FIX (v2026-01-21F): tokenize FULL match line (matches[0]) when captures exist
+        local line = _getFullMatchLine()
+        local tokens = {}
+        for w in line:gmatch("%S+") do
+            tokens[#tokens + 1] = w
+        end
+
+        local sub = tokens[2] or ""
+        local arg = ""
+
+        if #tokens >= 3 then
+            if sub == "set" then
+                -- Allow: dwwho set Bob Alice  => "Bob,Alice"
+                local names = {}
+                for i = 3, #tokens do
+                    names[#names + 1] = tokens[i]
+                end
+                arg = table.concat(names, ",")
+            else
+                arg = table.concat(tokens, " ", 3)
+            end
         end
 
         local okM, mod = _safeRequire("dwkit.commands.dwwho")
@@ -1924,7 +1987,7 @@ function M.install(opts)
         end
 
         local ctx = {
-            out = function(line) _out(line) end,
+            out = function(line2) _out(line2) end,
             err = function(msg) _err(msg) end,
             callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
             getClipboardText = function() return _getClipboardTextBestEffort() end,
@@ -1937,10 +2000,17 @@ function M.install(opts)
             printWhoStatus = function(s) _printWhoStatus(s) end,
         }
 
-        local okCall, errOrNil = pcall(mod.dispatch, ctx, svc, sub)
-        if not okCall then
-            _err("dwwho handler threw error: " .. tostring(errOrNil))
+        local ok1, err1 = pcall(mod.dispatch, ctx, svc, sub, arg)
+        if ok1 then
+            return
         end
+
+        local ok2, err2 = pcall(mod.dispatch, ctx, svc, sub)
+        if ok2 then
+            return
+        end
+
+        _err("dwwho handler threw error: " .. tostring(err1 or err2))
     end)
 
     local dwactionsPattern = [[^dwactions\s*$]]
@@ -2264,9 +2334,8 @@ function M.install(opts)
             pcall(gs.load, { quiet = true })
         end
 
-        -- IMPORTANT: Mudlet optional capture groups can leave stale matches[n] values.
-        -- Use matches[1] (the full line) and tokenize instead.
-        local line = (matches and matches[1]) and tostring(matches[1]) or ""
+        -- IMPORTANT: tokenize FULL match line (matches[0]) when captures exist
+        local line = _getFullMatchLine()
         local tokens = {}
         for w in line:gmatch("%S+") do
             tokens[#tokens + 1] = w
