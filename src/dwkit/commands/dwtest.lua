@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwtest
 -- Owner       : Commands
--- Version     : v2026-01-20A
+-- Version     : v2026-01-23A
 -- Purpose     :
 --   - Command handler for `dwtest` alias (delegated from command_aliases.lua)
 --   - Supports:
@@ -9,11 +9,14 @@
 --       * dwtest quiet
 --       * dwtest ui
 --       * dwtest ui verbose
+--       * dwtest room
+--       * dwtest room verbose
 --
 -- Notes:
 --   - SAFE command surface.
 --   - No GMCP required.
 --   - UI validator is optional; only used for `dwtest ui`.
+--   - Room mini-test is optional; used for deterministic event pipeline checks.
 --
 -- Public API  :
 --   - dispatch(ctx, testRunner, args) -> boolean ok
@@ -26,12 +29,12 @@
 --     testRunner:
 --       - run(opts?) function
 --     args:
---       - mode: "" | "quiet" | "ui"
+--       - mode: "" | "quiet" | "ui" | "room"
 --       - verbose: boolean
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-01-20A"
+M.VERSION = "v2026-01-23A"
 
 local function _out(ctx, line)
     if ctx and type(ctx.out) == "function" then
@@ -136,6 +139,195 @@ local function _printNoUiNote(ctx)
     _out(ctx, "    - dwgui apply")
 end
 
+local function _safeRequire(modName)
+    local ok, mod = pcall(require, modName)
+    if ok and type(mod) == "table" then
+        return true, mod, nil
+    end
+    return false, nil, tostring(mod)
+end
+
+local function _hasKey(t, k)
+    return (type(t) == "table" and type(k) == "string" and t[k] == true)
+end
+
+local function _countMap(t)
+    if type(t) ~= "table" then return 0 end
+    local n = 0
+    for _, v in pairs(t) do
+        if v == true then n = n + 1 end
+    end
+    return n
+end
+
+local function _runRoomMiniTest(ctx, verbose)
+    _out(ctx, "[DWKit Test] RoomEntities pipeline mini-test (dwtest room)")
+    _out(ctx, "  goal=WhoStore update triggers RoomEntities reclassify + emits Updated")
+    _out(ctx, "  mode=" .. (verbose and "verbose" or "compact"))
+    _out(ctx, "")
+
+    local okR, Room, errR = _safeRequire("dwkit.services.roomentities_service")
+    if not okR then
+        _err(ctx, "require roomentities_service failed: " .. tostring(errR))
+        return false
+    end
+
+    local okW, Who, errW = _safeRequire("dwkit.services.whostore_service")
+    if not okW then
+        _err(ctx, "require whostore_service failed: " .. tostring(errW))
+        return false
+    end
+
+    local okE, Watcher, errE = _safeRequire("dwkit.services.event_watcher_service")
+    if not okE then
+        _err(ctx, "require event_watcher_service failed: " .. tostring(errE))
+        return false
+    end
+
+    -- Best-effort ensure watcher installed (should already be installed by init).
+    if type(Watcher.install) == "function" then
+        pcall(Watcher.install, { quiet = true })
+    end
+
+    local evRoomUpdated = nil
+    if type(Room.getUpdatedEventName) == "function" then
+        local okEv, v = pcall(Room.getUpdatedEventName)
+        if okEv and type(v) == "string" and v ~= "" then
+            evRoomUpdated = v
+        end
+    end
+    evRoomUpdated = tostring(evRoomUpdated or (Room.EV_UPDATED or "DWKit:Service:RoomEntities:Updated"))
+
+    local st0 = nil
+    if type(Watcher.getState) == "function" then
+        local okS, s = pcall(Watcher.getState)
+        if okS and type(s) == "table" then
+            st0 = s
+        end
+    end
+    st0 = st0 or { receivedCount = 0, lastEventName = nil, installed = nil, subscribedCount = 0 }
+
+    if verbose then
+        _out(ctx, "[DWKit Test] pre-state (watcher)")
+        _pp(ctx, st0, { maxDepth = 2, maxItems = 40 })
+        _out(ctx, "")
+    end
+
+    -- Seed RoomEntities with an "unknown" entry that should reclassify to player "Borai"
+    -- once WhoStore publishes Borai as known player.
+    local seed = {
+        players = {},
+        mobs = {},
+        items = {},
+        unknown = { ["Borai hates bugs"] = true },
+    }
+
+    if type(Room.setState) ~= "function" then
+        _err(ctx, "RoomEntitiesService.setState not available")
+        return false
+    end
+
+    local okSeed, errSeed = Room.setState(seed, { source = "dwtest:room:seed", forceEmit = true })
+    if okSeed ~= true then
+        _err(ctx, "RoomEntitiesService.setState failed: " .. tostring(errSeed))
+        return false
+    end
+
+    if type(Who.setState) ~= "function" then
+        _err(ctx, "WhoStoreService.setState not available")
+        return false
+    end
+
+    -- Publish WhoStore snapshot: Borai is a known player name.
+    local okWho, errWho = Who.setState({ players = { "Borai" } }, { source = "dwtest:room:seedWho" })
+    if okWho ~= true then
+        _err(ctx, "WhoStoreService.setState failed: " .. tostring(errWho))
+        return false
+    end
+
+    -- Now validate RoomEntities was reclassified (unknown -> players) by WhoStore Updated event.
+    if type(Room.getState) ~= "function" then
+        _err(ctx, "RoomEntitiesService.getState not available")
+        return false
+    end
+
+    local roomState = Room.getState()
+    roomState = (type(roomState) == "table") and roomState or {}
+    local players = (type(roomState.players) == "table") and roomState.players or {}
+    local unknown = (type(roomState.unknown) == "table") and roomState.unknown or {}
+
+    local okMoved = _hasKey(players, "Borai")
+    local stillUnknown = _hasKey(unknown, "Borai hates bugs")
+
+    local st1 = nil
+    if type(Watcher.getState) == "function" then
+        local okS, s = pcall(Watcher.getState)
+        if okS and type(s) == "table" then
+            st1 = s
+        end
+    end
+    st1 = st1 or { receivedCount = st0.receivedCount, lastEventName = st0.lastEventName }
+
+    local rc0 = tonumber(st0.receivedCount) or 0
+    local rc1 = tonumber(st1.receivedCount) or 0
+    local lastEv = tostring(st1.lastEventName or "")
+
+    -- We expect the final event observed to be RoomEntities Updated (WhoStore emits first, then RoomEntities emits).
+    local okWatcherSawRoom = (rc1 > rc0) and (lastEv == evRoomUpdated)
+
+    if verbose then
+        _out(ctx, "[DWKit Test] post-state (roomentities buckets)")
+        _out(ctx, "  players=" .. tostring(_countMap(players)) .. " mobs=" .. tostring(_countMap(roomState.mobs)) ..
+            " items=" .. tostring(_countMap(roomState.items)) .. " unknown=" .. tostring(_countMap(unknown)))
+        _out(ctx, "  players.has(Borai)=" .. tostring(okMoved))
+        _out(ctx, "  unknown.has('Borai hates bugs')=" .. tostring(stillUnknown))
+        _out(ctx, "")
+        _out(ctx, "[DWKit Test] post-state (watcher)")
+        _pp(ctx, st1, { maxDepth = 2, maxItems = 40 })
+        _out(ctx, "")
+        _out(ctx, "  expectedLastEvent=" .. tostring(evRoomUpdated))
+        _out(ctx, "  observedLastEvent=" .. tostring(lastEv))
+        _out(ctx, "  receivedCount " .. tostring(rc0) .. " -> " .. tostring(rc1))
+        _out(ctx, "")
+    end
+
+    local okAll = true
+    local fails = {}
+
+    if okMoved ~= true then
+        okAll = false
+        fails[#fails + 1] = "reclassify check failed: players['Borai'] not present"
+    end
+    if stillUnknown == true then
+        okAll = false
+        fails[#fails + 1] = "reclassify check failed: unknown['Borai hates bugs'] still present"
+    end
+    if okWatcherSawRoom ~= true then
+        okAll = false
+        fails[#fails + 1] = "event watcher did not end on RoomEntities Updated (lastEvent=" .. tostring(lastEv) .. ")"
+    end
+
+    if okAll then
+        _out(ctx, "[DWKit Test] PASS (room)")
+        _out(ctx, "  reclassify=OK (unknown -> players)")
+        _out(ctx, "  watcherLastEvent=OK (" .. tostring(evRoomUpdated) .. ")")
+        return true
+    end
+
+    _out(ctx, "[DWKit Test] FAIL (room)")
+    for _, f in ipairs(fails) do
+        _out(ctx, "  - " .. tostring(f))
+    end
+    _out(ctx, "")
+    _out(ctx, "Tips (diagnostics):")
+    _out(ctx, "  - Run: dwroom status")
+    _out(ctx, "  - Run: dwwho status")
+    _out(ctx, "  - Run: dwevent " .. tostring(evRoomUpdated))
+    _out(ctx, "  - Run: dwevent " .. tostring(Who.EV_UPDATED or "DWKit:Service:WhoStore:Updated"))
+
+    return false
+end
+
 function M.dispatch(ctx, testRunner, args)
     args = (type(args) == "table") and args or {}
     local mode = tostring(args.mode or "")
@@ -149,6 +341,10 @@ function M.dispatch(ctx, testRunner, args)
     if mode == "quiet" then
         testRunner.run({ quiet = true })
         return true
+    end
+
+    if mode == "room" then
+        return _runRoomMiniTest(ctx, verbose)
     end
 
     if mode == "ui" then
