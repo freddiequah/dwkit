@@ -1,7 +1,8 @@
+-- FILE: src/dwkit/services/roomentities_service.lua
 -- #########################################################################
 -- Module Name : dwkit.services.roomentities_service
 -- Owner       : Services
--- Version     : v2026-01-20C
+-- Version     : v2026-01-23C
 -- Purpose     :
 --   - SAFE, profile-portable RoomEntitiesService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
@@ -38,11 +39,6 @@
 --       - Opt-in ingestion noise filters (caller-controlled):
 --           opts.ignorePatterns (Lua patterns) + opts.ignoreSubstrings (plain contains).
 --
---   - NEW (v2026-01-18A):
---       - Normalize internal state to ALWAYS contain the 4 buckets:
---           players/mobs/items/unknown (even after clear()).
---         This avoids consumers handling nil buckets and makes state equality stable.
---
 --   - FIX (v2026-01-19D):
 --       - Ignore wrapped/unindented LOOK description lines.
 --         Only treat lines as entity candidates when they match entity-ish patterns:
@@ -58,6 +54,20 @@
 --   - NEW (v2026-01-20C):
 --       - Add SAFE ingestFixture(opts) API for command surfaces (dwroom fixture).
 --         Provides deterministic bucket seeding for UI + pipeline validation.
+--
+--   - FIX (v2026-01-23A):
+--       - event_bus.emit() requires 3-arg signature: emit(eventName, payload, meta)
+--         Without meta, emit does not deliver (verified live).
+--       - _emit now passes meta and checks the ok flag (pcall success != emit success).
+--
+--   - NEW (v2026-01-23B):
+--       - Arm WhoStore subscription automatically on setState/update/clear/emitUpdated.
+--         This ensures WhoStore-driven reclassify works even if callers seed state
+--         via setState() and then trigger WhoStore updates (no manual "arm" step).
+--
+--   - FIX (v2026-01-23C):
+--       - Also arm WhoStore subscription at module load (best-effort).
+--         So immediately after init(), getStats() reflects subscribed=true when available.
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -82,7 +92,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-20C"
+M.VERSION = "v2026-01-23C"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -164,6 +174,8 @@ local function _merge(dst, src)
     end
 end
 
+-- FIXED: event_bus.emit requires (eventName, payload, meta) in this DWKit environment.
+-- Also: pcall success only means "no crash", not that emit succeeded. Check okEmit flag.
 local function _emit(stateCopy, deltaCopy, source)
     local payload = {
         ts = os.time(),
@@ -172,12 +184,30 @@ local function _emit(stateCopy, deltaCopy, source)
     if type(deltaCopy) == "table" then payload.delta = deltaCopy end
     if type(source) == "string" and source ~= "" then payload.source = source end
 
-    local ok, delivered, errs = BUS.emit(EV_UPDATED, payload)
-    if not ok then
-        local first = (type(errs) == "table" and errs[1]) and tostring(errs[1]) or "emit failed"
-        return false, first
+    local meta = {
+        source = tostring(source or "RoomEntitiesService"),
+        service = "dwkit.services.roomentities_service",
+        ts = payload.ts,
+    }
+
+    local okCall, okEmit, delivered, errs = pcall(BUS.emit, EV_UPDATED, payload, meta)
+
+    if okCall and okEmit == true then
+        return true, nil
     end
-    return true, nil
+
+    local errMsg = nil
+    if okCall ~= true then
+        errMsg = tostring(okEmit)
+    else
+        if type(errs) == "table" and errs[1] ~= nil then
+            errMsg = tostring(errs[1])
+        else
+            errMsg = "emit returned ok=false"
+        end
+    end
+
+    return false, errMsg
 end
 
 local function _asKey(s)
@@ -479,12 +509,10 @@ end
 local function _isEntityishPostureLine(lowerTrimmed)
     if type(lowerTrimmed) ~= "string" then return false end
 
-    -- quick accept "is here."
     if lowerTrimmed:find("is here%.", 1, true) ~= nil then
         return true
     end
 
-    -- accept "is <posture> here."
     local posture = lowerTrimmed:match("^.-%s+is%s+(%a+)%s+here%.$")
     if type(posture) == "string" and posture ~= "" then
         if POSTURES[posture] == true then
@@ -501,7 +529,6 @@ local function _shouldIgnoreByCallerRules(trimmed, opts)
         return false
     end
 
-    -- plain contains rules
     if type(opts.ignoreSubstrings) == "table" then
         for _, sub in ipairs(opts.ignoreSubstrings) do
             if type(sub) == "string" and sub ~= "" then
@@ -512,7 +539,6 @@ local function _shouldIgnoreByCallerRules(trimmed, opts)
         end
     end
 
-    -- Lua pattern rules
     if type(opts.ignorePatterns) == "table" then
         for _, pat in ipairs(opts.ignorePatterns) do
             if type(pat) == "string" and pat ~= "" then
@@ -529,9 +555,6 @@ local function _shouldIgnoreByCallerRules(trimmed, opts)
     return false
 end
 
--- FIXED: indentation safety (v2026-01-17G)
--- Enhanced postures + opt-in noise filtering (v2026-01-17H)
--- FIXED: wrapped description lines should NOT be treated as entities (v2026-01-19D)
 local function _classifyLookLine(line, opts, knownPlayersSet)
     opts = (type(opts) == "table") and opts or {}
     if type(line) ~= "string" then return nil, nil end
@@ -540,33 +563,27 @@ local function _classifyLookLine(line, opts, knownPlayersSet)
     local trimmed = _trim(line)
     if trimmed == "" then return nil, nil end
 
-    -- Opt-in noise filter (caller-controlled)
     if _shouldIgnoreByCallerRules(trimmed, opts) then
         return nil, nil
     end
 
     local lowerTrimmed = trimmed:lower()
 
-    -- If line is indented, it might be a description line OR it might be an entity line
-    -- depending on clipboard/capture formatting.
     if rawLine:match("^%s%s%s+") then
         local isEntityish = _isEntityishPostureLine(lowerTrimmed)
         if not isEntityish then
             return nil, nil
         end
-        -- else: allow it through as an entity line.
     end
 
     local lineClean = trimmed
     local lower = lowerTrimmed
 
-    -- ignore common non-entity look lines
     if lower == "you see nothing special." then return nil, nil end
     if lower:find("^exits:") then return nil, nil end
     if lower:find("^obvious exits:") then return nil, nil end
     if _looksLikeExitRow(lower) then return nil, nil end
 
-    -- common systemic messages (not prompts, but noise)
     if lower == "huh?!?" then return nil, nil end
     if lower == "you are hungry." then return nil, nil end
     if lower == "you are thirsty." then return nil, nil end
@@ -575,7 +592,6 @@ local function _classifyLookLine(line, opts, knownPlayersSet)
         return nil, nil
     end
 
-    -- pattern: "<NamePhrase> is <posture> here."
     do
         local phrase, posture = lineClean:match("^(.-)%s+is%s+(%a+)%s+here%.$")
         if type(phrase) == "string" and type(posture) == "string" then
@@ -605,7 +621,6 @@ local function _classifyLookLine(line, opts, knownPlayersSet)
         end
     end
 
-    -- pattern: "<something> is here."
     do
         local phrase = lineClean:match("^(.-)%s+is%s+here%.$")
         if type(phrase) == "string" then
@@ -642,8 +657,6 @@ local function _classifyLookLine(line, opts, knownPlayersSet)
         return "items", _asKey(lineClean)
     end
 
-    -- v2026-01-19D:
-    -- If it doesn't look like an entity line, ignore it (prevents wrapped description lines).
     if _isEntityishPostureLine(lower) then
         return "unknown", _asKey(lineClean)
     end
@@ -827,6 +840,16 @@ local function _ensureWhoStoreSubscription()
     return true, nil
 end
 
+-- Best-effort arming of WhoStore subscription so callers don't need to remember to
+-- call reclassifyFromWhoStore() before expecting WhoStore update events to trigger.
+local function _armWhoStoreSubscriptionBestEffort()
+    local ok, err = _ensureWhoStoreSubscription()
+    if ok ~= true then
+        -- Do not fail callers; just record the reason for diagnostics.
+        _who.lastErr = tostring(err or _who.lastErr or "WhoStore subscribe failed")
+    end
+end
+
 function M.getVersion()
     return tostring(M.VERSION)
 end
@@ -839,24 +862,22 @@ function M.getState()
     return _copyOneLevel(_ensureBucketsPresent(STATE.state))
 end
 
--- NEW: explicit emitter surface for command/UI refresh (SAFE)
--- meta can include: source, method, note, any small diagnostic flags
 function M.emitUpdated(meta)
     meta = (type(meta) == "table") and meta or {}
+
+    _armWhoStoreSubscriptionBestEffort()
 
     local source = nil
     if type(meta.source) == "string" and meta.source ~= "" then
         source = meta.source
     end
 
-    -- Keep delta small and safe: copy meta minus reserved keys
     local delta = _copyOneLevel(meta)
     delta.source = nil
     delta.ts = nil
     delta.state = nil
     delta.delta = nil
 
-    -- If meta has no useful fields, avoid emitting an empty delta table
     local hasAny = false
     for _ in pairs(delta) do
         hasAny = true
@@ -875,11 +896,6 @@ function M.emitUpdated(meta)
     return true, nil
 end
 
--- NEW: deterministic fixture ingestion (SAFE, no sends)
--- opts:
---   - source: string (optional)
---   - players/mobs/items/unknown: table override (set/list supported)
---   - forceEmit: boolean
 function M.ingestFixture(opts)
     opts = (type(opts) == "table") and opts or {}
 
@@ -919,13 +935,11 @@ function M.ingestFixture(opts)
 
     local buckets = _newBuckets()
 
-    -- defaults are intentionally "entity-ish" to validate UI rendering
     buckets.players["FixturePlayer"] = true
     buckets.mobs["a fixture goblin"] = true
     buckets.items["a fixture chest"] = true
     buckets.unknown["Mysterious figure"] = true
 
-    -- caller overrides (optional)
     if type(opts.players) == "table" then
         buckets.players = {}
         absorb(buckets.players, opts.players)
@@ -952,6 +966,8 @@ function M.setState(newState, opts)
     if type(newState) ~= "table" then
         return false, "setState(newState): newState must be a table"
     end
+
+    _armWhoStoreSubscriptionBestEffort()
 
     local nextState = _copyOneLevel(newState)
     nextState = _ensureBucketsPresent(nextState)
@@ -982,6 +998,8 @@ function M.update(delta, opts)
         return false, "update(delta): delta must be a table"
     end
 
+    _armWhoStoreSubscriptionBestEffort()
+
     STATE.state = _ensureBucketsPresent(STATE.state)
 
     local before = _copyOneLevel(STATE.state)
@@ -1010,6 +1028,8 @@ end
 
 function M.clear(opts)
     opts = (type(opts) == "table") and opts or {}
+
+    _armWhoStoreSubscriptionBestEffort()
 
     STATE.state = _ensureBucketsPresent(STATE.state)
     local before = _copyOneLevel(STATE.state)
@@ -1044,15 +1064,6 @@ function M.reclassifyFromWhoStore(opts)
     return _applyReclassifyNow({ source = opts.source or "manual:reclassify", forceEmit = (opts.forceEmit == true) })
 end
 
--- opts:
---   - source: string
---   - assumeCapitalizedAsPlayer: boolean
---   - usePresence: boolean (default true)
---   - useWhoStore: boolean (default true)
---   - knownPlayers: table (optional override; set/list of names)
---   - forceEmit: boolean
---   - ignorePatterns: table of Lua patterns (optional)
---   - ignoreSubstrings: table of plain substrings (optional)
 function M.ingestLookLines(lines, opts)
     opts = (type(opts) == "table") and opts or {}
     if type(lines) ~= "table" then
@@ -1111,4 +1122,10 @@ function M.getStats()
     }
 end
 
+-- Arm subscription at module load (best-effort) so init() immediately reflects subscribed=true
+-- when WhoStore + BUS are available.
+_armWhoStoreSubscriptionBestEffort()
+
 return M
+
+-- END FILE: src/dwkit/services/roomentities_service.lua

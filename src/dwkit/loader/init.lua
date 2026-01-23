@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-01-14G
+-- Version     : v2026-01-23C
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -163,9 +163,28 @@ function Loader.init()
         DWKit._cmdRegistryLoadError = tostring(cmdOrErr)
     end
 
-    -- Install SAFE typed aliases (dwcommands / dwhelp / dwid / dwversion / dwevents / dwevent / dwboot). Guarded and idempotent.
+    -- ---------------------------------------------------------------------
+    -- Install Event Watcher (SAFE). Subscribes to registry allowlist only.
+    -- IMPORTANT: install before Boot:Ready emit so watcher can receive it.
+    -- ---------------------------------------------------------------------
     DWKit.services = DWKit.services or {}
+    do
+        local okW, wOrErr = pcall(require, "dwkit.services.event_watcher_service")
+        if okW and type(wOrErr) == "table" and type(wOrErr.install) == "function" then
+            DWKit.services.eventWatcherService = wOrErr
+            local okInstall, installErr = wOrErr.install({ quiet = true })
+            if okInstall then
+                DWKit._eventWatcherServiceLoadError = nil
+            else
+                DWKit._eventWatcherServiceLoadError = tostring(installErr)
+            end
+        else
+            DWKit.services.eventWatcherService = nil
+            DWKit._eventWatcherServiceLoadError = tostring(wOrErr)
+        end
+    end
 
+    -- Install SAFE typed aliases (dwcommands / dwhelp / dwid / dwversion / dwevents / dwevent / dwboot). Guarded and idempotent.
     local okAlias, aliasOrErr = pcall(require, "dwkit.services.command_aliases")
     if okAlias and type(aliasOrErr) == "table" and type(aliasOrErr.install) == "function" then
         DWKit.services.commandAliases = aliasOrErr
