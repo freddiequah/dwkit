@@ -1,7 +1,8 @@
+-- FILE: src/dwkit/commands/dwroom.lua
 -- #########################################################################
 -- Module Name : dwkit.commands.dwroom
 -- Owner       : Commands
--- Version     : v2026-01-20G
+-- Version     : v2026-01-23B
 -- Purpose     :
 --   - Command handler for "dwroom" alias (SAFE manual surface).
 --   - Implements RoomEntities SAFE inspection + helpers:
@@ -18,7 +19,18 @@
 --   - refresh is best-effort: it calls whichever SAFE refresh/reclassify APIs exist.
 --   - After successful refresh/reclassify, attempt to ensure UI refresh:
 --       1) svc.emitUpdated(meta) if available
---       2) fallback to eventBus.emit(updatedEventName, payload) if available
+--       2) fallback to eventBus.emit(updatedEventName, payload, meta) if available
+--
+-- FIX (v2026-01-23A):
+--   - event_bus.emit requires meta (3rd arg) to deliver in this environment.
+--   - fallback emit now passes meta as 3rd arg.
+--   - dwroom fixture now calls ingestFixture(opts) in service-native shape.
+--
+-- FIX (v2026-01-23B):
+--   - refresh now passes a minimal svcOpts table into service refresh/reclassify calls
+--     (source only) instead of the richer meta object used for ensure-emits/logging.
+--   - fixture now requests forceEmit=true so the deterministic seed always produces
+--     an Updated event (useful for UI/pipeline validation).
 --
 -- Public API  :
 --   - dispatch(ctx, roomEntitiesService, sub, arg) -> nil
@@ -27,7 +39,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-20G"
+M.VERSION = "v2026-01-23B"
 
 local function _mkOut(ctx)
     if type(ctx) == "table" and type(ctx.out) == "function" then
@@ -54,7 +66,6 @@ local function _call(ctx, obj, fnName, ...)
         return ctx.callBestEffort(obj, fnName, ...)
     end
 
-    -- fallback: try obj.fn(...) then obj:fn(...)
     if type(obj) ~= "table" then
         return false, nil, nil, nil, "svc not table"
     end
@@ -176,7 +187,11 @@ local function _doFixture(ctx, svc, name)
         return
     end
 
-    local ok, a, b, c, callErr = _call(ctx, svc, "ingestFixture", name, { source = "cmd:dwroom:fixture" })
+    -- Service-native shape: ingestFixture(opts)
+    -- NOTE: forceEmit=true so the deterministic seed always produces an Updated event (UI/pipeline validation).
+    local opts = { source = "cmd:dwroom:fixture", name = name, forceEmit = true }
+
+    local ok, a, b, c, callErr = _call(ctx, svc, "ingestFixture", opts)
     if not ok or a == false then
         err("fixture failed: " .. tostring(b or c or callErr or "unknown"))
         return
@@ -198,7 +213,6 @@ local function _getEventBusBestEffort()
 end
 
 local function _resolveUpdatedEventNameBestEffort(ctx, svc)
-    -- prefer service-provided name if available (support both svc.getUpdatedEventName() and svc:getUpdatedEventName())
     if type(svc) == "table" then
         if type(svc.getUpdatedEventName) == "function" then
             local ok, v = _call(ctx, svc, "getUpdatedEventName")
@@ -219,11 +233,9 @@ local function _emitUpdatedEnsure(ctx, svc, meta, methodName)
     meta = (type(meta) == "table") and meta or {}
     methodName = tostring(methodName or "unknown")
 
-    -- enrich meta so the service can embed it if it supports it
     meta.method = meta.method or methodName
     meta.note = meta.note or "dwroom refresh ensure emit"
 
-    -- 1) preferred: service owns the event emission
     if type(svc) == "table" and type(svc.emitUpdated) == "function" then
         local ok, a, b, c, callErr = _call(ctx, svc, "emitUpdated", meta)
         if ok and a ~= false then
@@ -231,12 +243,10 @@ local function _emitUpdatedEnsure(ctx, svc, meta, methodName)
             return true
         end
         out("  emitUpdated=FAILED (svc.emitUpdated) err=" .. tostring(b or c or callErr or "unknown"))
-        -- continue to fallback
     else
         out("  emitUpdated=SKIP (svc.emitUpdated missing)")
     end
 
-    -- 2) fallback: emit directly via eventBus
     local eb = _getEventBusBestEffort()
     if type(eb) ~= "table" then
         out("  emitUpdated=SKIP (eventBus not available)")
@@ -251,7 +261,15 @@ local function _emitUpdatedEnsure(ctx, svc, meta, methodName)
         ts = os.time(),
     }
 
-    local ok1, a1, b1, c1, err1 = _call(ctx, eb, "emit", evName, payload)
+    -- REQUIRED in this environment: emit(eventName, payload, meta)
+    local ebMeta = {
+        source = tostring(payload.source or "cmd:dwroom:refresh"),
+        service = "dwkit.commands.dwroom",
+        ts = payload.ts,
+        method = tostring(payload.method or ""),
+    }
+
+    local ok1, a1, b1, c1, err1 = _call(ctx, eb, "emit", evName, payload, ebMeta)
     if ok1 and a1 ~= false then
         out("  emitUpdated=OK (eventBus.emit fallback)")
         return true
@@ -261,10 +279,6 @@ local function _emitUpdatedEnsure(ctx, svc, meta, methodName)
     return false
 end
 
--- SAFE refresh:
---  - no gameplay commands
---  - best-effort call chain
---  - ensure Updated event is emitted (svc.emitUpdated OR eventBus.emit fallback)
 local function _doRefreshSafe(ctx, svc)
     local out = _mkOut(ctx)
     local err = _mkErr(ctx)
@@ -278,6 +292,9 @@ local function _doRefreshSafe(ctx, svc)
         source = "cmd:dwroom:refresh",
         note = "manual SAFE refresh (dwroom refresh)",
     }
+
+    -- Minimal opts passed into service APIs (avoid leaking meta-only keys into svc calls).
+    local svcOpts = { source = meta.source }
 
     out("[DWKit Room] refresh (SAFE)")
     out("  NOTE: No gameplay sends; best-effort internal refresh/reclassify.")
@@ -309,9 +326,8 @@ local function _doRefreshSafe(ctx, svc)
         _printStatus(ctx, svc)
     end
 
-    -- SAFETY: prefer reclassify APIs first (these should NEVER send gameplay commands)
     do
-        local ok = tryCall("reclassifyFromWhoStore", meta)
+        local ok = tryCall("reclassifyFromWhoStore", svcOpts)
         if ok then
             success("reclassifyFromWhoStore")
             return
@@ -319,7 +335,7 @@ local function _doRefreshSafe(ctx, svc)
     end
 
     do
-        local ok = tryCall("reclassify", meta)
+        local ok = tryCall("reclassify", svcOpts)
         if ok then
             success("reclassify")
             return
@@ -327,34 +343,31 @@ local function _doRefreshSafe(ctx, svc)
     end
 
     do
-        local ok = tryCall("reclassifyAll", meta)
+        local ok = tryCall("reclassifyAll", svcOpts)
         if ok then
             success("reclassifyAll")
             return
         end
     end
 
-    -- Optional: explicit SAFE refresh API if service provides one
     do
-        local ok = tryCall("refreshSafe", meta)
+        local ok = tryCall("refreshSafe", svcOpts)
         if ok then
             success("refreshSafe")
             return
         end
     end
 
-    -- LAST: "refresh" is ambiguous, so do it only after all SAFE reclassify hooks
     do
-        local ok = tryCall("refresh", meta)
+        local ok = tryCall("refresh", svcOpts)
         if ok then
             success("refresh")
             return
         end
     end
 
-    -- Last: explicit emitUpdated hook only
     do
-        local ok = tryCall("emitUpdated", meta)
+        local ok = tryCall("emitUpdated", meta) -- emitUpdated expects meta shape; keep as-is
         if ok then
             success("emitUpdated")
             return
@@ -363,10 +376,10 @@ local function _doRefreshSafe(ctx, svc)
 
     err("No SAFE refresh API found on RoomEntitiesService.")
     out("  Expected one of:")
-    out("    - reclassifyFromWhoStore(meta)")
-    out("    - reclassify(meta) / reclassifyAll(meta)")
-    out("    - refreshSafe(meta)")
-    out("    - refresh(meta)  (LAST: name is ambiguous)")
+    out("    - reclassifyFromWhoStore(opts)")
+    out("    - reclassify(opts) / reclassifyAll(opts)")
+    out("    - refreshSafe(opts)")
+    out("    - refresh(opts)  (LAST: name is ambiguous)")
     out("    - emitUpdated(meta)")
     out("")
     out("  Tip: run dwroom status to confirm available APIs.")
@@ -411,3 +424,5 @@ function M.reset()
 end
 
 return M
+
+-- END FILE: src/dwkit/commands/dwroom.lua
