@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-23B
+-- Version     : v2026-01-24C
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -131,6 +131,18 @@
 --       * best-effort calls loader.init() internally, then retries DWKit.test.run / self_test_runner.run
 --   - _has* helpers now prefer _getKit() to avoid false negatives in alias callback environments.
 --
+-- Fixes (v2026-01-23C):
+--   - dwtest delegation now respects return value from dwkit.commands.dwtest.dispatch.
+--     (Previously, any successful pcall would return early even if dispatch returned false.)
+--
+-- Phase 8 Split (v2026-01-24A):
+--   - dwservices alias now delegates to src/dwkit/commands/dwservices.lua when available,
+--     with safe inline fallback to legacy services health printer.
+--
+-- Changed (v2026-01-24C):
+--   - Removed dwinit/dwalias alias ownership from this module.
+--   - dwinit/dwalias are owned by dwkit.services.alias_control to prevent double-fire.
+--
 -- Public API  :
 --   - install(opts?) -> boolean ok, string|nil err
 --   - uninstall() -> boolean ok, string|nil err
@@ -140,7 +152,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-23B"
+M.VERSION = "v2026-01-24C"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -334,6 +346,19 @@ local function _getService(name)
     local s = kit.services[name]
     if type(s) == "table" then return s end
     return nil
+end
+
+-- ------------------------------------------------------------
+-- SAFE deferral helper (avoid killing currently-running alias mid-callback)
+-- ------------------------------------------------------------
+local function _defer(fn)
+    if type(fn) ~= "function" then return end
+    if type(tempTimer) == "function" then
+        pcall(tempTimer, 0, fn)
+        return
+    end
+    -- fallback: immediate (best-effort)
+    pcall(fn)
 end
 
 -- ------------------------------------------------------------
@@ -1398,6 +1423,12 @@ function M.uninstall()
         if okE2 and type(evMod) == "table" and type(evMod.reset) == "function" then
             pcall(evMod.reset)
         end
+
+        -- Phase 8 split: dwservices command module (best-effort reset)
+        local okS, svcMod = _safeRequire("dwkit.commands.dwservices")
+        if okS and type(svcMod) == "table" and type(svcMod.reset) == "function" then
+            pcall(svcMod.reset)
+        end
     end
 
     if not STATE.installed then
@@ -1713,6 +1744,7 @@ function M.install(opts)
 
         -- ============================================================
         -- Optional delegation to dwkit.commands.dwtest (future-proof; best-effort)
+        -- (v2026-01-23C): only return if dispatch() returns true
         -- ============================================================
         do
             local okM, mod = _safeRequire("dwkit.commands.dwtest")
@@ -1724,15 +1756,18 @@ function M.install(opts)
                     ppTable = function(t, opts) _ppTable(t, opts) end,
                     callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
                     getKit = function() return kit end,
+                    getUiValidator = function() return _getUiValidatorBestEffort() end,
                 }
 
-                -- Try a few tolerant signatures; if any works, stop here.
-                local ok1 = pcall(mod.dispatch, ctx, kit, tokens)
-                if ok1 then return end
-                local ok2 = pcall(mod.dispatch, ctx, tokens)
-                if ok2 then return end
-                local ok3 = pcall(mod.dispatch, tokens)
-                if ok3 then return end
+                -- Try a few tolerant signatures; accept only if dispatch returns true.
+                local ok1, r1 = pcall(mod.dispatch, ctx, kit, tokens)
+                if ok1 and r1 == true then return end
+
+                local ok2, r2 = pcall(mod.dispatch, ctx, tokens)
+                if ok2 and r2 == true then return end
+
+                local ok3, r3 = pcall(mod.dispatch, tokens)
+                if ok3 and r3 == true then return end
                 -- else continue to inline fallback below
             end
         end
@@ -1742,14 +1777,14 @@ function M.install(opts)
         -- ============================================================
         if mode == "" then
             if not runSelfTests({}) then
-                _err("No test runner available (DWKit.test.run or dwkit.tests.self_test_runner.run). Try: lua do local L=require('dwkit.loader.init'); L.init(); end")
+                _err("No test runner available (DWKit.test.run or dwkit.tests.self_test_runner.run). Try: dwinit")
             end
             return
         end
 
         if mode == "quiet" then
             if not runSelfTests({ quiet = true }) then
-                _err("No test runner available (DWKit.test.run or dwkit.tests.self_test_runner.run). Try: lua do local L=require('dwkit.loader.init'); L.init(); end")
+                _err("No test runner available (DWKit.test.run or dwkit.tests.self_test_runner.run). Try: dwinit")
             end
             return
         end
@@ -1757,7 +1792,7 @@ function M.install(opts)
         -- allow: dwtest verbose
         if mode == "verbose" or mode == "v" then
             if not runSelfTests({ verbose = true }) then
-                _err("No test runner available (DWKit.test.run or dwkit.tests.self_test_runner.run). Try: lua do local L=require('dwkit.loader.init'); L.init(); end")
+                _err("No test runner available (DWKit.test.run or dwkit.tests.self_test_runner.run). Try: dwinit")
             end
             return
         end
@@ -1774,7 +1809,7 @@ function M.install(opts)
             }
 
             if not runSelfTests(opts) then
-                _err("No test runner available (DWKit.test.run or dwkit.tests.self_test_runner.run). Try: lua do local L=require('dwkit.loader.init'); L.init(); end")
+                _err("No test runner available (DWKit.test.run or dwkit.tests.self_test_runner.run). Try: dwinit")
             end
             return
         end
@@ -2017,6 +2052,33 @@ function M.install(opts)
 
     local dwservicesPattern = [[^dwservices\s*$]]
     local id10 = _mkAlias(dwservicesPattern, function()
+        -- Phase 8 split: delegate FIRST, fallback to inline legacy printer.
+        local okM, mod = _safeRequire("dwkit.commands.dwservices")
+        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+            local kit = _getKit()
+            local ctx = {
+                out = function(line) _out(line) end,
+                err = function(msg) _err(msg) end,
+                callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
+                legacyPrint = function() _printServicesHealth() end,
+            }
+
+            -- tolerant signatures
+            local ok1, err1 = pcall(mod.dispatch, ctx, kit)
+            if ok1 then return end
+
+            local ok2, err2 = pcall(mod.dispatch, ctx)
+            if ok2 then return end
+
+            local ok3, err3 = pcall(mod.dispatch, kit)
+            if ok3 then return end
+
+            _out("[DWKit Services] NOTE: dwservices delegate failed; falling back to inline handler")
+            _out("  err1=" .. tostring(err1))
+            _out("  err2=" .. tostring(err2))
+            _out("  err3=" .. tostring(err3))
+        end
+
         _printServicesHealth()
     end)
 
