@@ -1,28 +1,21 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwboot
 -- Owner       : Commands
--- Version     : v2026-01-20A
+-- Version     : v2026-01-24A
 -- Purpose     :
---   - SAFE command handler for "dwboot"
---   - Prints DWKit boot wiring/health status (no timers, no automation).
---   - Designed to be called by command_aliases (alias surface),
---     but also safe to run directly for diagnostics.
+--   - Command module for: dwboot
+--   - Prints DWKit boot wiring/health status (SAFE diagnostics)
+--   - Does NOT send gameplay commands
+--   - Does NOT start timers or automation
 --
 -- Public API  :
---   - dispatch(ctx?) -> boolean ok, string|nil err
---
--- ctx (optional table) fields:
---   - out(line)  : print line (preferred)
---   - err(msg)   : print error (preferred)
---
--- Notes:
---   - This command reads the runtime DWKit global state only.
---   - It does NOT mutate state, install aliases, or trigger automation.
+--   - dispatch(ctx) -> boolean handled
+--   - reset() -> nil
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-20A"
+M.VERSION = "v2026-01-24A"
 
 local function _mkOut(ctx)
     if type(ctx) == "table" and type(ctx.out) == "function" then
@@ -40,48 +33,58 @@ local function _mkOut(ctx)
     end
 end
 
-local function _mkErr(ctx, out)
+local function _mkErr(ctx, outFn)
     if type(ctx) == "table" and type(ctx.err) == "function" then
         return ctx.err
     end
     return function(msg)
-        out("[DWKit Boot] ERROR: " .. tostring(msg))
+        outFn("[DWKit Boot] ERROR: " .. tostring(msg))
     end
 end
 
-local function _yn(b)
-    return (b and true) and "OK" or "MISSING"
+local function _getKitBestEffort(ctx)
+    if type(ctx) == "table" and type(ctx.getKit) == "function" then
+        local ok, kit = pcall(ctx.getKit)
+        if ok and type(kit) == "table" then
+            return kit
+        end
+    end
+    if type(_G) == "table" and type(_G.DWKit) == "table" then
+        return _G.DWKit
+    end
+    if type(DWKit) == "table" then
+        return DWKit
+    end
+    return nil
 end
 
-function M.dispatch(ctx)
-    local out = _mkOut(ctx)
-    local err = _mkErr(ctx, out)
+local function _yn(b) return b and "OK" or "MISSING" end
 
+local function _printBootHealth(ctx, out)
     out("[DWKit Boot] Health summary (dwboot)")
     out("")
 
-    if type(_G.DWKit) ~= "table" then
+    local kit = _getKitBestEffort(ctx)
+    if type(kit) ~= "table" then
         out("  DWKit global                : MISSING")
         out("")
         out("  Next step:")
-        out("    - Run: lua do local L=require(\"dwkit.loader.init\"); L.init() end")
-        return true, nil
+        out("    - Run: lua local L=require(\"dwkit.loader.init\"); L.init()")
+        return true
     end
 
-    local kit         = _G.DWKit
-
-    local hasCore     = (type(kit.core) == "table")
-    local hasBus      = (type(kit.bus) == "table")
+    local hasCore = (type(kit.core) == "table")
+    local hasBus = (type(kit.bus) == "table")
     local hasServices = (type(kit.services) == "table")
 
     local hasIdentity = hasCore and (type(kit.core.identity) == "table")
-    local hasRB       = hasCore and (type(kit.core.runtimeBaseline) == "table")
-    local hasCmd      = (type(kit.cmd) == "table")
-    local hasCmdReg   = hasBus and (type(kit.bus.commandRegistry) == "table")
-    local hasEvReg    = hasBus and (type(kit.bus.eventRegistry) == "table")
-    local hasEvBus    = hasBus and (type(kit.bus.eventBus) == "table")
-    local hasTest     = (type(kit.test) == "table") and (type(kit.test.run) == "function")
-    local hasAliases  = hasServices and (type(kit.services.commandAliases) == "table")
+    local hasRB = hasCore and (type(kit.core.runtimeBaseline) == "table")
+    local hasCmd = (type(kit.cmd) == "table")
+    local hasCmdReg = hasBus and (type(kit.bus.commandRegistry) == "table")
+    local hasEvReg = hasBus and (type(kit.bus.eventRegistry) == "table")
+    local hasEvBus = hasBus and (type(kit.bus.eventBus) == "table")
+    local hasTest = (type(kit.test) == "table") and (type(kit.test.run) == "function")
+    local hasAliases = hasServices and (type(kit.services.commandAliases) == "table")
 
     out("  DWKit global                : OK")
     out("  core.identity               : " .. _yn(hasIdentity))
@@ -127,8 +130,8 @@ function M.dispatch(ctx)
 
     out("")
     out("  load errors (if any):")
-
     local anyErr = false
+
     local function showErr(key, val)
         if val ~= nil and tostring(val) ~= "" then
             anyErr = true
@@ -174,9 +177,36 @@ function M.dispatch(ctx)
 
     out("")
     out("  Tip: if anything is MISSING, run:")
-    out("    lua do local L=require(\"dwkit.loader.init\"); L.init() end")
+    out("    lua local L=require(\"dwkit.loader.init\"); L.init()")
 
-    return true, nil
+    return true
+end
+
+function M.dispatch(ctx)
+    local out = _mkOut(ctx)
+    local err = _mkErr(ctx, out)
+
+    -- If caller provided a legacyPrint fallback, prefer our own implementation,
+    -- but keep the fallback callable if something weird happens.
+    local okCall, handled = pcall(function()
+        return _printBootHealth(ctx, out)
+    end)
+    if okCall and handled then
+        return true
+    end
+
+    if type(ctx) == "table" and type(ctx.legacyPrint) == "function" then
+        out("[DWKit Boot] NOTE: command module failed; using legacyPrint fallback")
+        pcall(ctx.legacyPrint)
+        return true
+    end
+
+    err("dwboot failed and no legacyPrint fallback available")
+    return true
+end
+
+function M.reset()
+    -- no internal state (kept for uninstall/reset symmetry)
 end
 
 return M
