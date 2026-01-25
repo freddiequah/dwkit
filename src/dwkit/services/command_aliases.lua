@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-25B
+-- Version     : v2026-01-25C
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -157,6 +157,9 @@
 --       * src/dwkit/commands/dwscorestore.lua
 --     with safe inline fallback preserved.
 --
+-- Fixes (v2026-01-25C):
+--   - dwhelp now matches zero-args (prints usage) to prevent falling through to MUD "Huh?!?"
+--
 -- Public API  :
 --   - install(opts?) -> boolean ok, string|nil err
 --   - uninstall() -> boolean ok, string|nil err
@@ -166,7 +169,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-25B"
+M.VERSION = "v2026-01-25C"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -1618,16 +1621,25 @@ function M.install(opts)
         end
     end)
 
-    local dwhelpPattern = [[^dwhelp\s+(\S+)\s*$]]
+    -- FIX (v2026-01-25C): accept zero-args for dwhelp (prints usage instead of falling through to MUD)
+    local dwhelpPattern = [[^dwhelp(?:\s+(\S+))?\s*$]]
     local id2 = _mkAlias(dwhelpPattern, function()
         if not _hasCmd() then
             _err("DWKit.cmd not available. Run loader.init() first.")
             return
         end
 
+        -- NOTE: Mudlet tempAlias commonly sets:
+        --   matches[0] = full match
+        --   matches[1] = full match (sometimes)
+        --   matches[2] = first capture group (when present)
         local name = (matches and matches[2]) and tostring(matches[2]) or ""
+        name = tostring(name or "")
+
         if name == "" then
-            _err("Usage: dwhelp <cmd>")
+            _out("[DWKit Help] Usage: dwhelp <cmd>")
+            _out("  Try: dwcommands")
+            _out("  Example: dwhelp dwtest")
             return
         end
 
