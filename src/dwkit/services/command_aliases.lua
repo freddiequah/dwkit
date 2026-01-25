@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-24C
+-- Version     : v2026-01-25A
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -143,6 +143,15 @@
 --   - Removed dwinit/dwalias alias ownership from this module.
 --   - dwinit/dwalias are owned by dwkit.services.alias_control to prevent double-fire.
 --
+-- Phase 9 Split (v2026-01-25A):
+--   - dwpresence / dwactions / dwskills / dwdiag / dwrelease now delegate to:
+--       * src/dwkit/commands/dwpresence.lua
+--       * src/dwkit/commands/dwactions.lua
+--       * src/dwkit/commands/dwskills.lua
+--       * src/dwkit/commands/dwdiag.lua
+--       * src/dwkit/commands/dwrelease.lua
+--     with safe inline fallbacks preserved.
+--
 -- Public API  :
 --   - install(opts?) -> boolean ok, string|nil err
 --   - uninstall() -> boolean ok, string|nil err
@@ -152,7 +161,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-24C"
+M.VERSION = "v2026-01-25A"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -1429,6 +1438,28 @@ function M.uninstall()
         if okS and type(svcMod) == "table" and type(svcMod.reset) == "function" then
             pcall(svcMod.reset)
         end
+
+        -- Phase 9 split: presence/actions/skills/diag/release command modules (best-effort reset)
+        local okP, pMod = _safeRequire("dwkit.commands.dwpresence")
+        if okP and type(pMod) == "table" and type(pMod.reset) == "function" then
+            pcall(pMod.reset)
+        end
+        local okA, aMod = _safeRequire("dwkit.commands.dwactions")
+        if okA and type(aMod) == "table" and type(aMod.reset) == "function" then
+            pcall(aMod.reset)
+        end
+        local okK, kMod = _safeRequire("dwkit.commands.dwskills")
+        if okK and type(kMod) == "table" and type(kMod.reset) == "function" then
+            pcall(kMod.reset)
+        end
+        local okD, dMod = _safeRequire("dwkit.commands.dwdiag")
+        if okD and type(dMod) == "table" and type(dMod.reset) == "function" then
+            pcall(dMod.reset)
+        end
+        local okRL, rMod = _safeRequire("dwkit.commands.dwrelease")
+        if okRL and type(rMod) == "table" and type(rMod.reset) == "function" then
+            pcall(rMod.reset)
+        end
     end
 
     if not STATE.installed then
@@ -2082,8 +2113,43 @@ function M.install(opts)
         _printServicesHealth()
     end)
 
-    local dwpresencePattern = [[^dwpresence\s*$]]
+    -- Phase 9 split: dwpresence delegates to dwkit.commands.dwpresence (with fallback)
+    local dwpresencePattern = [[^dwpresence(?:\s+(.+))?\s*$]]
     local id11 = _mkAlias(dwpresencePattern, function()
+        local line = _getFullMatchLine()
+        local tokens = {}
+        for w in tostring(line or ""):gmatch("%S+") do
+            tokens[#tokens + 1] = w
+        end
+
+        local kit = _getKit()
+
+        local okM, mod = _safeRequire("dwkit.commands.dwpresence")
+        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+            local ctx = {
+                out = function(line2) _out(line2) end,
+                err = function(msg) _err(msg) end,
+                ppTable = function(t, opts) _ppTable(t, opts) end,
+                callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
+                getKit = function() return kit end,
+                getService = function(name) return _getService(name) end,
+                printServiceSnapshot = function(label, svcName) _printServiceSnapshot(label, svcName) end,
+            }
+
+            -- tolerant signatures; treat explicit false as "not handled"
+            local ok1, r1 = pcall(mod.dispatch, ctx, kit, tokens)
+            if ok1 and r1 ~= false then return end
+
+            local ok2, r2 = pcall(mod.dispatch, ctx, tokens)
+            if ok2 and r2 ~= false then return end
+
+            local ok3, r3 = pcall(mod.dispatch, tokens)
+            if ok3 and r3 ~= false then return end
+
+            _out("[DWKit Presence] NOTE: dwpresence delegate returned false; falling back to inline handler")
+        end
+
+        -- Inline fallback (legacy behaviour)
         _printServiceSnapshot("PresenceService", "presenceService")
     end)
 
@@ -2201,13 +2267,81 @@ function M.install(opts)
         _err("dwwho handler threw error: " .. tostring(err1 or err2))
     end)
 
-    local dwactionsPattern = [[^dwactions\s*$]]
+    -- Phase 9 split: dwactions delegates to dwkit.commands.dwactions (with fallback)
+    local dwactionsPattern = [[^dwactions(?:\s+(.+))?\s*$]]
     local id12 = _mkAlias(dwactionsPattern, function()
+        local line = _getFullMatchLine()
+        local tokens = {}
+        for w in tostring(line or ""):gmatch("%S+") do
+            tokens[#tokens + 1] = w
+        end
+
+        local kit = _getKit()
+
+        local okM, mod = _safeRequire("dwkit.commands.dwactions")
+        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+            local ctx = {
+                out = function(line2) _out(line2) end,
+                err = function(msg) _err(msg) end,
+                ppTable = function(t, opts) _ppTable(t, opts) end,
+                callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
+                getKit = function() return kit end,
+                getService = function(name) return _getService(name) end,
+                printServiceSnapshot = function(label, svcName) _printServiceSnapshot(label, svcName) end,
+            }
+
+            local ok1, r1 = pcall(mod.dispatch, ctx, kit, tokens)
+            if ok1 and r1 ~= false then return end
+
+            local ok2, r2 = pcall(mod.dispatch, ctx, tokens)
+            if ok2 and r2 ~= false then return end
+
+            local ok3, r3 = pcall(mod.dispatch, tokens)
+            if ok3 and r3 ~= false then return end
+
+            _out("[DWKit Actions] NOTE: dwactions delegate returned false; falling back to inline handler")
+        end
+
+        -- Inline fallback (legacy behaviour)
         _printServiceSnapshot("ActionModelService", "actionModelService")
     end)
 
-    local dwskillsPattern = [[^dwskills\s*$]]
+    -- Phase 9 split: dwskills delegates to dwkit.commands.dwskills (with fallback)
+    local dwskillsPattern = [[^dwskills(?:\s+(.+))?\s*$]]
     local id13 = _mkAlias(dwskillsPattern, function()
+        local line = _getFullMatchLine()
+        local tokens = {}
+        for w in tostring(line or ""):gmatch("%S+") do
+            tokens[#tokens + 1] = w
+        end
+
+        local kit = _getKit()
+
+        local okM, mod = _safeRequire("dwkit.commands.dwskills")
+        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+            local ctx = {
+                out = function(line2) _out(line2) end,
+                err = function(msg) _err(msg) end,
+                ppTable = function(t, opts) _ppTable(t, opts) end,
+                callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
+                getKit = function() return kit end,
+                getService = function(name) return _getService(name) end,
+                printServiceSnapshot = function(label, svcName) _printServiceSnapshot(label, svcName) end,
+            }
+
+            local ok1, r1 = pcall(mod.dispatch, ctx, kit, tokens)
+            if ok1 and r1 ~= false then return end
+
+            local ok2, r2 = pcall(mod.dispatch, ctx, tokens)
+            if ok2 and r2 ~= false then return end
+
+            local ok3, r3 = pcall(mod.dispatch, tokens)
+            if ok3 and r3 ~= false then return end
+
+            _out("[DWKit Skills] NOTE: dwskills delegate returned false; falling back to inline handler")
+        end
+
+        -- Inline fallback (legacy behaviour)
         _printServiceSnapshot("SkillRegistryService", "skillRegistryService")
     end)
 
@@ -2466,8 +2600,47 @@ function M.install(opts)
         end
     end)
 
-    local dwdiagPattern = [[^dwdiag\s*$]]
+    -- Phase 9 split: dwdiag delegates to dwkit.commands.dwdiag (with fallback)
+    local dwdiagPattern = [[^dwdiag(?:\s+(.+))?\s*$]]
     local id19 = _mkAlias(dwdiagPattern, function()
+        local line = _getFullMatchLine()
+        local tokens = {}
+        for w in tostring(line or ""):gmatch("%S+") do
+            tokens[#tokens + 1] = w
+        end
+
+        local kit = _getKit()
+
+        local okM, mod = _safeRequire("dwkit.commands.dwdiag")
+        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+            local ctx = {
+                out = function(line2) _out(line2) end,
+                err = function(msg) _err(msg) end,
+                ppTable = function(t, opts) _ppTable(t, opts) end,
+                callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
+
+                getKit = function() return kit end,
+                makeEventDiagCtx = function() return _makeEventDiagCtx() end,
+                getEventDiagState = function() return STATE.eventDiag end,
+
+                legacyPrintVersion = function() _printVersionSummary() end,
+                legacyPrintBoot = function() _printBootHealth() end,
+                legacyPrintServices = function() _printServicesHealth() end,
+            }
+
+            local ok1, r1 = pcall(mod.dispatch, ctx, kit, tokens)
+            if ok1 and r1 ~= false then return end
+
+            local ok2, r2 = pcall(mod.dispatch, ctx, tokens)
+            if ok2 and r2 ~= false then return end
+
+            local ok3, r3 = pcall(mod.dispatch, tokens)
+            if ok3 and r3 ~= false then return end
+
+            _out("[DWKit Diag] NOTE: dwdiag delegate returned false; falling back to inline handler")
+        end
+
+        -- Inline fallback (legacy behaviour)
         _out("[DWKit Diag] bundle (dwdiag)")
         _out("  NOTE: SAFE + manual-only. Does not enable event tap or subscriptions.")
         _out("")
@@ -2489,9 +2662,9 @@ function M.install(opts)
 
         _out("== event diag status ==")
         _out("")
-        local mod = _getEventDiagModuleBestEffort()
-        if type(mod) == "table" and type(mod.printStatus) == "function" then
-            local okCall, errOrNil = pcall(mod.printStatus, _makeEventDiagCtx(), STATE.eventDiag)
+        local modED = _getEventDiagModuleBestEffort()
+        if type(modED) == "table" and type(modED.printStatus) == "function" then
+            local okCall, errOrNil = pcall(modED.printStatus, _makeEventDiagCtx(), STATE.eventDiag)
             if not okCall then
                 _err("event_diag.printStatus threw error: " .. tostring(errOrNil))
             end
@@ -2759,8 +2932,43 @@ function M.install(opts)
         usage()
     end)
 
-    local dwreleasePattern = [[^dwrelease\s*$]]
+    -- Phase 9 split: dwrelease delegates to dwkit.commands.dwrelease (with fallback)
+    local dwreleasePattern = [[^dwrelease(?:\s+(.+))?\s*$]]
     local id20 = _mkAlias(dwreleasePattern, function()
+        local line = _getFullMatchLine()
+        local tokens = {}
+        for w in tostring(line or ""):gmatch("%S+") do
+            tokens[#tokens + 1] = w
+        end
+
+        local kit = _getKit()
+
+        local okM, mod = _safeRequire("dwkit.commands.dwrelease")
+        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+            local ctx = {
+                out = function(line2) _out(line2) end,
+                err = function(msg) _err(msg) end,
+                ppTable = function(t, opts) _ppTable(t, opts) end,
+                callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
+                getKit = function() return kit end,
+
+                legacyPrint = function() _printReleaseChecklist() end,
+                legacyPrintVersion = function() _printVersionSummary() end,
+            }
+
+            local ok1, r1 = pcall(mod.dispatch, ctx, kit, tokens)
+            if ok1 and r1 ~= false then return end
+
+            local ok2, r2 = pcall(mod.dispatch, ctx, tokens)
+            if ok2 and r2 ~= false then return end
+
+            local ok3, r3 = pcall(mod.dispatch, tokens)
+            if ok3 and r3 ~= false then return end
+
+            _out("[DWKit Release] NOTE: dwrelease delegate returned false; falling back to inline handler")
+        end
+
+        -- Inline fallback (legacy behaviour)
         _printReleaseChecklist()
     end)
 
