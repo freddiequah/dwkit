@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.tests.self_test_runner
 -- Owner       : Tests
--- Version     : v2026-01-19A
+-- Version     : v2026-01-25A
 -- Purpose     :
 --   - Provide a SAFE, manual-only self-test runner.
 --   - Prints PASS/FAIL summary + compatibility baseline output.
@@ -15,6 +15,8 @@
 --   - Includes SAFE UI Safety Gate (UI contract validation; no UI creation) (Objective: dwtest ui gate).
 --   - Includes SAFE service integration smoke:
 --       WhoStore -> RoomEntities auto reclassify (event-driven, no gameplay).
+--   - Includes SAFE alias router regression guards:
+--       command_aliases.getState().aliasIds contains expected keys; install/uninstall toggles state.
 --   - DOES NOT send gameplay commands.
 --   - DOES NOT start timers or automation.
 --
@@ -42,11 +44,13 @@
 --   - Optional (service integration smoke):
 --       - require("dwkit.services.whostore_service")
 --       - require("dwkit.services.roomentities_service")
+--   - Optional (alias router guards):
+--       - require("dwkit.services.command_aliases")
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-19A"
+M.VERSION = "v2026-01-25A"
 
 -- -------------------------
 -- Objective D1: Registry version drift locks
@@ -56,6 +60,37 @@ local EXPECTED_EVENT_REGISTRY_VERSION = "v1.9"
 
 -- MUST match docs/Command_Registry_v1.0.md "## Version"
 local EXPECTED_COMMAND_REGISTRY_VERSION = "v2.9"
+
+-- -------------------------
+-- Alias Router regression guards (SAFE)
+-- -------------------------
+-- MUST match the alias key set used by src/dwkit/services/command_aliases.lua (_ALIAS_KEYS).
+-- This is intentionally strict: if you add/remove an alias key in command_aliases.lua,
+-- you MUST update this list in the same change to prevent silent drift.
+local EXPECTED_ALIAS_KEYS = {
+    "dwactions",
+    "dwboot",
+    "dwcommands",
+    "dwdiag",
+    "dwevent",
+    "dweventlog",
+    "dwevents",
+    "dweventsub",
+    "dweventtap",
+    "dweventunsub",
+    "dwgui",
+    "dwhelp",
+    "dwid",
+    "dwpresence",
+    "dwrelease",
+    "dwroom",
+    "dwscorestore",
+    "dwservices",
+    "dwskills",
+    "dwtest",
+    "dwversion",
+    "dwwho",
+}
 
 -- -------------------------
 -- Safe output helper
@@ -446,6 +481,44 @@ local function _tryRestoreServiceStates(W, R, ws0, re0)
     end
 
     return okW, errW, okR, errR
+end
+
+-- -------------------------
+-- Alias Router helpers (SAFE)
+-- -------------------------
+local function _getAliasStateBestEffort(A)
+    if type(A) ~= "table" or type(A.getState) ~= "function" then
+        return false, nil, "getState() missing"
+    end
+    local ok, stOrErr = pcall(A.getState)
+    if ok and type(stOrErr) == "table" then
+        return true, stOrErr, nil
+    end
+    return false, nil, tostring(stOrErr)
+end
+
+local function _aliasIdLooksPresent(v)
+    local t = type(v)
+    if t == "number" then return true end
+    if t == "string" and v ~= "" then return true end
+    return false
+end
+
+local function _missingAliasKeys(aliasIds)
+    local missing = {}
+    if type(aliasIds) ~= "table" then
+        for _, k in ipairs(EXPECTED_ALIAS_KEYS) do
+            table.insert(missing, k)
+        end
+        return missing
+    end
+
+    for _, k in ipairs(EXPECTED_ALIAS_KEYS) do
+        if not _aliasIdLooksPresent(aliasIds[k]) then
+            table.insert(missing, k)
+        end
+    end
+    return missing
 end
 
 -- -------------------------
@@ -862,6 +935,115 @@ function M.run(opts)
     end
 
     _out("")
+
+    -- ------------------------------------------------------------
+    -- 5a) Alias Router Checks (SAFE; regression guards)
+    -- ------------------------------------------------------------
+    _out("[DWKit Test] Alias router checks (SAFE):")
+
+    local okAliasReq, A = _safeRequire("dwkit.services.command_aliases")
+    local hasAliasMod = okAliasReq and type(A) == "table"
+    _lineCheck(hasAliasMod, "command_aliases module available", hasAliasMod and "require=OK" or "require failed")
+    check("command_aliases module available", hasAliasMod, hasAliasMod and "OK" or "require failed")
+
+    if not hasAliasMod then
+        _out("")
+    else
+        local canToggle = (type(A.install) == "function") and (type(A.uninstall) == "function") and (type(A.getState) == "function")
+        _lineCheck(canToggle, "command_aliases has install/uninstall/getState", canToggle and "YES" or "NO")
+        check("command_aliases has install/uninstall/getState", canToggle, canToggle and "YES" or "NO")
+
+        -- Snapshot initial installed state (best-effort)
+        local okS0, st0, s0Err = _getAliasStateBestEffort(A)
+        local origInstalled = (okS0 and type(st0) == "table" and st0.installed == true) and true or false
+
+        _lineCheck(okS0, "command_aliases.getState() readable", okS0 and ("installed=" .. _yesNo(origInstalled)) or ("err=" .. tostring(s0Err)))
+        check("command_aliases.getState() readable", okS0, okS0 and ("installed=" .. _yesNo(origInstalled)) or ("err=" .. tostring(s0Err)))
+
+        -- Test install -> installed=true
+        local okInstall = false
+        if canToggle then
+            local okP, resOrErr = pcall(A.install, { quiet = true })
+            okInstall = (okP == true) and (resOrErr == true)
+            _lineCheck(okInstall, "command_aliases.install() toggles installed", okInstall and "installed=true expected" or ("err=" .. tostring(resOrErr)))
+            check("command_aliases.install() toggles installed", okInstall, okInstall and "OK" or ("err=" .. tostring(resOrErr)))
+        else
+            _lineCheck(false, "command_aliases.install() toggles installed", "missing API")
+            check("command_aliases.install() toggles installed", false, "missing API")
+        end
+
+        -- Validate expected alias keys exist (count-only in quiet)
+        if okInstall then
+            local okS1, st1, s1Err = _getAliasStateBestEffort(A)
+            if okS1 and type(st1) == "table" then
+                local installedNow = (st1.installed == true)
+                _lineCheck(installedNow, "command_aliases installed flag", installedNow and "installed=true" or "installed=false")
+                check("command_aliases installed flag", installedNow, installedNow and "installed=true" or "installed=false")
+
+                local aliasIds = st1.aliasIds
+                local missing = _missingAliasKeys(aliasIds)
+                local missN = #missing
+                local passKeys = (missN == 0)
+
+                if quiet then
+                    _lineCheck(passKeys, "aliasIds contains expected keys", "missing=" .. tostring(missN))
+                    check("aliasIds contains expected keys", passKeys, "missing=" .. tostring(missN))
+                else
+                    local detail = passKeys and "missing=0" or ("missing=" .. tostring(missN) .. " :: " .. table.concat(missing, ", "))
+                    _lineCheck(passKeys, "aliasIds contains expected keys", detail)
+                    check("aliasIds contains expected keys", passKeys, detail)
+                end
+            else
+                _lineCheck(false, "aliasIds contains expected keys", "getState() err=" .. tostring(s1Err))
+                check("aliasIds contains expected keys", false, "getState() err=" .. tostring(s1Err))
+            end
+        else
+            _lineCheck(false, "aliasIds contains expected keys", "SKIP (install failed)")
+            check("aliasIds contains expected keys", false, "SKIP (install failed)")
+        end
+
+        -- Test uninstall -> installed=false
+        local okUninstall = false
+        if canToggle then
+            local okP, resOrErr = pcall(A.uninstall, { quiet = true })
+            okUninstall = (okP == true) and (resOrErr == true)
+            _lineCheck(okUninstall, "command_aliases.uninstall() toggles installed", okUninstall and "installed=false expected" or ("err=" .. tostring(resOrErr)))
+            check("command_aliases.uninstall() toggles installed", okUninstall, okUninstall and "OK" or ("err=" .. tostring(resOrErr)))
+        else
+            _lineCheck(false, "command_aliases.uninstall() toggles installed", "missing API")
+            check("command_aliases.uninstall() toggles installed", false, "missing API")
+        end
+
+        -- Verify installed flag now false (best-effort)
+        do
+            local okS2, st2, s2Err = _getAliasStateBestEffort(A)
+            local installedNow = (okS2 and type(st2) == "table" and st2.installed == true) and true or false
+            local passFlag = okS2 and (installedNow == false)
+            _lineCheck(passFlag, "command_aliases installed flag after uninstall", passFlag and "installed=false" or ("err/flag=" .. tostring(s2Err or "installed=true")))
+            check("command_aliases installed flag after uninstall", passFlag, passFlag and "installed=false" or ("err/flag=" .. tostring(s2Err or "installed=true")))
+        end
+
+        -- Restore original installed state (best-effort)
+        do
+            local restoreOk = true
+            local restoreDetail = ""
+
+            if origInstalled then
+                local okP, resOrErr = pcall(A.install, { quiet = true })
+                restoreOk = (okP == true) and (resOrErr == true)
+                restoreDetail = restoreOk and "restored to installed=true" or ("restore install err=" .. tostring(resOrErr))
+            else
+                local okP, resOrErr = pcall(A.uninstall, { quiet = true })
+                restoreOk = (okP == true) and (resOrErr == true)
+                restoreDetail = restoreOk and "restored to installed=false" or ("restore uninstall err=" .. tostring(resOrErr))
+            end
+
+            _lineCheck(restoreOk, "alias router restore (best-effort)", restoreDetail)
+            check("alias router restore (best-effort)", restoreOk, restoreDetail)
+        end
+
+        _out("")
+    end
 
     -- ------------------------------------------------------------
     -- 5b) Persistence Smoke Checks (SAFE; selftest-only paths)
