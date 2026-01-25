@@ -1,126 +1,138 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwpresence
 -- Owner       : Commands
--- Version     : v2026-01-21G
+-- Version     : v2026-01-25A
 -- Purpose     :
---   - SAFE command handler for:
---       * dwpresence
---   - Prints PresenceService snapshot (best-effort, SAFE).
+--   - Handler for "dwpresence" command surface.
+--   - SAFE: prints PresenceService snapshot/state.
+--   - No gameplay sends. No timers. Manual only.
 --
 -- Public API  :
---   - dispatch(ctx, kit?) -> nil
+--   - dispatch(ctx, kit) -> boolean ok, string|nil err
 --   - reset() -> nil
 -- #########################################################################
 
 local M = {}
+M.VERSION = "v2026-01-25A"
 
-M.VERSION = "v2026-01-21G"
-
-local function _out(ctx, line)
-  if ctx and type(ctx.out) == "function" then
-    ctx.out(line)
-    return
-  end
+local function _fallbackOut(line)
+  line = tostring(line or "")
   if type(cecho) == "function" then
-    cecho(tostring(line or "") .. "\n")
+    cecho(line .. "\n")
   elseif type(echo) == "function" then
-    echo(tostring(line or "") .. "\n")
+    echo(line .. "\n")
   else
-    print(tostring(line or ""))
+    print(line)
   end
 end
 
-local function _err(ctx, msg)
-  if ctx and type(ctx.err) == "function" then
-    ctx.err(msg)
-    return
-  end
-  _out(ctx, "[DWKit] ERROR: " .. tostring(msg))
+local function _fallbackErr(msg)
+  _fallbackOut("[DWKit Presence] ERROR: " .. tostring(msg))
 end
 
-local function _getKit(kit)
+local function _getCtx(ctx)
+  ctx = (type(ctx) == "table") and ctx or {}
+  return {
+    out = (type(ctx.out) == "function") and ctx.out or _fallbackOut,
+    err = (type(ctx.err) == "function") and ctx.err or _fallbackErr,
+    ppTable = (type(ctx.ppTable) == "function") and ctx.ppTable or nil,
+    callBestEffort = (type(ctx.callBestEffort) == "function") and ctx.callBestEffort or nil,
+  }
+end
+
+local function _resolveKit(kit)
   if type(kit) == "table" then return kit end
-  if type(_G) == "table" and type(_G.DWKit) == "table" then
-    return _G.DWKit
-  end
-  if type(DWKit) == "table" then
-    return DWKit
-  end
+  if type(_G) == "table" and type(_G.DWKit) == "table" then return _G.DWKit end
+  if type(DWKit) == "table" then return DWKit end
   return nil
 end
 
-local function _getService(kit, name)
-  if type(kit) ~= "table" or type(kit.services) ~= "table" then return nil end
-  local s = kit.services[name]
-  if type(s) == "table" then return s end
-  return nil
-end
-
-local function _tryCall(fn, ...)
-  if type(fn) ~= "function" then return false, nil end
-  local ok, res = pcall(fn, ...)
-  return ok, res
-end
-
-function M.dispatch(ctx, kit)
-  kit = _getKit(kit)
-
-  _out(ctx, "[DWKit Service] PresenceService")
-  local svc = _getService(kit, "presenceService")
-  if not svc then
-    _err(ctx, "DWKit.services.presenceService not available. Run loader.init() first.")
-    return
+local function _callBestEffort(C, obj, fnName, ...)
+  if C.callBestEffort then
+    return C.callBestEffort(obj, fnName, ...)
   end
+  if type(obj) ~= "table" or type(obj[fnName]) ~= "function" then
+    return false, nil, nil, nil, "missing function: " .. tostring(fnName)
+  end
+  local ok, a, b, c = pcall(obj[fnName], ...)
+  if ok then return true, a, b, c, nil end
+  return false, nil, nil, nil, tostring(a)
+end
 
-  _out(ctx, "  version=" .. tostring(svc.VERSION or "unknown"))
+local function _pp(C, t, opts)
+  if type(C.ppTable) == "function" then
+    C.ppTable(t, opts)
+  else
+    C.out(tostring(t))
+  end
+end
 
-  -- Prefer ctx.ppTable if available for consistent formatting
-  local pp = (ctx and type(ctx.ppTable) == "function") and ctx.ppTable or nil
+local function _printServiceSnapshot(C, label, svc)
+  C.out("[DWKit Service] " .. tostring(label))
+  C.out("  version=" .. tostring(svc.VERSION or "unknown"))
 
   if type(svc.getState) == "function" then
-    local ok, state = _tryCall(svc.getState)
+    local ok, state, _, _, err = _callBestEffort(C, svc, "getState")
     if ok then
-      _out(ctx, "  getState(): OK")
-      if pp then
-        pp(state, { maxDepth = 2, maxItems = 30 })
-      else
-        _out(ctx, "  (state table)")
-      end
-      return
+      C.out("  getState(): OK")
+      _pp(C, state, { maxDepth = 2, maxItems = 30 })
+      return true
     end
-    _out(ctx, "  getState(): ERROR")
+    C.out("  getState(): ERROR")
+    if err and err ~= "" then C.out("    err=" .. tostring(err)) end
   end
 
   if type(svc.getAll) == "function" then
-    local ok, state = _tryCall(svc.getAll)
+    local ok, state, _, _, err = _callBestEffort(C, svc, "getAll")
     if ok then
-      _out(ctx, "  getAll(): OK")
-      if pp then
-        pp(state, { maxDepth = 2, maxItems = 30 })
-      else
-        _out(ctx, "  (all table)")
-      end
-      return
+      C.out("  getAll(): OK")
+      _pp(C, state, { maxDepth = 2, maxItems = 30 })
+      return true
     end
-    _out(ctx, "  getAll(): ERROR")
+    C.out("  getAll(): ERROR")
+    if err and err ~= "" then C.out("    err=" .. tostring(err)) end
   end
 
-  _out(ctx, "  NOTE: no getState/getAll surface detected; dumping keys (bounded)")
+  -- fallback: list keys
   local keys = {}
   for k, _ in pairs(svc) do keys[#keys + 1] = k end
   table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
 
+  C.out("  APIs available (keys on service table): count=" .. tostring(#keys))
   local limit = math.min(#keys, 40)
   for i = 1, limit do
-    _out(ctx, "    - " .. tostring(keys[i]))
+    C.out("    - " .. tostring(keys[i]))
   end
   if #keys > limit then
-    _out(ctx, "    ... (" .. tostring(#keys - limit) .. " more)")
+    C.out("    ... (" .. tostring(#keys - limit) .. " more)")
   end
+
+  return true
+end
+
+function M.dispatch(ctx, kit)
+  local C = _getCtx(ctx)
+  local K = _resolveKit(kit)
+  if type(K) ~= "table" then
+    C.err("DWKit global not available. Run loader.init() first.")
+    return false, "DWKit missing"
+  end
+  if type(K.services) ~= "table" then
+    C.err("DWKit.services not available. Run loader.init() first.")
+    return false, "services missing"
+  end
+
+  local svc = K.services.presenceService
+  if type(svc) ~= "table" then
+    C.err("DWKit.services.presenceService not available. Run loader.init() first.")
+    return false, "presenceService missing"
+  end
+
+  return _printServiceSnapshot(C, "PresenceService", svc), nil
 end
 
 function M.reset()
-  -- no state
+  -- no persistent state
 end
 
 return M
