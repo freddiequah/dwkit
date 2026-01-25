@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-25C
+-- Version     : v2026-01-25D
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -160,6 +160,10 @@
 -- Fixes (v2026-01-25C):
 --   - dwhelp now matches zero-args (prints usage) to prevent falling through to MUD "Huh?!?"
 --
+-- Slim (v2026-01-25D):
+--   - Slimmed uninstall() module reset boilerplate into a loop (no behavior changes).
+--   - Slimmed getState() and uninstall() alias id list building to avoid repeated boilerplate (no behavior changes).
+--
 -- Public API  :
 --   - install(opts?) -> boolean ok, string|nil err
 --   - uninstall() -> boolean ok, string|nil err
@@ -169,9 +173,38 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-25C"
+M.VERSION = "v2026-01-25D"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
+
+local _ALIAS_KEYS = {
+    "dwcommands",
+    "dwhelp",
+    "dwtest",
+    "dwinfo",
+    "dwid",
+    "dwversion",
+    "dwdiag",
+    "dwgui",
+    "dwevents",
+    "dwevent",
+    "dwboot",
+
+    "dwservices",
+    "dwpresence",
+    "dwroom",
+    "dwwho",
+    "dwactions",
+    "dwskills",
+    "dwscorestore",
+
+    "dweventtap",
+    "dweventsub",
+    "dweventunsub",
+    "dweventlog",
+
+    "dwrelease",
+}
 
 local STATE = {
     installed = false,
@@ -1338,36 +1371,14 @@ function M.getState()
     local subCount = 0
     for _ in pairs((d and d.subs) or {}) do subCount = subCount + 1 end
 
+    local aliasIds = {}
+    for _, k in ipairs(_ALIAS_KEYS) do
+        aliasIds[k] = STATE.aliasIds[k]
+    end
+
     return {
         installed = STATE.installed and true or false,
-        aliasIds = {
-            dwcommands = STATE.aliasIds.dwcommands,
-            dwhelp = STATE.aliasIds.dwhelp,
-            dwtest = STATE.aliasIds.dwtest,
-            dwinfo = STATE.aliasIds.dwinfo,
-            dwid = STATE.aliasIds.dwid,
-            dwversion = STATE.aliasIds.dwversion,
-            dwdiag = STATE.aliasIds.dwdiag,
-            dwgui = STATE.aliasIds.dwgui,
-            dwevents = STATE.aliasIds.dwevents,
-            dwevent = STATE.aliasIds.dwevent,
-            dwboot = STATE.aliasIds.dwboot,
-
-            dwservices = STATE.aliasIds.dwservices,
-            dwpresence = STATE.aliasIds.dwpresence,
-            dwroom = STATE.aliasIds.dwroom,
-            dwwho = STATE.aliasIds.dwwho,
-            dwactions = STATE.aliasIds.dwactions,
-            dwskills = STATE.aliasIds.dwskills,
-            dwscorestore = STATE.aliasIds.dwscorestore,
-
-            dweventtap = STATE.aliasIds.dweventtap,
-            dweventsub = STATE.aliasIds.dweventsub,
-            dweventunsub = STATE.aliasIds.dweventunsub,
-            dweventlog = STATE.aliasIds.dweventlog,
-
-            dwrelease = STATE.aliasIds.dwrelease,
-        },
+        aliasIds = aliasIds,
         eventDiag = {
             maxLog = (d and d.maxLog) or 50,
             logCount = #(d and d.log or {}),
@@ -1376,6 +1387,48 @@ function M.getState()
         },
         lastError = STATE.lastError,
     }
+end
+
+local function _resetSplitCommandModulesBestEffort()
+    local mods = {
+        -- Phase 1/2/3/4/5 split modules
+        "dwkit.commands.dwroom",
+        "dwkit.commands.dwwho",
+        "dwkit.commands.dwgui",
+        "dwkit.commands.dwboot",
+        "dwkit.commands.dwcommands",
+        "dwkit.commands.dwhelp",
+        "dwkit.commands.dwtest",
+
+        -- Phase 6 split
+        "dwkit.commands.dwid",
+        "dwkit.commands.dwversion",
+        "dwkit.commands.dwinfo",
+
+        -- Phase 7 split
+        "dwkit.commands.dwevents",
+        "dwkit.commands.dwevent",
+
+        -- Phase 8 split
+        "dwkit.commands.dwservices",
+
+        -- Phase 9 split
+        "dwkit.commands.dwpresence",
+        "dwkit.commands.dwactions",
+        "dwkit.commands.dwskills",
+        "dwkit.commands.dwdiag",
+        "dwkit.commands.dwrelease",
+
+        -- Phase 10 split
+        "dwkit.commands.dwscorestore",
+    }
+
+    for _, name in ipairs(mods) do
+        local okM, mod = _safeRequire(name)
+        if okM and type(mod) == "table" and type(mod.reset) == "function" then
+            pcall(mod.reset)
+        end
+    end
 end
 
 function M.uninstall()
@@ -1387,94 +1440,7 @@ function M.uninstall()
     _roomCaptureReset()
 
     -- Phase splits: reset extracted command modules (best-effort)
-    do
-        local okR, roomMod = _safeRequire("dwkit.commands.dwroom")
-        if okR and type(roomMod) == "table" and type(roomMod.reset) == "function" then
-            pcall(roomMod.reset)
-        end
-        local okW, whoMod = _safeRequire("dwkit.commands.dwwho")
-        if okW and type(whoMod) == "table" and type(whoMod.reset) == "function" then
-            pcall(whoMod.reset)
-        end
-        local okG, guiMod = _safeRequire("dwkit.commands.dwgui")
-        if okG and type(guiMod) == "table" and type(guiMod.reset) == "function" then
-            pcall(guiMod.reset)
-        end
-        local okB, bootMod = _safeRequire("dwkit.commands.dwboot")
-        if okB and type(bootMod) == "table" and type(bootMod.reset) == "function" then
-            pcall(bootMod.reset)
-        end
-        local okC, cmdsMod = _safeRequire("dwkit.commands.dwcommands")
-        if okC and type(cmdsMod) == "table" and type(cmdsMod.reset) == "function" then
-            pcall(cmdsMod.reset)
-        end
-        local okH, helpMod = _safeRequire("dwkit.commands.dwhelp")
-        if okH and type(helpMod) == "table" and type(helpMod.reset) == "function" then
-            pcall(helpMod.reset)
-        end
-        local okT, testMod = _safeRequire("dwkit.commands.dwtest")
-        if okT and type(testMod) == "table" and type(testMod.reset) == "function" then
-            pcall(testMod.reset)
-        end
-
-        -- Phase 6 split: new command modules (best-effort reset)
-        local okID, idMod = _safeRequire("dwkit.commands.dwid")
-        if okID and type(idMod) == "table" and type(idMod.reset) == "function" then
-            pcall(idMod.reset)
-        end
-        local okVI, vMod = _safeRequire("dwkit.commands.dwversion")
-        if okVI and type(vMod) == "table" and type(vMod.reset) == "function" then
-            pcall(vMod.reset)
-        end
-        local okIN, infoMod = _safeRequire("dwkit.commands.dwinfo")
-        if okIN and type(infoMod) == "table" and type(infoMod.reset) == "function" then
-            pcall(infoMod.reset)
-        end
-
-        -- Phase 7 split: dwevents/dwevent handlers (best-effort reset)
-        local okE1, evsMod = _safeRequire("dwkit.commands.dwevents")
-        if okE1 and type(evsMod) == "table" and type(evsMod.reset) == "function" then
-            pcall(evsMod.reset)
-        end
-        local okE2, evMod = _safeRequire("dwkit.commands.dwevent")
-        if okE2 and type(evMod) == "table" and type(evMod.reset) == "function" then
-            pcall(evMod.reset)
-        end
-
-        -- Phase 8 split: dwservices command module (best-effort reset)
-        local okS, svcMod = _safeRequire("dwkit.commands.dwservices")
-        if okS and type(svcMod) == "table" and type(svcMod.reset) == "function" then
-            pcall(svcMod.reset)
-        end
-
-        -- Phase 9 split: presence/actions/skills/diag/release command modules (best-effort reset)
-        local okP, pMod = _safeRequire("dwkit.commands.dwpresence")
-        if okP and type(pMod) == "table" and type(pMod.reset) == "function" then
-            pcall(pMod.reset)
-        end
-        local okA, aMod = _safeRequire("dwkit.commands.dwactions")
-        if okA and type(aMod) == "table" and type(aMod.reset) == "function" then
-            pcall(aMod.reset)
-        end
-        local okK, kMod = _safeRequire("dwkit.commands.dwskills")
-        if okK and type(kMod) == "table" and type(kMod.reset) == "function" then
-            pcall(kMod.reset)
-        end
-        local okD, dMod = _safeRequire("dwkit.commands.dwdiag")
-        if okD and type(dMod) == "table" and type(dMod.reset) == "function" then
-            pcall(dMod.reset)
-        end
-        local okRL, rMod = _safeRequire("dwkit.commands.dwrelease")
-        if okRL and type(rMod) == "table" and type(rMod.reset) == "function" then
-            pcall(rMod.reset)
-        end
-
-        -- Phase 10 split: dwscorestore command module (best-effort reset)
-        local okSS, ssMod = _safeRequire("dwkit.commands.dwscorestore")
-        if okSS and type(ssMod) == "table" and type(ssMod.reset) == "function" then
-            pcall(ssMod.reset)
-        end
-    end
+    _resetSplitCommandModulesBestEffort()
 
     if not STATE.installed then
         STATE.lastError = nil
@@ -1501,17 +1467,9 @@ function M.uninstall()
         return false, STATE.lastError
     end
 
-    local ids = STATE.aliasIds
-    local allIds = {
-        ids.dwcommands, ids.dwhelp, ids.dwtest, ids.dwinfo, ids.dwid, ids.dwversion, ids.dwdiag, ids.dwgui,
-        ids.dwevents, ids.dwevent, ids.dwboot,
-        ids.dwservices, ids.dwpresence, ids.dwroom, ids.dwwho, ids.dwactions, ids.dwskills, ids.dwscorestore,
-        ids.dweventtap, ids.dweventsub, ids.dweventunsub, ids.dweventlog,
-        ids.dwrelease,
-    }
-
     local allOk = true
-    for _, id in ipairs(allIds) do
+    for _, k in ipairs(_ALIAS_KEYS) do
+        local id = STATE.aliasIds[k]
         if id then
             local ok = _killAliasStrict(id)
             if not ok then allOk = false end
