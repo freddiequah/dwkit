@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-25A
+-- Version     : v2026-01-25B
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for command discovery/help:
 --       * dwcommands [safe|game|md]
@@ -152,6 +152,11 @@
 --       * src/dwkit/commands/dwrelease.lua
 --     with safe inline fallbacks preserved.
 --
+-- Phase 10 Split (v2026-01-25B):
+--   - dwscorestore now delegates to:
+--       * src/dwkit/commands/dwscorestore.lua
+--     with safe inline fallback preserved.
+--
 -- Public API  :
 --   - install(opts?) -> boolean ok, string|nil err
 --   - uninstall() -> boolean ok, string|nil err
@@ -161,7 +166,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-25A"
+M.VERSION = "v2026-01-25B"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -1460,6 +1465,12 @@ function M.uninstall()
         if okRL and type(rMod) == "table" and type(rMod.reset) == "function" then
             pcall(rMod.reset)
         end
+
+        -- Phase 10 split: dwscorestore command module (best-effort reset)
+        local okSS, ssMod = _safeRequire("dwkit.commands.dwscorestore")
+        if okSS and type(ssMod) == "table" and type(ssMod.reset) == "function" then
+            pcall(ssMod.reset)
+        end
     end
 
     if not STATE.installed then
@@ -2345,6 +2356,7 @@ function M.install(opts)
         _printServiceSnapshot("SkillRegistryService", "skillRegistryService")
     end)
 
+    -- Phase 10 split: dwscorestore delegates to dwkit.commands.dwscorestore (with fallback)
     local dwscorestorePattern = [[^dwscorestore(?:\s+(\S+))?(?:\s+(\S+))?\s*$]]
     local id14 = _mkAlias(dwscorestorePattern, function()
         local svc = _getScoreStoreServiceBestEffort()
@@ -2353,9 +2365,34 @@ function M.install(opts)
             return
         end
 
+        -- NOTE: pattern has capture groups; parse directly (safe enough here)
         local sub = (matches and matches[2]) and tostring(matches[2]) or ""
         local arg = (matches and matches[3]) and tostring(matches[3]) or ""
 
+        local okM, mod = _safeRequire("dwkit.commands.dwscorestore")
+        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+            local ctx = {
+                out = function(line2) _out(line2) end,
+                err = function(msg) _err(msg) end,
+                callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
+            }
+
+            local ok1, err1 = pcall(mod.dispatch, ctx, svc, sub, arg)
+            if ok1 then
+                return
+            end
+
+            local ok2, err2 = pcall(mod.dispatch, nil, svc, sub, arg)
+            if ok2 then
+                return
+            end
+
+            _out("[DWKit ScoreStore] NOTE: dwscorestore delegate failed; falling back to inline handler")
+            _out("  err1=" .. tostring(err1))
+            _out("  err2=" .. tostring(err2))
+        end
+
+        -- Inline fallback (legacy behaviour)
         local function usage()
             _out("[DWKit ScoreStore] Usage:")
             _out("  dwscorestore")
