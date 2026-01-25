@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwwho
 -- Owner       : Commands
--- Version     : v2026-01-21G
+-- Version     : v2026-01-25A
 -- Purpose     :
 --   - Implements dwwho command handler (SAFE + GAME refresh capture).
 --   - Split out from dwkit.services.command_aliases (Phase 1 split).
@@ -22,6 +22,12 @@
 --       dispatch(ctx, svc, sub, arg)
 --     to align with alias router (matches[] tokenization fixes).
 --
+-- Phase 5C (v2026-01-25A):
+--   - Refresh capture start condition tightened:
+--       REMOVE line:match("^%[") to avoid DWKit log lines starting capture.
+--     Capture now starts only on WHO header lines:
+--       "Players" or "Total players:"
+--
 -- Public API  :
 --   - dispatch(ctx, whoStoreSvc, sub, argOpt)
 --   - reset()  (best-effort cancel pending capture session)
@@ -40,7 +46,7 @@
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-01-21G"
+M.VERSION = "v2026-01-25A"
 
 local CAP = {
     active = false,
@@ -255,7 +261,8 @@ local function _startCapture(ctx, svc, opts)
         local line = (matches and matches[2]) and tostring(matches[2]) or ""
 
         if not CAP.started then
-            if line == "Players" or line:match("^%[") or line:match("^Total players:") then
+            -- Start capture ONLY when WHO output begins (avoid DWKit log lines).
+            if line == "Players" or line:match("^Total players:") then
                 CAP.started = true
             else
                 return
