@@ -59,7 +59,7 @@ M.VERSION = "v2026-01-25A"
 local EXPECTED_EVENT_REGISTRY_VERSION = "v1.9"
 
 -- MUST match docs/Command_Registry_v1.0.md "## Version"
-local EXPECTED_COMMAND_REGISTRY_VERSION = "v2.9"
+local EXPECTED_COMMAND_REGISTRY_VERSION = "v3.1"
 
 -- -------------------------
 -- Alias Router regression guards (SAFE)
