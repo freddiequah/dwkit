@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwscorestore
 -- Owner       : Commands
--- Version     : v2026-01-21A
+-- Version     : v2026-01-26A
 -- Purpose     :
 --   - Handler for dwscorestore alias command (delegated from command_aliases)
 --   - SAFE manual-only helper surface for ScoreStoreService
@@ -22,12 +22,15 @@
 --
 -- Public API:
 --   - dispatch(ctx, svc, sub, arg) -> nil
+--   - dispatch(ctx, tokens) -> nil            tokens={"dwscorestore", ...}
+--   - dispatch(ctx, kit, tokens) -> nil
+--   - dispatch(tokens) -> nil                best-effort (requires resolver)
 --   - reset() -> nil (best-effort)
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-21A"
+M.VERSION = "v2026-01-26A"
 
 local function _out(ctx, line)
     if type(ctx) == "table" and type(ctx.out) == "function" then
@@ -101,7 +104,119 @@ local function _printSummary(ctx, svc)
     end
 end
 
-function M.dispatch(ctx, svc, sub, arg)
+local function _isArrayLike(t)
+    if type(t) ~= "table" then return false end
+    local n = #t
+    if n == 0 then return false end
+    for i = 1, n do
+        if t[i] == nil then return false end
+    end
+    return true
+end
+
+local function _parseTokens(tokens)
+    if not (_isArrayLike(tokens) and tostring(tokens[1] or "") == "dwscorestore") then
+        return "", ""
+    end
+    local sub = tostring(tokens[2] or "")
+    local arg = tostring(tokens[3] or "")
+    return sub, arg
+end
+
+local function _safeRequire(modName)
+    local ok, mod = pcall(require, modName)
+    if ok and type(mod) == "table" then
+        return true, mod, nil
+    end
+    return false, nil, tostring(mod)
+end
+
+local function _looksLikeScoreStoreService(svc)
+    if type(svc) ~= "table" then return false end
+    if type(svc.printSummary) == "function" then return true end
+    if type(svc.configurePersistence) == "function" then return true end
+    if type(svc.ingestFixture) == "function" then return true end
+    if type(svc.clear) == "function" then return true end
+    if type(svc.wipe) == "function" then return true end
+    return false
+end
+
+local function _resolveSvcFromKit(kit)
+    if type(kit) ~= "table" then return nil end
+
+    if _looksLikeScoreStoreService(kit.scoreStore) then
+        return kit.scoreStore
+    end
+
+    if type(kit.services) == "table" and _looksLikeScoreStoreService(kit.services.scoreStore) then
+        return kit.services.scoreStore
+    end
+
+    if type(kit.getScoreStoreService) == "function" then
+        local ok, svc = pcall(kit.getScoreStoreService)
+        if ok and _looksLikeScoreStoreService(svc) then
+            return svc
+        end
+    end
+
+    return nil
+end
+
+local function _resolveScoreStoreService(ctx, svcOrKit)
+    if _looksLikeScoreStoreService(svcOrKit) then
+        return svcOrKit
+    end
+
+    local fromKit = _resolveSvcFromKit(svcOrKit)
+    if _looksLikeScoreStoreService(fromKit) then
+        return fromKit
+    end
+
+    if type(ctx) == "table" and type(ctx.getScoreStoreService) == "function" then
+        local ok, svc = pcall(ctx.getScoreStoreService)
+        if ok and _looksLikeScoreStoreService(svc) then
+            return svc
+        end
+    end
+
+    local okS, S = _safeRequire("dwkit.services.score_store_service")
+    if okS and _looksLikeScoreStoreService(S) then
+        return S
+    end
+
+    return nil
+end
+
+function M.dispatch(a1, a2, a3, a4)
+    local ctx = nil
+    local svc = nil
+    local sub = ""
+    local arg = ""
+
+    -- dispatch(tokens)
+    if _isArrayLike(a1) and tostring(a1[1] or "") == "dwscorestore" then
+        sub, arg = _parseTokens(a1)
+        ctx = nil
+        svc = _resolveScoreStoreService(nil, nil)
+    else
+        ctx = a1
+
+        -- dispatch(ctx, tokens)
+        if _isArrayLike(a2) and tostring(a2[1] or "") == "dwscorestore" then
+            sub, arg = _parseTokens(a2)
+            svc = _resolveScoreStoreService(ctx, nil)
+            -- dispatch(ctx, kit, tokens)
+        elseif _isArrayLike(a3) and tostring(a3[1] or "") == "dwscorestore" then
+            sub, arg = _parseTokens(a3)
+            svc = _resolveScoreStoreService(ctx, a2)
+        else
+            -- legacy: dispatch(ctx, svc, sub, arg)
+            svc = _resolveScoreStoreService(ctx, a2)
+            sub = tostring(a3 or "")
+            arg = tostring(a4 or "")
+        end
+    end
+
     if type(svc) ~= "table" then
         _err(ctx, "ScoreStoreService not available. Run loader.init() first.")
         return
