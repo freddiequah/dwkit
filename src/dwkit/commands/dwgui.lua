@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwgui
 -- Owner       : Commands
--- Version     : v2026-01-19A
+-- Version     : v2026-01-26A
 -- Purpose     :
 --   - Command handler for "dwgui" (SAFE)
 --   - Delegated by dwkit.services.command_aliases
@@ -18,12 +18,15 @@
 -- Public API  :
 --   - dispatch(ctx, gs, sub, uiId, arg3)
 --   - dispatch(ctx, sub, uiId, arg3)      (gs resolved from ctx.getGuiSettings())
+--   - dispatch(ctx, tokens)               tokens={"dwgui", ...}
+--   - dispatch(ctx, kit, tokens)          kit ignored (tolerant)
+--   - dispatch(tokens)                    best-effort (requires ctx for guiSettings)
 --   - reset()                             (best-effort; no persisted state)
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-19A"
+M.VERSION = "v2026-01-26A"
 
 function M.reset()
     -- no state kept in this module (reserved for future)
@@ -70,6 +73,26 @@ local function _usage(ctx)
     _out(ctx, "  dwgui state <uiId>")
 end
 
+local function _isArrayLike(t)
+    if type(t) ~= "table" then return false end
+    local n = #t
+    if n == 0 then return false end
+    for i = 1, n do
+        if t[i] == nil then return false end
+    end
+    return true
+end
+
+local function _parseTokens(tokens)
+    if not (_isArrayLike(tokens) and tostring(tokens[1] or "") == "dwgui") then
+        return "", "", ""
+    end
+    local sub = tostring(tokens[2] or "")
+    local uiId = tostring(tokens[3] or "")
+    local arg3 = tostring(tokens[4] or "")
+    return sub, uiId, arg3
+end
+
 local function _getGuiSettingsFromCtx(ctx)
     if type(ctx) == "table" and type(ctx.getGuiSettings) == "function" then
         local ok, gs = pcall(ctx.getGuiSettings)
@@ -97,9 +120,13 @@ local function _callAny(ctx, um, fnNames, ...)
     if type(um) ~= "table" then return false end
     for _, fn in ipairs(fnNames or {}) do
         if type(um[fn]) == "function" then
+            -- best-effort: support both static and method-style calls
             local okCall, errOrNil = pcall(um[fn], ...)
             if not okCall then
-                _err(ctx, "ui_manager." .. tostring(fn) .. " failed: " .. tostring(errOrNil))
+                local okCall2, err2 = pcall(um[fn], um, ...)
+                if not okCall2 then
+                    _err(ctx, "ui_manager." .. tostring(fn) .. " failed: " .. tostring(err2 or errOrNil))
+                end
             end
             return true
         end
@@ -107,22 +134,47 @@ local function _callAny(ctx, um, fnNames, ...)
     return false
 end
 
-function M.dispatch(ctx, a, b, c, d)
-    -- Signature tolerance:
-    --   dispatch(ctx, gs, sub, uiId, arg3)
-    --   dispatch(ctx, sub, uiId, arg3)
-    local gs, sub, uiId, arg3
+function M.dispatch(...)
+    local a1, a2, a3, a4, a5 = ...
 
-    if type(a) == "table" and (type(a.status) == "function" or type(a.list) == "function") then
-        gs = a
-        sub = tostring(b or "")
-        uiId = tostring(c or "")
-        arg3 = tostring(d or "")
+    local ctx = nil
+    local gs = nil
+    local sub = ""
+    local uiId = ""
+    local arg3 = ""
+
+    -- Signature: dispatch(tokens)
+    if _isArrayLike(a1) and tostring(a1[1] or "") == "dwgui" then
+        sub, uiId, arg3 = _parseTokens(a1)
+        ctx = nil
+        gs = nil
     else
-        gs = _getGuiSettingsFromCtx(ctx)
-        sub = tostring(a or "")
-        uiId = tostring(b or "")
-        arg3 = tostring(c or "")
+        ctx = a1
+
+        -- Signature: dispatch(ctx, tokens)
+        if _isArrayLike(a2) and tostring(a2[1] or "") == "dwgui" then
+            sub, uiId, arg3 = _parseTokens(a2)
+            gs = _getGuiSettingsFromCtx(ctx)
+            -- Signature: dispatch(ctx, kit, tokens)   (kit ignored)
+        elseif _isArrayLike(a3) and tostring(a3[1] or "") == "dwgui" then
+            sub, uiId, arg3 = _parseTokens(a3)
+            gs = _getGuiSettingsFromCtx(ctx)
+        else
+            -- Legacy signatures:
+            --   dispatch(ctx, gs, sub, uiId, arg3)
+            --   dispatch(ctx, sub, uiId, arg3)
+            if type(a2) == "table" and (type(a2.status) == "function" or type(a2.list) == "function") then
+                gs = a2
+                sub = tostring(a3 or "")
+                uiId = tostring(a4 or "")
+                arg3 = tostring(a5 or "")
+            else
+                gs = _getGuiSettingsFromCtx(ctx)
+                sub = tostring(a2 or "")
+                uiId = tostring(a3 or "")
+                arg3 = tostring(a4 or "")
+            end
+        end
     end
 
     if type(gs) ~= "table" then
@@ -156,8 +208,11 @@ function M.dispatch(ctx, a, b, c, d)
                     local en = (type(v) == "table" and v.enabled == true) and "ON" or "OFF"
                     local vis = "(unset)"
                     if type(v) == "table" then
-                        if v.visible == true then vis = "ON"
-                        elseif v.visible == false then vis = "OFF" end
+                        if v.visible == true then
+                            vis = "ON"
+                        elseif v.visible == false then
+                            vis = "OFF"
+                        end
                     end
                     _out(ctx, "  - " .. tostring(k) .. "  enabled=" .. en .. "  visible=" .. vis)
                 end

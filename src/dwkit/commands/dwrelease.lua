@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwrelease
 -- Owner       : Commands
--- Version     : v2026-01-25A
+-- Version     : v2026-01-26A
 -- Purpose     :
 --   - Handler for "dwrelease" command surface.
 --   - SAFE: prints a release workflow checklist (manual steps only).
@@ -9,11 +9,14 @@
 --
 -- Public API  :
 --   - dispatch(ctx, kit) -> boolean ok, string|nil err
+--   - dispatch(ctx, tokens) -> boolean ok, string|nil err         tokens={"dwrelease", ...}
+--   - dispatch(ctx, kit, tokens) -> boolean ok, string|nil err
+--   - dispatch(tokens) -> boolean ok, string|nil err
 --   - reset() -> nil
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-01-25A"
+M.VERSION = "v2026-01-26A"
 
 local function _fallbackOut(line)
   line = tostring(line or "")
@@ -65,7 +68,40 @@ local function _tryDispatch(C, modName, ...)
   return true
 end
 
-function M.dispatch(ctx, kit)
+local function _isArrayLike(t)
+  if type(t) ~= "table" then return false end
+  local n = #t
+  if n == 0 then return false end
+  for i = 1, n do
+    if t[i] == nil then return false end
+  end
+  return true
+end
+
+function M.dispatch(...)
+  local a1, a2, a3 = ...
+
+  local ctx = nil
+  local kit = nil
+
+  -- dispatch(tokens)
+  if _isArrayLike(a1) and tostring(a1[1] or "") == "dwrelease" then
+    ctx = nil
+    kit = nil
+  else
+    ctx = a1
+    -- dispatch(ctx, tokens)
+    if _isArrayLike(a2) and tostring(a2[1] or "") == "dwrelease" then
+      kit = nil
+      -- dispatch(ctx, kit, tokens)
+    elseif _isArrayLike(a3) and tostring(a3[1] or "") == "dwrelease" then
+      kit = a2
+    else
+      -- dispatch(ctx, kit)
+      kit = a2
+    end
+  end
+
   local C = _getCtx(ctx)
   local K = _resolveKit(kit)
 
