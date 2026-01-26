@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-20A
+-- Version     : v2026-01-26B
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -16,10 +16,13 @@
 --   - listAll(opts?)  -> table list
 --   - listSafe(opts?) -> table list
 --   - listGame(opts?) -> table list
+--   - getAllNames()  -> string[] (SAFE, no output)
+--   - getSafeNames() -> string[] (SAFE, no output)
+--   - getGameNames() -> string[] (SAFE, no output)
 --   - help(name, opts?) -> boolean ok, table|nil cmdOrNil, string|nil errOrNil
 --   - register(def) -> boolean ok, string|nil errOrNil   (runtime-only, not persisted)
 --   - getAll() -> table copy (name -> def)
---   - getRegistryVersion() -> string   (docs registry version, e.g. v2.9)
+--   - getRegistryVersion() -> string   (docs registry version, e.g. v3.1)
 --   - getModuleVersion()   -> string   (code module version tag)
 --   - toMarkdown(opts?) -> string   (docs copy helper; SAFE)
 --   - validateAll(opts?) -> boolean pass, table issues
@@ -38,7 +41,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-20A"
+M.VERSION = "v2026-01-26B"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -61,7 +64,7 @@ end
 -- - M.VERSION is the code module version tag (calendar style)
 -- -------------------------
 local REG = {
-    version = "v2.9",
+    version = "v3.1",
     moduleVersion = M.VERSION,
     commands = {
         dwid = {
@@ -129,7 +132,7 @@ local REG = {
         dwversion = {
             command     = "dwversion",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dwversion",
             description = "Prints consolidated DWKit module versions + runtime baseline (SAFE diagnostics).",
             syntax      = "dwversion",
             examples    = {
@@ -148,7 +151,7 @@ local REG = {
         dwdiag = {
             command     = "dwdiag",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dwdiag",
             description = "Prints a one-shot diagnostic bundle (dwversion + dwboot + dwservices + event diag status).",
             syntax      = "dwdiag",
             examples    = {
@@ -167,7 +170,7 @@ local REG = {
         dwgui = {
             command     = "dwgui",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dwgui",
             description = "Manage GUI settings flags (enabled/visible) per UI id (SAFE config only; no UI actions).",
             syntax      = "dwgui [status|list|enable <uiId>|disable <uiId>|visible <uiId> on|off]",
             examples    = {
@@ -193,7 +196,7 @@ local REG = {
         dwevents = {
             command     = "dwevents",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dwevents",
             description = "Lists registered DWKit events (SAFE) or prints Markdown export (SAFE).",
             syntax      = "dwevents [md]",
             examples    = {
@@ -213,7 +216,7 @@ local REG = {
         dwevent = {
             command     = "dwevent",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dwevent",
             description = "Shows detailed help for one DWKit event (SAFE).",
             syntax      = "dwevent <EventName>",
             examples    = {
@@ -232,7 +235,7 @@ local REG = {
         dweventtap = {
             command     = "dweventtap",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dweventtap",
             description =
             "Controls a SAFE event bus tap (observe all events) and a bounded in-memory log (SAFE diagnostics).",
             syntax      = "dweventtap [on|off|status|show|clear] [n]",
@@ -257,7 +260,7 @@ local REG = {
         dweventsub = {
             command     = "dweventsub",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dweventsub",
             description =
             "Subscribes (SAFE) to one DWKit event and records occurrences into the bounded log (SAFE diagnostics).",
             syntax      = "dweventsub <EventName>",
@@ -279,7 +282,7 @@ local REG = {
         dweventunsub = {
             command     = "dweventunsub",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dweventunsub",
             description = "Unsubscribes (SAFE) from one DWKit event or all subscriptions (SAFE diagnostics).",
             syntax      = "dweventunsub <EventName|all>",
             examples    = {
@@ -299,7 +302,7 @@ local REG = {
         dweventlog = {
             command     = "dweventlog",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dweventlog",
             description = "Prints the bounded event diagnostics log (SAFE).",
             syntax      = "dweventlog [n]",
             examples    = {
@@ -319,7 +322,7 @@ local REG = {
         dwboot = {
             command     = "dwboot",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dwboot",
             description = "Prints DWKit boot wiring/health status (SAFE diagnostics).",
             syntax      = "dwboot",
             examples    = {
@@ -338,7 +341,7 @@ local REG = {
         dwservices = {
             command     = "dwservices",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dwservices",
             description = "Lists attached DWKit services + versions + load errors (SAFE diagnostics).",
             syntax      = "dwservices",
             examples    = {
@@ -356,7 +359,7 @@ local REG = {
         dwpresence = {
             command     = "dwpresence",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dwpresence",
             description = "Prints PresenceService snapshot (best-effort, SAFE).",
             syntax      = "dwpresence",
             examples    = {
@@ -374,7 +377,7 @@ local REG = {
         dwwho = {
             command     = "dwwho",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dwwho",
             description = "Shows and manages WhoStore state (SAFE diagnostics and fixtures; no gameplay commands).",
             syntax      = "dwwho",
             examples    = {
@@ -393,7 +396,7 @@ local REG = {
         dwroom = {
             command     = "dwroom",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dwroom",
             description =
             "Shows and manages RoomEntities state (SAFE diagnostics/fixtures/refresh; no gameplay commands).",
             syntax      = "dwroom",
@@ -413,7 +416,7 @@ local REG = {
         dwactions = {
             command     = "dwactions",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dwactions",
             description = "Prints ActionModelService snapshot (best-effort, SAFE).",
             syntax      = "dwactions",
             examples    = {
@@ -431,7 +434,7 @@ local REG = {
         dwskills = {
             command     = "dwskills",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dwskills",
             description = "Prints SkillRegistryService snapshot (best-effort, SAFE).",
             syntax      = "dwskills",
             examples    = {
@@ -449,7 +452,7 @@ local REG = {
         dwscorestore = {
             command     = "dwscorestore",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dwscorestore",
             description = "Shows and manages ScoreStoreService state + persistence (SAFE).",
             syntax      =
             "dwscorestore [status|persist on|off|status|fixture [basic]|clear|wipe [disk]|reset [disk]]  (or: lua DWKit.services.scoreStoreService.printSummary())",
@@ -475,7 +478,7 @@ local REG = {
         dwcommands = {
             command     = "dwcommands",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dwcommands",
             description = "Lists registered DWKit commands (ALL, SAFE, GAME) or prints Markdown export (SAFE).",
             syntax      = "dwcommands [safe|game|md]",
             examples    = {
@@ -499,7 +502,7 @@ local REG = {
         dwhelp = {
             command     = "dwhelp",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dwhelp",
             description = "Shows detailed help for one DWKit command.",
             syntax      = "dwhelp <cmd>",
             examples    = {
@@ -518,7 +521,7 @@ local REG = {
         dwrelease = {
             command     = "dwrelease",
             aliases     = {},
-            ownerModule = "dwkit.services.command_aliases",
+            ownerModule = "dwkit.commands.dwrelease",
             description = "Prints a bounded release checklist + version pointers + tag workflow reminder (SAFE).",
             syntax      = "dwrelease",
             examples    = {
@@ -656,6 +659,18 @@ local function _collectList(filterFn)
     end
     table.sort(list, function(a, b) return tostring(a.command) < tostring(b.command) end)
     return list
+end
+
+-- NEW: name-only helpers (SAFE, no output)
+local function _collectNames(filterFn)
+    local names = {}
+    for _, def in pairs(REG.commands) do
+        if not filterFn or filterFn(def) then
+            names[#names + 1] = tostring(def.command or "")
+        end
+    end
+    table.sort(names, function(a, b) return tostring(a) < tostring(b) end)
+    return names
 end
 
 -- -------------------------
@@ -798,6 +813,19 @@ function M.getAll()
         out[name] = _copyDef(def)
     end
     return out
+end
+
+-- NEW: name-only helpers (SAFE, no output)
+function M.getAllNames()
+    return _collectNames(nil)
+end
+
+function M.getSafeNames()
+    return _collectNames(function(def) return def.sendsToGame == false end)
+end
+
+function M.getGameNames()
+    return _collectNames(function(def) return def.sendsToGame == true end)
 end
 
 local function _printList(title, list)

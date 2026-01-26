@@ -1,168 +1,20 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-25D
+-- Version     : v2026-01-26F
 -- Purpose     :
---   - Install SAFE Mudlet aliases for command discovery/help:
---       * dwcommands [safe|game|md]
---       * dwhelp <cmd>
---       * dwtest [quiet|ui|room|who|verbose|v] [verbose|v]
---       * dwinfo
---       * dwid
---       * dwversion
---       * dwdiag
---       * dwgui
---       * dwevents [md]
---       * dwevent <EventName>
---       * dwboot
---       * dwservices
---       * dwpresence
---       * dwroom
---       * dwwho
---       * dwactions
---       * dwskills
---       * dwscorestore [status|persist <on|off|status>|fixture [basic]|clear|wipe [disk]|reset [disk]]
---       * dweventtap [on|off|status|show|clear] [n]
---       * dweventsub <EventName>
---       * dweventunsub <EventName|all>
---       * dweventlog [n]
---       * dwrelease
---   - Calls into DWKit.cmd (dwkit.bus.command_registry), DWKit.test, runtimeBaseline, identity,
---     event registry surface, and SAFE spine services (presence/action/skills/scoreStore).
---   - DOES NOT start timers or automation (except bounded capture sessions for refresh commands).
+--   - Install SAFE Mudlet aliases for DWKit commands.
+--   - AUTO-GENERATES SAFE aliases from the Command Registry (best-effort).
+--   - Keeps only a small set of "special-case" aliases that require:
+--       * service injection (dwwho/dwroom)
+--       * module state injection (event diag: dweventtap/sub/unsub/log)
+--       * router dispatch (dwgui/dwscorestore/dwrelease)
+--       * event diag bundle access (dwdiag)
 --
 -- IMPORTANT:
 --   - tempAlias objects persist in Mudlet even if this module is reloaded via package.loaded=nil.
 --   - This module stores alias ids in _G.DWKit._commandAliasesAliasIds and cleans them up on install()
 --     and uninstall(), preventing duplicate alias execution/output across reloads.
---
--- Fixes (v2026-01-19F):
---   - uninstall() always attempts persisted alias cleanup even if STATE.installed=false (reload-safe).
---   - WhoStore service resolution is STRICT: do not return partial/stale objects (avoids "unknown API").
---   - dwwho refresh uses _G.send or _G.sendAll explicitly (more robust across environments).
---   - who refresh ingest uses best-effort ingest (ingestWhoText OR ingestWhoLines).
---
--- Fixes (v2026-01-19G):
---   - dwwho: DISABLE who_diag delegation by default (avoids false "ingestWhoText not available" errors).
---     Inline fallback handler is canonical until who_diag API contract is proven compatible.
---   - refresh: error message references send/sendAll (matches resolver).
---
--- Fixes (v2026-01-19H):
---   - dwroom refresh added (GAME): sends 'look', captures output, ingests via RoomEntitiesService.ingestLookText.
---   - Capture end detection uses prompt-like regex (best-effort) + timeout fallback.
---   - uninstall() also cancels pending room capture sessions (reload-safe).
---
--- Phase 1 Split (v2026-01-19I):
---   - Extracted dwroom + dwwho command handlers into:
---       * src/dwkit/commands/dwroom.lua
---       * src/dwkit/commands/dwwho.lua
---   - command_aliases now delegates to those handlers (keeps alias patterns stable).
---
--- Phase 2 Split (v2026-01-19J):
---   - dwgui handler now delegates to src/dwkit/commands/dwgui.lua when available,
---     with a safe inline fallback if the module signature differs or is missing.
---
--- Fixes (v2026-01-19K):
---   - dwgui alias parsing no longer relies on optional capture groups (Mudlet matches[] can be stale).
---     Instead, sub/uiId/arg3 are derived from tokenizing matches[1] (the full line).
---
--- Phase 3 Split (v2026-01-20A):
---   - dwboot alias now delegates to src/dwkit/commands/dwboot.lua when available,
---     with a safe inline fallback to the legacy boot health printer.
---
--- Phase 4 Split (v2026-01-20B):
---   - dwcommands + dwhelp aliases now delegate to:
---       * src/dwkit/commands/dwcommands.lua
---       * src/dwkit/commands/dwhelp.lua
---     with safe inline fallback to the legacy alias implementation.
---
--- Fixes (v2026-01-20C):
---   - install() is idempotent: if already installed, it returns early BEFORE cleaning up persisted
---     alias ids. This prevents an "install nothing" state if install() is called twice.
---
--- Phase 5 Split (v2026-01-20D):
---   - dwtest alias now delegates to src/dwkit/commands/dwtest.lua when available,
---     with safe inline fallback to the legacy dwtest handler.
---   - dwtest parsing no longer relies on optional capture groups; tokenizes matches[1] to avoid stale values.
---
--- Fixes (v2026-01-20E):
---   - dwtest alias no longer hard-fails due to alias callback environment quirks:
---       * dwtest ui runs ui_validator directly (does not depend on DWKit.test.run surface)
---       * dwtest / dwtest quiet runs DWKit.test.run when available, else falls back to self_test_runner.run()
---   - Added _getKit() resolver to reliably reference DWKit inside alias callbacks
---
--- Phase 6 Split (v2026-01-20F):
---   - dwid / dwinfo / dwversion now delegate to:
---       * src/dwkit/commands/dwid.lua
---       * src/dwkit/commands/dwinfo.lua
---       * src/dwkit/commands/dwversion.lua
---     with safe inline fallbacks.
---
--- Phase 7 Split (v2026-01-20G):
---   - dwevents / dwevent now delegate to:
---       * src/dwkit/commands/dwevents.lua
---       * src/dwkit/commands/dwevent.lua
---     with safe inline fallbacks.
---
--- Fixes (v2026-01-20H):
---   - dwevent parsing updated to match Phase 7 patch exactly: uses matches[2] (capture group),
---     rather than tokenizing matches[1].
---
--- Fixes (v2026-01-21B):
---   - dwwho alias now captures and forwards optional arg (e.g. "dwwho fixture party").
---     Previously pattern ended at subcommand and dropped the 2nd token, causing fixture to default to "basic".
---
--- Fixes (v2026-01-21D):
---   - dwwho + dwroom aliases no longer rely on capture groups (Mudlet matches[] can be stale).
---     Tokenizes matches[1] (full line) to derive sub + arg string.
---   - dwwho set now supports multi-token names: "dwwho set Bob Alice" becomes "Bob,Alice".
---
--- Fixes (v2026-01-21F):
---   - Tokenization now uses matches[0] when available (full match line).
---     This fixes cases where capture groups exist and matches[1] is NOT the full line,
---     causing args to be dropped (e.g. "dwwho fixture party" / "dwwho set Bob Alice").
---
--- Fixes (v2026-01-23A):
---   - dwtest now supports suite-style targets: "dwtest room" / "dwtest who" (plus optional "verbose|v").
---   - dwtest pattern is now tolerant and token-based (prevents stale capture group issues and supports new targets).
---
--- Fixes (v2026-01-23B):
---   - dwtest now self-heals if invoked before DWKit.test is wired:
---       * best-effort calls loader.init() internally, then retries DWKit.test.run / self_test_runner.run
---   - _has* helpers now prefer _getKit() to avoid false negatives in alias callback environments.
---
--- Fixes (v2026-01-23C):
---   - dwtest delegation now respects return value from dwkit.commands.dwtest.dispatch.
---     (Previously, any successful pcall would return early even if dispatch returned false.)
---
--- Phase 8 Split (v2026-01-24A):
---   - dwservices alias now delegates to src/dwkit/commands/dwservices.lua when available,
---     with safe inline fallback to legacy services health printer.
---
--- Changed (v2026-01-24C):
---   - Removed dwinit/dwalias alias ownership from this module.
---   - dwinit/dwalias are owned by dwkit.services.alias_control to prevent double-fire.
---
--- Phase 9 Split (v2026-01-25A):
---   - dwpresence / dwactions / dwskills / dwdiag / dwrelease now delegate to:
---       * src/dwkit/commands/dwpresence.lua
---       * src/dwkit/commands/dwactions.lua
---       * src/dwkit/commands/dwskills.lua
---       * src/dwkit/commands/dwdiag.lua
---       * src/dwkit/commands/dwrelease.lua
---     with safe inline fallbacks preserved.
---
--- Phase 10 Split (v2026-01-25B):
---   - dwscorestore now delegates to:
---       * src/dwkit/commands/dwscorestore.lua
---     with safe inline fallback preserved.
---
--- Fixes (v2026-01-25C):
---   - dwhelp now matches zero-args (prints usage) to prevent falling through to MUD "Huh?!?"
---
--- Slim (v2026-01-25D):
---   - Slimmed uninstall() module reset boilerplate into a loop (no behavior changes).
---   - Slimmed getState() and uninstall() alias id list building to avoid repeated boilerplate (no behavior changes).
 --
 -- Public API  :
 --   - install(opts?) -> boolean ok, string|nil err
@@ -173,69 +25,17 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-25D"
+M.VERSION = "v2026-01-26F"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
-local _ALIAS_KEYS = {
-    "dwcommands",
-    "dwhelp",
-    "dwtest",
-    "dwinfo",
-    "dwid",
-    "dwversion",
-    "dwdiag",
-    "dwgui",
-    "dwevents",
-    "dwevent",
-    "dwboot",
-
-    "dwservices",
-    "dwpresence",
-    "dwroom",
-    "dwwho",
-    "dwactions",
-    "dwskills",
-    "dwscorestore",
-
-    "dweventtap",
-    "dweventsub",
-    "dweventunsub",
-    "dweventlog",
-
-    "dwrelease",
-}
-
 local STATE = {
     installed = false,
-    aliasIds = {
-        dwcommands   = nil,
-        dwhelp       = nil,
-        dwtest       = nil,
-        dwinfo       = nil,
-        dwid         = nil,
-        dwversion    = nil,
-        dwdiag       = nil,
-        dwgui        = nil,
-        dwevents     = nil,
-        dwevent      = nil,
-        dwboot       = nil,
 
-        dwservices   = nil,
-        dwpresence   = nil,
-        dwroom       = nil,
-        dwwho        = nil,
-        dwactions    = nil,
-        dwskills     = nil,
-        dwscorestore = nil,
+    -- aliasIds is dynamic (auto-generated):
+    --   { [cmdName] = <aliasId>, ... }
+    aliasIds = {},
 
-        dweventtap   = nil,
-        dweventsub   = nil,
-        dweventunsub = nil,
-        dweventlog   = nil,
-
-        dwrelease    = nil,
-    },
     lastError = nil,
 
     -- Event diagnostics harness (SAFE; manual)
@@ -300,6 +100,19 @@ local function _getFullMatchLine()
     return ""
 end
 
+local function _tokenize(line)
+    line = tostring(line or "")
+    local tokens = {}
+    for w in line:gmatch("%S+") do
+        tokens[#tokens + 1] = w
+    end
+    return tokens
+end
+
+local function _tokenizeFromMatches()
+    return _tokenize(_getFullMatchLine())
+end
+
 local function _safeRequire(modName)
     local ok, mod = pcall(require, modName)
     if ok then return true, mod end
@@ -347,28 +160,6 @@ local function _hasCmd()
     return type(kit) == "table" and type(kit.cmd) == "table"
 end
 
-local function _hasTest()
-    local kit = _getKit()
-    return type(kit) == "table"
-        and type(kit.test) == "table"
-        and type(kit.test.run) == "function"
-end
-
-local function _hasBaseline()
-    local kit = _getKit()
-    return type(kit) == "table"
-        and type(kit.core) == "table"
-        and type(kit.core.runtimeBaseline) == "table"
-        and type(kit.core.runtimeBaseline.printInfo) == "function"
-end
-
-local function _hasIdentity()
-    local kit = _getKit()
-    return type(kit) == "table"
-        and type(kit.core) == "table"
-        and type(kit.core.identity) == "table"
-end
-
 local function _hasEventRegistry()
     local kit = _getKit()
     return type(kit) == "table"
@@ -384,12 +175,6 @@ local function _hasEventBus()
         and type(kit.bus.eventBus) == "table"
 end
 
-local function _hasServices()
-    local kit = _getKit()
-    return type(kit) == "table"
-        and type(kit.services) == "table"
-end
-
 local function _getService(name)
     local kit = _getKit()
     if type(kit) ~= "table" or type(kit.services) ~= "table" then return nil end
@@ -398,21 +183,143 @@ local function _getService(name)
     return nil
 end
 
--- ------------------------------------------------------------
--- SAFE deferral helper (avoid killing currently-running alias mid-callback)
--- ------------------------------------------------------------
-local function _defer(fn)
-    if type(fn) ~= "function" then return end
-    if type(tempTimer) == "function" then
-        pcall(tempTimer, 0, fn)
-        return
-    end
-    -- fallback: immediate (best-effort)
-    pcall(fn)
+local function _sortedKeys(t)
+    local keys = {}
+    if type(t) ~= "table" then return keys end
+    for k, _ in pairs(t) do keys[#keys + 1] = k end
+    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    return keys
 end
 
 -- ------------------------------------------------------------
--- RoomEntities helpers (SAFE manual surface)
+-- Legacy printers + pp helpers (extracted)
+-- ------------------------------------------------------------
+local function _getLegacyBestEffort()
+    local ok, mod = _safeRequire("dwkit.commands.alias_legacy")
+    if ok and type(mod) == "table" then return mod end
+    return nil
+end
+
+local function _makeLegacyCtx()
+    return {
+        out = function(line) _out(line) end,
+        err = function(msg) _err(msg) end,
+        safeRequire = function(name) return _safeRequire(name) end,
+        callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
+        getKit = function() return _getKit() end,
+        sortedKeys = function(t) return _sortedKeys(t) end,
+    }
+end
+
+local function _legacyPpValue(v)
+    local L = _getLegacyBestEffort()
+    if L and type(L.ppValue) == "function" then
+        return L.ppValue(v)
+    end
+    return tostring(v)
+end
+
+local function _legacyPpTable(t, opts)
+    local L = _getLegacyBestEffort()
+    if L and type(L.ppTable) == "function" then
+        return L.ppTable(_makeLegacyCtx(), t, opts)
+    end
+    _out(tostring(t))
+end
+
+local function _legacyPrintIdentity()
+    local L = _getLegacyBestEffort()
+    if L and type(L.printIdentity) == "function" then
+        return L.printIdentity(_makeLegacyCtx())
+    end
+    _err("alias_legacy.printIdentity not available")
+end
+
+local function _legacyPrintVersionSummary()
+    local L = _getLegacyBestEffort()
+    if L and type(L.printVersionSummary) == "function" then
+        return L.printVersionSummary(_makeLegacyCtx(), M.VERSION)
+    end
+    _err("alias_legacy.printVersionSummary not available")
+end
+
+local function _legacyPrintBootHealth()
+    local L = _getLegacyBestEffort()
+    if L and type(L.printBootHealth) == "function" then
+        return L.printBootHealth(_makeLegacyCtx())
+    end
+    _err("alias_legacy.printBootHealth not available")
+end
+
+local function _legacyPrintServicesHealth()
+    local L = _getLegacyBestEffort()
+    if L and type(L.printServicesHealth) == "function" then
+        return L.printServicesHealth(_makeLegacyCtx())
+    end
+    _err("alias_legacy.printServicesHealth not available")
+end
+
+local function _legacyPrintServiceSnapshot(label, svcName)
+    local svc = _getService(svcName)
+    local L = _getLegacyBestEffort()
+    if L and type(L.printServiceSnapshot) == "function" then
+        return L.printServiceSnapshot(_makeLegacyCtx(), label, svc)
+    end
+    _err("alias_legacy.printServiceSnapshot not available")
+end
+
+-- ------------------------------------------------------------
+-- Clipboard helper
+-- ------------------------------------------------------------
+local function _getClipboardTextBestEffort()
+    if type(getClipboardText) == "function" then
+        local ok, t = pcall(getClipboardText)
+        if ok and type(t) == "string" then
+            return t
+        end
+    end
+    return nil
+end
+
+-- ------------------------------------------------------------
+-- Capture helpers (Who + Room)
+-- ------------------------------------------------------------
+local function _killTriggerBestEffort(id)
+    if not id then return end
+    if type(killTrigger) ~= "function" then return end
+    pcall(killTrigger, id)
+end
+
+local function _killTimerBestEffort(id)
+    if not id then return end
+    if type(killTimer) ~= "function" then return end
+    pcall(killTimer, id)
+end
+
+local function _resolveSendFn()
+    if type(_G.send) == "function" then return _G.send end
+    if type(_G.sendAll) == "function" then return _G.sendAll end
+    return nil
+end
+
+-- Best-effort prompt detector for Deathwish style prompts
+local function _looksLikePrompt(line)
+    line = tostring(line or "")
+    if line == "" then return false end
+
+    if line:match("^%s*<?%d+%(%d+%)Hp") then
+        return true
+    end
+
+    if line:match(">%s*$") and line:match("Hp") and line:match("Mp") then
+        return true
+    end
+
+    return false
+end
+
+-- ------------------------------------------------------------
+-- WhoStore / RoomEntities service resolvers (best-effort)
 -- ------------------------------------------------------------
 local function _getRoomEntitiesServiceBestEffort()
     local svc = _getService("roomEntitiesService")
@@ -422,9 +329,6 @@ local function _getRoomEntitiesServiceBestEffort()
     return nil
 end
 
--- ------------------------------------------------------------
--- WhoStore helpers (SAFE manual surface)
--- ------------------------------------------------------------
 local function _looksLikeWhoStoreService(svc)
     if type(svc) ~= "table" then return false end
     local hasState = (type(svc.getState) == "function")
@@ -491,14 +395,6 @@ local function _whoCountFromState(state)
     return {
         players = cnt(state.players),
     }
-end
-
-local function _sortedKeys(t)
-    local keys = {}
-    if type(t) ~= "table" then return keys end
-    for k, _ in pairs(t) do keys[#keys + 1] = k end
-    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
-    return keys
 end
 
 local function _printWhoStatus(svc)
@@ -576,60 +472,8 @@ local function _printRoomEntitiesStatus(svc)
     _out("  unknown=" .. tostring(c.unknown))
 end
 
-local function _getClipboardTextBestEffort()
-    if type(getClipboardText) == "function" then
-        local ok, t = pcall(getClipboardText)
-        if ok and type(t) == "string" then
-            return t
-        end
-    end
-    return nil
-end
-
 -- ------------------------------------------------------------
--- Capture helpers (Who + Room)
--- ------------------------------------------------------------
-local function _killTriggerBestEffort(id)
-    if not id then return end
-    if type(killTrigger) ~= "function" then return end
-    pcall(killTrigger, id)
-end
-
-local function _killTimerBestEffort(id)
-    if not id then return end
-    if type(killTimer) ~= "function" then return end
-    pcall(killTimer, id)
-end
-
-local function _resolveSendFn()
-    if type(_G.send) == "function" then return _G.send end
-    if type(_G.sendAll) == "function" then return _G.sendAll end
-    return nil
-end
-
--- Best-effort prompt detector for Deathwish style prompts like:
---   <716(716)Hp 100(100)Mp 82(82)Mv>
--- or:
---   716(716)Hp 100(100)Mp 82(82)Mv>
-local function _looksLikePrompt(line)
-    line = tostring(line or "")
-    if line == "" then return false end
-
-    -- optional leading '<', then digits, then "(digits)Hp"
-    if line:match("^%s*<?%d+%(%d+%)Hp") then
-        return true
-    end
-
-    -- fallback: common prompt closer
-    if line:match(">%s*$") and line:match("Hp") and line:match("Mp") then
-        return true
-    end
-
-    return false
-end
-
--- ------------------------------------------------------------
--- Who capture (manual state; legacy kept for compatibility)
+-- Who/Room capture (manual state; legacy kept for compatibility)
 -- ------------------------------------------------------------
 local function _whoCaptureReset()
     STATE.whoCapture.active = false
@@ -644,9 +488,6 @@ local function _whoCaptureReset()
     STATE.whoCapture.timer = nil
 end
 
--- ------------------------------------------------------------
--- Room capture (manual state; legacy kept for compatibility)
--- ------------------------------------------------------------
 local function _roomCaptureReset()
     STATE.roomCapture.active = false
     STATE.roomCapture.started = false
@@ -661,409 +502,82 @@ local function _roomCaptureReset()
     STATE.roomCapture.timer = nil
 end
 
-local function _isArrayLike(t)
-    if type(t) ~= "table" then return false end
-    local n = #t
-    if n == 0 then return false end
-    for i = 1, n do
-        if t[i] == nil then return false end
-    end
-    return true
-end
-
-local function _countAnyTable(t)
-    if type(t) ~= "table" then return 0 end
-    if _isArrayLike(t) then return #t end
-    local n = 0
-    for _ in pairs(t) do n = n + 1 end
-    return n
-end
-
-local function _ppValue(v)
-    local tv = type(v)
-    if tv == "string" then
-        local s = v
-        if #s > 120 then s = s:sub(1, 120) .. "..." end
-        return string.format("%q", s)
-    elseif tv == "number" or tv == "boolean" then
-        return tostring(v)
-    elseif tv == "nil" then
-        return "nil"
-    elseif tv == "table" then
-        return "{...}"
-    else
-        return "<" .. tv .. ">"
-    end
-end
-
-local function _ppTable(t, opts)
-    opts = opts or {}
-    local maxDepth = (type(opts.maxDepth) == "number") and opts.maxDepth or 2
-    local maxItems = (type(opts.maxItems) == "number") and opts.maxItems or 30
-
-    local seen = {}
-
-    local function walk(x, depth, prefix)
-        if type(x) ~= "table" then
-            _out(prefix .. _ppValue(x))
-            return
-        end
-        if seen[x] then
-            _out(prefix .. "{<cycle>}")
-            return
-        end
-        seen[x] = true
-
-        local count = _countAnyTable(x)
-        _out(prefix .. "{ table, count=" .. tostring(count) .. " }")
-
-        if depth >= maxDepth then
-            return
-        end
-
-        if _isArrayLike(x) then
-            local n = #x
-            local limit = math.min(n, maxItems)
-            for i = 1, limit do
-                local v = x[i]
-                if type(v) == "table" then
-                    _out(prefix .. "  [" .. tostring(i) .. "] =")
-                    walk(v, depth + 1, prefix .. "    ")
-                else
-                    _out(prefix .. "  [" .. tostring(i) .. "] = " .. _ppValue(v))
-                end
-            end
-            if n > limit then
-                _out(prefix .. "  ... (" .. tostring(n - limit) .. " more)")
-            end
-            return
-        end
-
-        local keys = _sortedKeys(x)
-        local limit = math.min(#keys, maxItems)
-        for i = 1, limit do
-            local k = keys[i]
-            local v = x[k]
-            if type(v) == "table" then
-                _out(prefix .. "  " .. tostring(k) .. " =")
-                walk(v, depth + 1, prefix .. "    ")
-            else
-                _out(prefix .. "  " .. tostring(k) .. " = " .. _ppValue(v))
-            end
-        end
-        if #keys > limit then
-            _out(prefix .. "  ... (" .. tostring(#keys - limit) .. " more keys)")
-        end
-    end
-
-    walk(t, 0, "")
-end
-
-local function _printIdentity()
-    if not _hasIdentity() then
-        _err("DWKit.core.identity not available. Run loader.init() first.")
-        return
-    end
-
+-- ------------------------------------------------------------
+-- Event diagnostics helpers (STATE.eventDiag injection)
+-- ------------------------------------------------------------
+local function _getEventBusBestEffort()
     local kit = _getKit()
-    local I = kit.core.identity
-    local idVersion = tostring(I.VERSION or "unknown")
-    local pkgId     = tostring(I.packageId or "unknown")
-    local evp       = tostring(I.eventPrefix or "unknown")
-    local df        = tostring(I.dataFolderName or "unknown")
-    local vts       = tostring(I.versionTagStyle or "unknown")
-
-    _out("[DWKit] identity=" ..
-        idVersion ..
-        " packageId=" .. pkgId .. " eventPrefix=" .. evp .. " dataFolder=" .. df .. " versionTagStyle=" .. vts)
+    if type(kit) == "table" and type(kit.bus) == "table" and type(kit.bus.eventBus) == "table" then
+        return kit.bus.eventBus
+    end
+    local ok, mod = _safeRequire("dwkit.bus.event_bus")
+    if ok and type(mod) == "table" then
+        return mod
+    end
+    return nil
 end
 
-local function _printVersionSummary()
+local function _getEventRegistryBestEffort()
     local kit = _getKit()
-    if type(kit) ~= "table" then
-        _err("DWKit global not available. Run loader.init() first.")
-        return
+    if type(kit) == "table" and type(kit.bus) == "table" and type(kit.bus.eventRegistry) == "table" then
+        return kit.bus.eventRegistry
     end
-
-    local ident = nil
-    if _hasIdentity() then
-        ident = kit.core.identity
-    else
-        local okI, modI = _safeRequire("dwkit.core.identity")
-        if okI and type(modI) == "table" then ident = modI end
+    local ok, mod = _safeRequire("dwkit.bus.event_registry")
+    if ok and type(mod) == "table" then
+        return mod
     end
-
-    local rb = nil
-    if type(kit.core) == "table" and type(kit.core.runtimeBaseline) == "table" then
-        rb = kit.core.runtimeBaseline
-    else
-        local okRB, modRB = _safeRequire("dwkit.core.runtime_baseline")
-        if okRB and type(modRB) == "table" then rb = modRB end
-    end
-
-    local cmdRegVersion = "unknown"
-    if _hasCmd() then
-        local okV, v = _callBestEffort(kit.cmd, "getRegistryVersion")
-        if okV and v then
-            cmdRegVersion = tostring(v)
-        end
-    end
-
-    local evRegVersion = "unknown"
-    if type(kit.bus) == "table" and type(kit.bus.eventRegistry) == "table" then
-        local okE, v = _callBestEffort(kit.bus.eventRegistry, "getRegistryVersion")
-        if okE and v then evRegVersion = tostring(v) end
-    else
-        local okER, modER = _safeRequire("dwkit.bus.event_registry")
-        if okER and type(modER) == "table" then
-            local okV, v = pcall(function()
-                if type(modER.getRegistryVersion) == "function" then
-                    return modER.getRegistryVersion()
-                end
-                return modER.VERSION
-            end)
-            if okV and v then evRegVersion = tostring(v) else evRegVersion = "unknown" end
-        end
-    end
-
-    local evBusVersion = "unknown"
-    local okEB, modEB = _safeRequire("dwkit.bus.event_bus")
-    if okEB and type(modEB) == "table" then
-        evBusVersion = tostring(modEB.VERSION or "unknown")
-    end
-
-    local stVersion = "unknown"
-    local okST, st = _safeRequire("dwkit.tests.self_test_runner")
-    if okST and type(st) == "table" then
-        stVersion = tostring(st.VERSION or "unknown")
-    end
-
-    local idVersion = ident and tostring(ident.VERSION or "unknown") or "unknown"
-    local rbVersion = rb and tostring(rb.VERSION or "unknown") or "unknown"
-
-    local pkgId     = ident and tostring(ident.packageId or "unknown") or "unknown"
-    local evp       = ident and tostring(ident.eventPrefix or "unknown") or "unknown"
-    local df        = ident and tostring(ident.dataFolderName or "unknown") or "unknown"
-    local vts       = ident and tostring(ident.versionTagStyle or "unknown") or "unknown"
-
-    local luaV      = "unknown"
-    local mudletV   = "unknown"
-    if rb and type(rb.getInfo) == "function" then
-        local okInfo, info = pcall(rb.getInfo)
-        if okInfo and type(info) == "table" then
-            luaV = tostring(info.luaVersion or "unknown")
-            mudletV = tostring(info.mudletVersion or "unknown")
-        end
-    end
-
-    _out("[DWKit] Version summary:")
-    _out("  identity        = " .. idVersion)
-    _out("  runtimeBaseline = " .. rbVersion)
-    _out("  selfTestRunner  = " .. stVersion)
-    _out("  commandRegistry = " .. cmdRegVersion)
-    _out("  eventRegistry   = " .. evRegVersion)
-    _out("  eventBus        = " .. evBusVersion)
-    _out("  commandAliases  = " .. tostring(M.VERSION or "unknown"))
-    _out("")
-    _out("[DWKit] Identity (locked):")
-    _out("  packageId=" .. pkgId .. " eventPrefix=" .. evp .. " dataFolder=" .. df .. " versionTagStyle=" .. vts)
-    _out("[DWKit] Runtime baseline:")
-    _out("  lua=" .. luaV .. " mudlet=" .. mudletV)
+    return nil
 end
 
-local function _yn(b) return b and "OK" or "MISSING" end
-
-local function _printBootHealth()
-    _out("[DWKit Boot] Health summary (dwboot)")
-    _out("")
-
-    local kit = _getKit()
-    if type(kit) ~= "table" then
-        _out("  DWKit global                : MISSING")
-        _out("")
-        _out("  Next step:")
-        _out("    - Run: lua local L=require(\"dwkit.loader.init\"); L.init()")
-        return
+local function _getEventDiagModuleBestEffort()
+    local ok, mod = _safeRequire("dwkit.commands.event_diag")
+    if ok and type(mod) == "table" then
+        return mod
     end
-
-    local hasCore = (type(kit.core) == "table")
-    local hasBus = (type(kit.bus) == "table")
-    local hasServices = (type(kit.services) == "table")
-
-    local hasIdentity = hasCore and (type(kit.core.identity) == "table")
-    local hasRB = hasCore and (type(kit.core.runtimeBaseline) == "table")
-    local hasCmd = (type(kit.cmd) == "table")
-    local hasCmdReg = hasBus and (type(kit.bus.commandRegistry) == "table")
-    local hasEvReg = hasBus and (type(kit.bus.eventRegistry) == "table")
-    local hasEvBus = hasBus and (type(kit.bus.eventBus) == "table")
-    local hasTest = (type(kit.test) == "table") and (type(kit.test.run) == "function")
-    local hasAliases = hasServices and (type(kit.services.commandAliases) == "table")
-
-    _out("  DWKit global                : OK")
-    _out("  core.identity               : " .. _yn(hasIdentity))
-    _out("  core.runtimeBaseline        : " .. _yn(hasRB))
-    _out("  cmd (runtime surface)       : " .. _yn(hasCmd))
-    _out("  bus.commandRegistry         : " .. _yn(hasCmdReg))
-    _out("  bus.eventRegistry           : " .. _yn(hasEvReg))
-    _out("  bus.eventBus                : " .. _yn(hasEvBus))
-    _out("  test.run                    : " .. _yn(hasTest))
-    _out("  services.commandAliases     : " .. _yn(hasAliases))
-    _out("")
-
-    local initTs = kit._lastInitTs
-    if type(initTs) == "number" then
-        _out("  lastInitTs                  : " .. tostring(initTs))
-    else
-        _out("  lastInitTs                  : (unknown)")
-    end
-
-    local br = kit._bootReadyEmitted
-    _out("  bootReadyEmitted            : " .. tostring(br == true))
-    if type(kit._bootReadyTs) == "number" then
-        _out("  bootReadyTs                 : " .. tostring(kit._bootReadyTs))
-
-        local okD, s = pcall(os.date, "%Y-%m-%d %H:%M:%S", kit._bootReadyTs)
-        if okD and s then
-            _out("  bootReadyLocal              : " .. tostring(s))
-        else
-            _out("  bootReadyLocal              : (unavailable)")
-        end
-    end
-
-    if type(kit._bootReadyTsMs) == "number" then
-        _out("  bootReadyTsMs               : " .. tostring(kit._bootReadyTsMs))
-    else
-        _out("  bootReadyTsMs               : (unknown)")
-    end
-
-    if kit._bootReadyEmitError then
-        _out("  bootReadyEmitError          : " .. tostring(kit._bootReadyEmitError))
-    end
-
-    _out("")
-    _out("  load errors (if any):")
-    local anyErr = false
-
-    local function showErr(key, val)
-        if val ~= nil and tostring(val) ~= "" then
-            anyErr = true
-            _out("    - " .. key .. " = " .. tostring(val))
-        end
-    end
-
-    showErr("_cmdRegistryLoadError", kit._cmdRegistryLoadError)
-    showErr("_eventRegistryLoadError", kit._eventRegistryLoadError)
-    showErr("_eventBusLoadError", kit._eventBusLoadError)
-    showErr("_commandAliasesLoadError", kit._commandAliasesLoadError)
-
-    showErr("_presenceServiceLoadError", kit._presenceServiceLoadError)
-    showErr("_actionModelServiceLoadError", kit._actionModelServiceLoadError)
-    showErr("_skillRegistryServiceLoadError", kit._skillRegistryServiceLoadError)
-    showErr("_scoreStoreServiceLoadError", kit._scoreStoreServiceLoadError)
-
-    if type(kit.test) == "table" then
-        showErr("test._selfTestLoadError", kit.test._selfTestLoadError)
-    end
-
-    if not anyErr then
-        _out("    (none)")
-    end
-
-    if type(kit.bus) == "table" and type(kit.bus.eventBus) == "table" and type(kit.bus.eventBus.getStats) == "function" then
-        local okS, stats = pcall(kit.bus.eventBus.getStats)
-        if okS and type(stats) == "table" then
-            _out("")
-            _out("  eventBus stats:")
-            _out("    version          : " .. tostring(stats.version or "unknown"))
-            _out("    subscribers      : " .. tostring(stats.subscribers or 0))
-            _out("    tapSubscribers   : " .. tostring(stats.tapSubscribers or 0))
-            _out("    emitted          : " .. tostring(stats.emitted or 0))
-            _out("    delivered        : " .. tostring(stats.delivered or 0))
-            _out("    handlerErrors    : " .. tostring(stats.handlerErrors or 0))
-            _out("    tapErrors        : " .. tostring(stats.tapErrors or 0))
-        end
-    end
-
-    _out("")
-    _out("  Tip: if anything is MISSING, run:")
-    _out("    lua local L=require(\"dwkit.loader.init\"); L.init()")
+    return nil
 end
 
-local function _printServicesHealth()
-    _out("[DWKit Services] Health summary (dwservices)")
-    _out("")
-
-    local kit = _getKit()
-    if type(kit) ~= "table" then
-        _out("  DWKit global: MISSING")
-        _out("  Next step: lua local L=require(\"dwkit.loader.init\"); L.init()")
-        return
-    end
-
-    if type(kit.services) ~= "table" then
-        _out("  DWKit.services: MISSING")
-        return
-    end
-
-    local function showSvc(fieldName, errKey)
-        local svc = kit.services[fieldName]
-        local ok = (type(svc) == "table")
-        local v = ok and tostring(svc.VERSION or "unknown") or "unknown"
-        _out("  " .. fieldName .. " : " .. (ok and "OK" or "MISSING") .. "  version=" .. v)
-
-        local errVal = kit[errKey]
-        if errVal ~= nil and tostring(errVal) ~= "" then
-            _out("    loadError: " .. tostring(errVal))
-        end
-    end
-
-    showSvc("presenceService", "_presenceServiceLoadError")
-    showSvc("actionModelService", "_actionModelServiceLoadError")
-    showSvc("skillRegistryService", "_skillRegistryServiceLoadError")
-    showSvc("scoreStoreService", "_scoreStoreServiceLoadError")
+local function _makeEventDiagCtx()
+    return {
+        out = function(line) _out(line) end,
+        err = function(msg) _err(msg) end,
+        ppTable = function(t, opts) _legacyPpTable(t, opts) end,
+        ppValue = function(v) return _legacyPpValue(v) end,
+        hasEventBus = function()
+            return type(_getEventBusBestEffort()) == "table"
+        end,
+        hasEventRegistry = function()
+            return type(_getEventRegistryBestEffort()) == "table"
+        end,
+        getEventBus = function()
+            return _getEventBusBestEffort()
+        end,
+        getEventRegistry = function()
+            return _getEventRegistryBestEffort()
+        end,
+    }
 end
 
-local function _printServiceSnapshot(label, svcName)
-    _out("[DWKit Service] " .. tostring(label))
-    local svc = _getService(svcName)
-    if not svc then
-        _err("DWKit.services." .. tostring(svcName) .. " not available. Run loader.init() first.")
-        return
-    end
+-- ------------------------------------------------------------
+-- Router ctx (used by routered aliases)
+-- ------------------------------------------------------------
+local function _makeRouterCtx()
+    return {
+        out = function(line) _out(line) end,
+        err = function(msg) _err(msg) end,
+        ppTable = function(t, opts) _legacyPpTable(t, opts) end,
+        ppValue = function(v) return _legacyPpValue(v) end,
+        safeRequire = function(name) return _safeRequire(name) end,
+        callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
+        getService = function(name) return _getService(name) end,
+        sortedKeys = function(t) return _sortedKeys(t) end,
 
-    _out("  version=" .. tostring(svc.VERSION or "unknown"))
-
-    if type(svc.getState) == "function" then
-        local ok, state, _, _, err = _callBestEffort(svc, "getState")
-        if ok then
-            _out("  getState(): OK")
-            _ppTable(state, { maxDepth = 2, maxItems = 30 })
-            return
-        end
-        _out("  getState(): ERROR")
-        if err and err ~= "" then _out("    err=" .. tostring(err)) end
-    end
-
-    if type(svc.getAll) == "function" then
-        local ok, state, _, _, err = _callBestEffort(svc, "getAll")
-        if ok then
-            _out("  getAll(): OK")
-            _ppTable(state, { maxDepth = 2, maxItems = 30 })
-            return
-        end
-        _out("  getAll(): ERROR")
-        if err and err ~= "" then _out("    err=" .. tostring(err)) end
-    end
-
-    local keys = _sortedKeys(svc)
-    _out("  APIs available (keys on service table): count=" .. tostring(#keys))
-    local limit = math.min(#keys, 40)
-    for i = 1, limit do
-        _out("    - " .. tostring(keys[i]))
-    end
-    if #keys > limit then
-        _out("    ... (" .. tostring(#keys - limit) .. " more)")
-    end
+        getClipboardText = function() return _getClipboardTextBestEffort() end,
+        resolveSendFn = function() return _resolveSendFn() end,
+        looksLikePrompt = function(line) return _looksLikePrompt(line) end,
+        killTrigger = function(id) _killTriggerBestEffort(id) end,
+        killTimer = function(id) _killTimerBestEffort(id) end,
+    }
 end
 
 local function _getScoreStoreServiceBestEffort()
@@ -1152,6 +666,410 @@ local function _printNoUiNote(context)
     _out("    - dwgui apply   (optional: render enabled UI)")
 end
 
+-- ------------------------------------------------------------
+-- Router dispatch table (dwgui/dwscorestore/dwrelease)
+-- ------------------------------------------------------------
+local function _dispatch_dwgui(ctx, kit, tokens)
+    local gs = _getGuiSettingsBestEffort()
+    if type(gs) ~= "table" then
+        ctx.err("DWKit.config.guiSettings not available. Run loader.init() first.")
+        return true
+    end
+
+    local alreadyLoaded = false
+    if type(gs.isLoaded) == "function" then
+        local okLoaded, v = pcall(gs.isLoaded)
+        alreadyLoaded = (okLoaded and v == true)
+    end
+
+    if (not alreadyLoaded) and type(gs.load) == "function" then
+        pcall(gs.load, { quiet = true })
+    end
+
+    local sub  = tokens[2] or ""
+    local uiId = tokens[3] or ""
+    local arg3 = tokens[4] or ""
+
+    -- Delegate FIRST (best-effort).
+    do
+        local okM, mod = _safeRequire("dwkit.commands.dwgui")
+        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+            local dctx = {
+                out = ctx.out,
+                err = ctx.err,
+                ppTable = ctx.ppTable,
+                callBestEffort = ctx.callBestEffort,
+
+                getGuiSettings = function() return gs end,
+                getUiValidator = function() return _getUiValidatorBestEffort() end,
+                printGuiStatusAndList = function(x) _printGuiStatusAndList(x) end,
+                printNoUiNote = function(context) _printNoUiNote(context) end,
+
+                safeRequire = ctx.safeRequire,
+            }
+
+            local ok1, err1 = pcall(mod.dispatch, dctx, gs, sub, uiId, arg3)
+            if ok1 then
+                return true
+            end
+
+            local ok2, err2 = pcall(mod.dispatch, dctx, sub, uiId, arg3)
+            if ok2 then
+                return true
+            end
+
+            ctx.out("[DWKit GUI] NOTE: dwgui delegate failed; falling back to inline handler")
+            ctx.out("  err1=" .. tostring(err1))
+            ctx.out("  err2=" .. tostring(err2))
+        end
+    end
+
+    -- Inline fallback (legacy behaviour)
+    local function usage()
+        ctx.out("[DWKit GUI] Usage:")
+        ctx.out("  dwgui")
+        ctx.out("  dwgui status")
+        ctx.out("  dwgui list")
+        ctx.out("  dwgui enable <uiId>")
+        ctx.out("  dwgui disable <uiId>")
+        ctx.out("  dwgui visible <uiId> on|off")
+        ctx.out("  dwgui validate")
+        ctx.out("  dwgui validate enabled")
+        ctx.out("  dwgui validate <uiId>")
+        ctx.out("  dwgui apply")
+        ctx.out("  dwgui apply <uiId>")
+        ctx.out("  dwgui dispose <uiId>")
+        ctx.out("  dwgui reload")
+        ctx.out("  dwgui reload <uiId>")
+        ctx.out("  dwgui state <uiId>")
+    end
+
+    if sub == "" or sub == "status" or sub == "list" then
+        _printGuiStatusAndList(gs)
+        return true
+    end
+
+    if (sub == "enable" or sub == "disable") then
+        if uiId == "" then
+            usage()
+            return true
+        end
+        if type(gs.setEnabled) ~= "function" then
+            ctx.err("guiSettings.setEnabled not available.")
+            return true
+        end
+        local enable = (sub == "enable")
+        local okCall, errOrNil = pcall(gs.setEnabled, uiId, enable)
+        if not okCall then
+            ctx.err("setEnabled failed: " .. tostring(errOrNil))
+            return true
+        end
+        ctx.out(string.format("[DWKit GUI] setEnabled uiId=%s enabled=%s", tostring(uiId), enable and "ON" or "OFF"))
+        return true
+    end
+
+    if sub == "visible" then
+        if uiId == "" or (arg3 ~= "on" and arg3 ~= "off") then
+            usage()
+            return true
+        end
+        if type(gs.setVisible) ~= "function" then
+            ctx.err("guiSettings.setVisible not available.")
+            return true
+        end
+        local vis = (arg3 == "on")
+        local okCall, errOrNil = pcall(gs.setVisible, uiId, vis)
+        if not okCall then
+            ctx.err("setVisible failed: " .. tostring(errOrNil))
+            return true
+        end
+        ctx.out(string.format("[DWKit GUI] setVisible uiId=%s visible=%s", tostring(uiId), vis and "ON" or "OFF"))
+        return true
+    end
+
+    if sub == "validate" then
+        local v = _getUiValidatorBestEffort()
+        if type(v) ~= "table" or type(v.validateAll) ~= "function" then
+            ctx.err("dwkit.ui.ui_validator.validateAll not available.")
+            return true
+        end
+
+        local target = uiId
+        local verbose = (arg3 == "verbose" or uiId == "verbose")
+
+        if uiId == "enabled" then
+            target = "enabled"
+        end
+
+        if target == "" then
+            local okCall, a, b, c, err = _callBestEffort(v, "validateAll", { source = "dwgui" })
+            if not okCall or a ~= true then
+                ctx.err("validateAll failed: " .. tostring(b or c or err))
+                return true
+            end
+            if verbose then
+                _legacyPpTable(b, { maxDepth = 3, maxItems = 40 })
+            else
+                ctx.out("[DWKit GUI] validateAll OK")
+            end
+            return true
+        end
+
+        if target == "enabled" and type(v.validateEnabled) == "function" then
+            local okCall, a, b, c, err = _callBestEffort(v, "validateEnabled", { source = "dwgui" })
+            if not okCall or a ~= true then
+                ctx.err("validateEnabled failed: " .. tostring(b or c or err))
+                return true
+            end
+            if verbose then
+                _legacyPpTable(b, { maxDepth = 3, maxItems = 40 })
+            else
+                ctx.out("[DWKit GUI] validateEnabled OK")
+            end
+            return true
+        end
+
+        if target ~= "" and type(v.validateOne) == "function" then
+            local okCall, a, b, c, err = _callBestEffort(v, "validateOne", target, { source = "dwgui" })
+            if not okCall or a ~= true then
+                ctx.err("validateOne failed: " .. tostring(b or c or err))
+                return true
+            end
+            if verbose then
+                _legacyPpTable(b, { maxDepth = 3, maxItems = 40 })
+            else
+                ctx.out("[DWKit GUI] validateOne OK uiId=" .. tostring(target))
+            end
+            return true
+        end
+
+        ctx.err("validate target unsupported (missing validateEnabled/validateOne)")
+        return true
+    end
+
+    if sub == "apply" or sub == "dispose" or sub == "reload" or sub == "state" then
+        local okUM, um = _safeRequire("dwkit.ui.ui_manager")
+        if not okUM or type(um) ~= "table" then
+            ctx.err("dwkit.ui.ui_manager not available.")
+            return true
+        end
+
+        local function callAny(fnNames, ...)
+            for _, fn in ipairs(fnNames or {}) do
+                if type(um[fn]) == "function" then
+                    local okCall, errOrNil = pcall(um[fn], ...)
+                    if not okCall then
+                        ctx.err("ui_manager." .. tostring(fn) .. " failed: " .. tostring(errOrNil))
+                    end
+                    return true
+                end
+            end
+            return false
+        end
+
+        if sub == "apply" then
+            if uiId == "" then
+                if callAny({ "applyAll" }, { source = "dwgui" }) then return true end
+            else
+                if callAny({ "applyOne" }, uiId, { source = "dwgui" }) then return true end
+            end
+            ctx.err("ui_manager apply not supported")
+            return true
+        end
+
+        if sub == "dispose" then
+            if uiId == "" then
+                usage()
+                return true
+            end
+            if callAny({ "disposeOne" }, uiId, { source = "dwgui" }) then return true end
+            ctx.err("ui_manager.disposeOne not supported")
+            return true
+        end
+
+        if sub == "reload" then
+            if uiId == "" then
+                if callAny({ "reloadAllEnabled", "reloadAll" }, { source = "dwgui" }) then return true end
+            else
+                if callAny({ "reloadOne" }, uiId, { source = "dwgui" }) then return true end
+            end
+            ctx.err("ui_manager reload not supported")
+            return true
+        end
+
+        if sub == "state" then
+            if uiId == "" then
+                usage()
+                return true
+            end
+            if callAny({ "printState", "stateOne" }, uiId) then return true end
+            ctx.err("ui_manager state not supported")
+            return true
+        end
+    end
+
+    usage()
+    return true
+end
+
+local function _dispatch_dwscorestore(ctx, kit, tokens)
+    local svc = _getScoreStoreServiceBestEffort()
+    if type(svc) ~= "table" then
+        ctx.err("ScoreStoreService not available. Run loader.init() first.")
+        return true
+    end
+
+    local sub = tokens[2] or ""
+    local arg = tokens[3] or ""
+
+    local okM, mod = _safeRequire("dwkit.commands.dwscorestore")
+    if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+        local dctx = {
+            out = ctx.out,
+            err = ctx.err,
+            callBestEffort = ctx.callBestEffort,
+        }
+
+        local ok1, err1 = pcall(mod.dispatch, dctx, svc, sub, arg)
+        if ok1 then
+            return true
+        end
+
+        local ok2, err2 = pcall(mod.dispatch, nil, svc, sub, arg)
+        if ok2 then
+            return true
+        end
+
+        ctx.out("[DWKit ScoreStore] NOTE: dwscorestore delegate failed; falling back to inline handler")
+        ctx.out("  err1=" .. tostring(err1))
+        ctx.out("  err2=" .. tostring(err2))
+    end
+
+    -- Inline fallback (legacy behaviour)
+    local function usage()
+        ctx.out("[DWKit ScoreStore] Usage:")
+        ctx.out("  dwscorestore")
+        ctx.out("  dwscorestore status")
+        ctx.out("  dwscorestore persist on|off|status")
+        ctx.out("  dwscorestore fixture [basic]")
+        ctx.out("  dwscorestore clear")
+        ctx.out("  dwscorestore wipe [disk]")
+        ctx.out("  dwscorestore reset [disk]")
+        ctx.out("")
+        ctx.out("Notes:")
+        ctx.out("  - clear = clears snapshot only (history preserved)")
+        ctx.out("  - wipe/reset = clears snapshot + history")
+        ctx.out("  - wipe/reset disk = also deletes persisted file (best-effort; requires store.delete)")
+    end
+
+    if sub == "" or sub == "status" then
+        local ok, _, _, _, err = _callBestEffort(svc, "printSummary")
+        if not ok then
+            ctx.err("ScoreStoreService.printSummary failed: " .. tostring(err))
+        end
+        return true
+    end
+
+    if sub == "persist" then
+        if arg ~= "on" and arg ~= "off" and arg ~= "status" then
+            usage()
+            return true
+        end
+
+        if arg == "status" then
+            local ok, _, _, _, err = _callBestEffort(svc, "printSummary")
+            if not ok then
+                ctx.err("ScoreStoreService.printSummary failed: " .. tostring(err))
+            end
+            return true
+        end
+
+        if type(svc.configurePersistence) ~= "function" then
+            ctx.err("ScoreStoreService.configurePersistence not available.")
+            return true
+        end
+
+        local enable = (arg == "on")
+        local ok, _, _, _, err = _callBestEffort(svc, "configurePersistence", { enabled = enable, loadExisting = true })
+        if not ok then
+            ctx.err("configurePersistence failed: " .. tostring(err))
+            return true
+        end
+
+        local ok2, _, _, _, err2 = _callBestEffort(svc, "printSummary")
+        if not ok2 then
+            ctx.err("ScoreStoreService.printSummary failed: " .. tostring(err2))
+        end
+        return true
+    end
+
+    if sub == "fixture" then
+        local name = (arg ~= "" and arg) or "basic"
+        if type(svc.ingestFixture) ~= "function" then
+            ctx.err("ScoreStoreService.ingestFixture not available.")
+            return true
+        end
+        local ok, _, _, _, err = _callBestEffort(svc, "ingestFixture", name, { source = "fixture" })
+        if not ok then
+            ctx.err("ingestFixture failed: " .. tostring(err))
+            return true
+        end
+        local ok2, _, _, _, err2 = _callBestEffort(svc, "printSummary")
+        if not ok2 then
+            ctx.err("ScoreStoreService.printSummary failed: " .. tostring(err2))
+        end
+        return true
+    end
+
+    if sub == "clear" then
+        if type(svc.clear) ~= "function" then
+            ctx.err("ScoreStoreService.clear not available.")
+            return true
+        end
+        local ok, _, _, _, err = _callBestEffort(svc, "clear", { source = "manual" })
+        if not ok then
+            ctx.err("clear failed: " .. tostring(err))
+            return true
+        end
+        local ok2, _, _, _, err2 = _callBestEffort(svc, "printSummary")
+        if not ok2 then
+            ctx.err("ScoreStoreService.printSummary failed: " .. tostring(err2))
+        end
+        return true
+    end
+
+    if sub == "wipe" or sub == "reset" then
+        if arg ~= "" and arg ~= "disk" then
+            usage()
+            return true
+        end
+        if type(svc.wipe) ~= "function" then
+            ctx.err("ScoreStoreService.wipe not available. Update dwkit.services.score_store_service first.")
+            return true
+        end
+
+        local meta = { source = "manual" }
+        if arg == "disk" then
+            meta.deleteFile = true
+        end
+
+        local ok, _, _, _, err = _callBestEffort(svc, "wipe", meta)
+        if not ok then
+            ctx.err(sub .. " failed: " .. tostring(err))
+            return true
+        end
+
+        local ok2, _, _, _, err2 = _callBestEffort(svc, "printSummary")
+        if not ok2 then
+            ctx.err("ScoreStoreService.printSummary failed: " .. tostring(err2))
+        end
+        return true
+    end
+
+    usage()
+    return true
+end
+
 local function _printReleaseChecklist()
     _out("[DWKit Release] checklist (dwrelease)")
     _out("  NOTE: SAFE + manual-only. This does not run git/gh commands.")
@@ -1159,7 +1077,7 @@ local function _printReleaseChecklist()
 
     _out("== versions (best-effort) ==")
     _out("")
-    _printVersionSummary()
+    _legacyPrintVersionSummary()
     _out("")
 
     _out("== PR workflow (PowerShell + gh) ==")
@@ -1218,91 +1136,54 @@ local function _printReleaseChecklist()
     _out("     - (then recreate on correct main HEAD)")
 end
 
--- -------------------------
--- Event diagnostics (delegated handlers; STATE stays here)
--- -------------------------
-local function _getEventBusBestEffort()
-    local kit = _getKit()
-    if type(kit) == "table" and type(kit.bus) == "table" and type(kit.bus.eventBus) == "table" then
-        return kit.bus.eventBus
+local function _dispatch_dwrelease(ctx, kit, tokens)
+    local okM, mod = _safeRequire("dwkit.commands.dwrelease")
+    if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+        local dctx = {
+            out = ctx.out,
+            err = ctx.err,
+            ppTable = ctx.ppTable,
+            callBestEffort = ctx.callBestEffort,
+            getKit = function() return kit end,
+
+            legacyPrint = function() _printReleaseChecklist() end,
+            legacyPrintVersion = function() _legacyPrintVersionSummary() end,
+        }
+
+        local ok1, r1 = pcall(mod.dispatch, dctx, kit, tokens)
+        if ok1 and r1 ~= false then return true end
+
+        local ok2, r2 = pcall(mod.dispatch, dctx, tokens)
+        if ok2 and r2 ~= false then return true end
+
+        local ok3, r3 = pcall(mod.dispatch, tokens)
+        if ok3 and r3 ~= false then return true end
+
+        ctx.out("[DWKit Release] NOTE: dwrelease delegate returned false; falling back to inline handler")
     end
-    local ok, mod = _safeRequire("dwkit.bus.event_bus")
-    if ok and type(mod) == "table" then
-        return mod
-    end
-    return nil
+
+    _printReleaseChecklist()
+    return true
 end
 
-local function _getEventRegistryBestEffort()
-    local kit = _getKit()
-    if type(kit) == "table" and type(kit.bus) == "table" and type(kit.bus.eventRegistry) == "table" then
-        return kit.bus.eventRegistry
+local function _dispatch(ctx, kit, tokens)
+    tokens = (type(tokens) == "table") and tokens or {}
+    local cmd = tokens[1] or ""
+    cmd = tostring(cmd or "")
+
+    if cmd == "dwgui" then
+        return _dispatch_dwgui(ctx, kit, tokens)
     end
-    local ok, mod = _safeRequire("dwkit.bus.event_registry")
-    if ok and type(mod) == "table" then
-        return mod
+
+    if cmd == "dwscorestore" then
+        return _dispatch_dwscorestore(ctx, kit, tokens)
     end
-    return nil
-end
 
-local function _getEventDiagModuleBestEffort()
-    local ok, mod = _safeRequire("dwkit.commands.event_diag")
-    if ok and type(mod) == "table" then
-        return mod
+    if cmd == "dwrelease" then
+        return _dispatch_dwrelease(ctx, kit, tokens)
     end
-    return nil
-end
 
-local function _makeEventDiagCtx()
-    return {
-        out = function(line) _out(line) end,
-        err = function(msg) _err(msg) end,
-        ppTable = function(t, opts) _ppTable(t, opts) end,
-        ppValue = function(v) return _ppValue(v) end,
-        hasEventBus = function()
-            return type(_getEventBusBestEffort()) == "table"
-        end,
-        hasEventRegistry = function()
-            return type(_getEventRegistryBestEffort()) == "table"
-        end,
-        getEventBus = function()
-            return _getEventBusBestEffort()
-        end,
-        getEventRegistry = function()
-            return _getEventRegistryBestEffort()
-        end,
-    }
-end
-
--- ------------------------------------------------------------
--- Who diagnostics (delegated handlers; STATE.whoCapture stays here)
--- ------------------------------------------------------------
-local function _getWhoDiagModuleBestEffort()
-    local ok, mod = _safeRequire("dwkit.commands.who_diag")
-    if ok and type(mod) == "table" then
-        return mod
-    end
-    return nil
-end
-
-local function _makeWhoDiagCtx()
-    return {
-        out = function(line) _out(line) end,
-        err = function(msg) _err(msg) end,
-        ppTable = function(t, opts) _ppTable(t, opts) end,
-        ppValue = function(v) return _ppValue(v) end,
-
-        getWhoStoreService = function()
-            return _getWhoStoreServiceBestEffort()
-        end,
-        getClipboardText = function()
-            return _getClipboardTextBestEffort()
-        end,
-
-        printWhoStatus = function(svc)
-            _printWhoStatus(svc)
-        end,
-    }
+    return false
 end
 
 -- ------------------------------------------------------------
@@ -1372,8 +1253,8 @@ function M.getState()
     for _ in pairs((d and d.subs) or {}) do subCount = subCount + 1 end
 
     local aliasIds = {}
-    for _, k in ipairs(_ALIAS_KEYS) do
-        aliasIds[k] = STATE.aliasIds[k]
+    for k, v in pairs(STATE.aliasIds or {}) do
+        aliasIds[k] = v
     end
 
     return {
@@ -1391,7 +1272,6 @@ end
 
 local function _resetSplitCommandModulesBestEffort()
     local mods = {
-        -- Phase 1/2/3/4/5 split modules
         "dwkit.commands.dwroom",
         "dwkit.commands.dwwho",
         "dwkit.commands.dwgui",
@@ -1399,27 +1279,17 @@ local function _resetSplitCommandModulesBestEffort()
         "dwkit.commands.dwcommands",
         "dwkit.commands.dwhelp",
         "dwkit.commands.dwtest",
-
-        -- Phase 6 split
         "dwkit.commands.dwid",
         "dwkit.commands.dwversion",
         "dwkit.commands.dwinfo",
-
-        -- Phase 7 split
         "dwkit.commands.dwevents",
         "dwkit.commands.dwevent",
-
-        -- Phase 8 split
         "dwkit.commands.dwservices",
-
-        -- Phase 9 split
         "dwkit.commands.dwpresence",
         "dwkit.commands.dwactions",
         "dwkit.commands.dwskills",
         "dwkit.commands.dwdiag",
         "dwkit.commands.dwrelease",
-
-        -- Phase 10 split
         "dwkit.commands.dwscorestore",
     }
 
@@ -1468,18 +1338,14 @@ function M.uninstall()
     end
 
     local allOk = true
-    for _, k in ipairs(_ALIAS_KEYS) do
-        local id = STATE.aliasIds[k]
+    for _, id in pairs(STATE.aliasIds or {}) do
         if id then
             local ok = _killAliasStrict(id)
             if not ok then allOk = false end
         end
     end
 
-    for k, _ in pairs(STATE.aliasIds) do
-        STATE.aliasIds[k] = nil
-    end
-
+    STATE.aliasIds = {}
     STATE.installed = false
     _setGlobalAliasIds(nil)
 
@@ -1499,703 +1365,252 @@ local function _mkAlias(pattern, fn)
     return id
 end
 
-function M.install(opts)
-    opts = opts or {}
-
-    if type(tempAlias) ~= "function" then
-        STATE.lastError = "tempAlias() not available"
-        return false, STATE.lastError
-    end
-
-    -- FIX (v2026-01-20C):
-    -- If already installed, do NOT cleanup persisted alias ids here.
-    -- install() is idempotent; uninstall() must be called explicitly to reinstall.
-    if STATE.installed then
-        return true, nil
-    end
-
-    -- Always cleanup persisted aliases first (safe across reloads)
-    _cleanupPriorAliasesBestEffort()
-
-    local dwcommandsPattern = [[^dwcommands(?:\s+(safe|game|md))?\s*$]]
-    local id1 = _mkAlias(dwcommandsPattern, function()
-        if not _hasCmd() then
-            _err("DWKit.cmd not available. Run loader.init() first.")
-            return
-        end
-
-        -- Robust parse: optional capture groups can be stale; tokenize full line.
-        local line = _getFullMatchLine()
-        local tokens = {}
-        for w in line:gmatch("%S+") do
-            tokens[#tokens + 1] = w
-        end
-        local mode = tokens[2] or ""
-
-        local kit = _getKit()
-
-        -- Phase 4 split: try delegated handler FIRST (best-effort), then fallback to legacy inline output.
-        local okM, mod = _safeRequire("dwkit.commands.dwcommands")
-        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
-            local ctx = {
-                out = function(line2) _out(line2) end,
-                err = function(msg) _err(msg) end,
-            }
-
-            local ok1, err1 = pcall(mod.dispatch, ctx, kit.cmd, mode)
-            if ok1 then
-                return
-            end
-
-            local ok2, err2 = pcall(mod.dispatch, nil, kit.cmd, mode)
-            if ok2 then
-                return
-            end
-
-            _out("[DWKit Commands] NOTE: dwcommands delegate failed; falling back to inline handler")
-            _out("  err1=" .. tostring(err1))
-            _out("  err2=" .. tostring(err2))
-        end
-
-        -- Inline fallback (legacy behaviour)
-        mode = tostring(mode or "")
-        if mode == "safe" then
-            kit.cmd.listSafe()
-        elseif mode == "game" then
-            kit.cmd.listGame()
-        elseif mode == "md" then
-            if type(kit.cmd.toMarkdown) ~= "function" then
-                _err("DWKit.cmd.toMarkdown not available.")
-                return
-            end
-            local ok, md = pcall(kit.cmd.toMarkdown, {})
-            if not ok then
-                _err("dwcommands md failed: " .. tostring(md))
-                return
-            end
-            _out(tostring(md))
-        else
-            kit.cmd.listAll()
-        end
-    end)
-
-    -- FIX (v2026-01-25C): accept zero-args for dwhelp (prints usage instead of falling through to MUD)
-    local dwhelpPattern = [[^dwhelp(?:\s+(\S+))?\s*$]]
-    local id2 = _mkAlias(dwhelpPattern, function()
-        if not _hasCmd() then
-            _err("DWKit.cmd not available. Run loader.init() first.")
-            return
-        end
-
-        -- NOTE: Mudlet tempAlias commonly sets:
-        --   matches[0] = full match
-        --   matches[1] = full match (sometimes)
-        --   matches[2] = first capture group (when present)
-        local name = (matches and matches[2]) and tostring(matches[2]) or ""
-        name = tostring(name or "")
-
-        if name == "" then
-            _out("[DWKit Help] Usage: dwhelp <cmd>")
-            _out("  Try: dwcommands")
-            _out("  Example: dwhelp dwtest")
-            return
-        end
-
-        local kit = _getKit()
-
-        -- Phase 4 split: try delegated handler FIRST (best-effort), then fallback to legacy inline output.
-        local okM, mod = _safeRequire("dwkit.commands.dwhelp")
-        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
-            local ctx = {
-                out = function(line2) _out(line2) end,
-                err = function(msg) _err(msg) end,
-            }
-
-            local ok1, err1 = pcall(mod.dispatch, ctx, kit.cmd, name)
-            if ok1 then
-                return
-            end
-
-            local ok2, err2 = pcall(mod.dispatch, nil, kit.cmd, name)
-            if ok2 then
-                return
-            end
-
-            _out("[DWKit Help] NOTE: dwhelp delegate failed; falling back to inline handler")
-            _out("  err1=" .. tostring(err1))
-            _out("  err2=" .. tostring(err2))
-        end
-
-        -- Inline fallback (legacy behaviour)
-        local ok, _, err = kit.cmd.help(name)
-        if not ok then
-            _err(err or ("Unknown command: " .. name))
-        end
-    end)
-
-    -- FIX (v2026-01-23A): token-based dwtest to support suite targets (room/who) + verbose flag.
-    local dwtestPattern = [[^dwtest(?:\s+(.+))?\s*$]]
-    local id3 = _mkAlias(dwtestPattern, function()
-        local line = _getFullMatchLine()
-        local tokens = {}
-        for w in tostring(line or ""):gmatch("%S+") do
-            tokens[#tokens + 1] = w
-        end
-
-        -- tokens[1] = "dwtest"
-        local mode = tokens[2] or ""
-        local arg2 = tokens[3] or ""
-        local arg3 = tokens[4] or ""
-
-        local function hasVerboseFlag()
-            for i = 2, #tokens do
-                local t = tokens[i]
-                if t == "verbose" or t == "v" then
-                    return true
-                end
-            end
-            return false
-        end
-
-        local function usage()
-            _out("[DWKit Test] Usage:")
-            _out("  dwtest")
-            _out("  dwtest quiet")
-            _out("  dwtest ui [verbose|v]")
-            _out("  dwtest room [verbose|v]")
-            _out("  dwtest who  [verbose|v]")
-            _out("  dwtest verbose|v     (run all tests verbose, if supported)")
-        end
-
-        -- ============================================================
-        -- Mode: UI Safety Gate (does NOT require DWKit.test.run)
-        -- ============================================================
-        if mode == "ui" then
-            local verbose = hasVerboseFlag()
-
-            local v = _getUiValidatorBestEffort()
-            if type(v) ~= "table" then
-                _err("dwkit.ui.ui_validator not available. Create src/dwkit/ui/ui_validator.lua first.")
-                return
-            end
-            if type(v.validateAll) ~= "function" then
-                _err("ui_validator.validateAll not available.")
-                return
-            end
-
-            _out("[DWKit Test] UI Safety Gate (dwtest ui)")
-            _out("  validator=" .. tostring(v.VERSION or "unknown"))
-            _out("  mode=" .. (verbose and "verbose" or "compact"))
-            _out("")
-
-            local okCall, a, b, c, err = _callBestEffort(v, "validateAll", { source = "dwtest" })
-            if not okCall or a ~= true then
-                _err("validateAll failed: " .. tostring(b or c or err))
-                return
-            end
-
-            if verbose then
-                _out("[DWKit Test] UI validateAll details (bounded)")
-                _ppTable(b, { maxDepth = 3, maxItems = 40 })
-                return
-            end
-
-            _out("[DWKit Test] UI validateAll OK")
-            return
-        end
-
-        -- ============================================================
-        -- Test runner: DWKit.test.run OR fallback to self_test_runner.run
-        -- (v2026-01-23B): self-heal by calling loader.init() if needed
-        -- ============================================================
-        local function runSelfTests(opts)
-            opts = (type(opts) == "table") and opts or {}
-            if opts.source == nil then
-                opts.source = "dwtest"
-            end
-
-            local function tryKitRun()
-                local kit = _getKit()
-                if type(kit) == "table" and type(kit.test) == "table" and type(kit.test.run) == "function" then
-                    local ok, errOrNil = pcall(kit.test.run, opts)
-                    if not ok then
-                        _err("DWKit.test.run failed: " .. tostring(errOrNil))
-                    end
-                    return true
-                end
-                return false
-            end
-
-            local function tryRunnerRun()
-                local okR, runner = _safeRequire("dwkit.tests.self_test_runner")
-                if okR and type(runner) == "table" and type(runner.run) == "function" then
-                    local ok, errOrNil = pcall(runner.run, opts)
-                    if not ok then
-                        _err("self_test_runner.run failed: " .. tostring(errOrNil))
-                    end
-                    return true
-                end
-                return false
-            end
-
-            -- 1) Try immediately
-            if tryKitRun() then return true end
-            if tryRunnerRun() then return true end
-
-            -- 2) Self-heal: best-effort loader.init(), then retry
-            local okL, L = _safeRequire("dwkit.loader.init")
-            if okL and type(L) == "table" and type(L.init) == "function" then
-                pcall(L.init)
-            end
-
-            if tryKitRun() then return true end
-            if tryRunnerRun() then return true end
-
-            return false
-        end
-
-        -- ============================================================
-        -- Optional delegation to dwkit.commands.dwtest (future-proof; best-effort)
-        -- (v2026-01-23C): only return if dispatch() returns true
-        -- ============================================================
-        do
-            local okM, mod = _safeRequire("dwkit.commands.dwtest")
-            if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
-                local kit = _getKit()
-                local ctx = {
-                    out = function(line2) _out(line2) end,
-                    err = function(msg) _err(msg) end,
-                    ppTable = function(t, opts) _ppTable(t, opts) end,
-                    callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
-                    getKit = function() return kit end,
-                    getUiValidator = function() return _getUiValidatorBestEffort() end,
-                }
-
-                -- Try a few tolerant signatures; accept only if dispatch returns true.
-                local ok1, r1 = pcall(mod.dispatch, ctx, kit, tokens)
-                if ok1 and r1 == true then return end
-
-                local ok2, r2 = pcall(mod.dispatch, ctx, tokens)
-                if ok2 and r2 == true then return end
-
-                local ok3, r3 = pcall(mod.dispatch, tokens)
-                if ok3 and r3 == true then return end
-                -- else continue to inline fallback below
-            end
-        end
-
-        -- ============================================================
-        -- Inline behavior
-        -- ============================================================
-        if mode == "" then
-            if not runSelfTests({}) then
-                _err("No test runner available (DWKit.test.run or dwkit.tests.self_test_runner.run). Try: dwinit")
-            end
-            return
-        end
-
-        if mode == "quiet" then
-            if not runSelfTests({ quiet = true }) then
-                _err("No test runner available (DWKit.test.run or dwkit.tests.self_test_runner.run). Try: dwinit")
-            end
-            return
-        end
-
-        -- allow: dwtest verbose
-        if mode == "verbose" or mode == "v" then
-            if not runSelfTests({ verbose = true }) then
-                _err("No test runner available (DWKit.test.run or dwkit.tests.self_test_runner.run). Try: dwinit")
-            end
-            return
-        end
-
-        -- suite-style targets: room / who
-        if mode == "room" or mode == "who" then
-            local verbose = hasVerboseFlag()
-
-            -- Best-effort: many runners accept suite/target; we provide BOTH.
-            local opts = {
-                suite = mode,
-                target = mode,
-                verbose = verbose,
-            }
-
-            if not runSelfTests(opts) then
-                _err("No test runner available (DWKit.test.run or dwkit.tests.self_test_runner.run). Try: dwinit")
-            end
-            return
-        end
-
-        -- Anything else is invalid/unknown
-        usage()
-    end)
-
-    -- Phase 6 split: dwinfo delegates to dwkit.commands.dwinfo (with fallback)
-    local dwinfoPattern = [[^dwinfo\s*$]]
-    local id4 = _mkAlias(dwinfoPattern, function()
-        local kit = _getKit()
-
-        local okM, mod = _safeRequire("dwkit.commands.dwinfo")
-        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
-            local ctx = {
-                out = function(line2) _out(line2) end,
-                err = function(msg) _err(msg) end,
-            }
-
-            local ok1, err1 = pcall(mod.dispatch, ctx, kit)
-            if ok1 then
-                return
-            end
-
-            local ok2, err2 = pcall(mod.dispatch, nil, kit)
-            if ok2 then
-                return
-            end
-
-            _out("[DWKit Info] NOTE: dwinfo delegate failed; falling back to inline handler")
-            _out("  err1=" .. tostring(err1))
-            _out("  err2=" .. tostring(err2))
-        end
-
-        -- Inline fallback (legacy behaviour)
-        if not _hasBaseline() then
-            _err("DWKit.core.runtimeBaseline.printInfo not available. Run loader.init() first.")
-            return
-        end
-        kit.core.runtimeBaseline.printInfo()
-    end)
-
-    -- Phase 6 split: dwid delegates to dwkit.commands.dwid (with fallback)
-    local dwidPattern = [[^dwid\s*$]]
-    local id5 = _mkAlias(dwidPattern, function()
-        local kit = _getKit()
-
-        local okM, mod = _safeRequire("dwkit.commands.dwid")
-        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
-            local ctx = {
-                out = function(line2) _out(line2) end,
-                err = function(msg) _err(msg) end,
-            }
-
-            local ok1, err1 = pcall(mod.dispatch, ctx, kit)
-            if ok1 then
-                return
-            end
-
-            local ok2, err2 = pcall(mod.dispatch, nil, kit)
-            if ok2 then
-                return
-            end
-
-            _out("[DWKit ID] NOTE: dwid delegate failed; falling back to inline handler")
-            _out("  err1=" .. tostring(err1))
-            _out("  err2=" .. tostring(err2))
-        end
-
-        -- Inline fallback (legacy behaviour)
-        _printIdentity()
-    end)
-
-    -- Phase 6 split: dwversion delegates to dwkit.commands.dwversion (with fallback)
-    local dwversionPattern = [[^dwversion\s*$]]
-    local id6 = _mkAlias(dwversionPattern, function()
-        local kit = _getKit()
-
-        local okM, mod = _safeRequire("dwkit.commands.dwversion")
-        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
-            local ctx = {
-                out = function(line2) _out(line2) end,
-                err = function(msg) _err(msg) end,
-            }
-
-            local ok1, err1 = pcall(mod.dispatch, ctx, kit, M.VERSION)
-            if ok1 then
-                return
-            end
-
-            local ok2, err2 = pcall(mod.dispatch, nil, kit, M.VERSION)
-            if ok2 then
-                return
-            end
-
-            _out("[DWKit Version] NOTE: dwversion delegate failed; falling back to inline handler")
-            _out("  err1=" .. tostring(err1))
-            _out("  err2=" .. tostring(err2))
-        end
-
-        -- Inline fallback (legacy behaviour)
-        _printVersionSummary()
-    end)
-
-    -- Phase 7 split: dwevents delegates to dwkit.commands.dwevents (with fallback)
-    local dweventsPattern = [[^dwevents(?:\s+(md))?\s*$]]
-    local id7 = _mkAlias(dweventsPattern, function()
-        if not _hasEventRegistry() then
-            _err("DWKit.bus.eventRegistry not available. Run loader.init() first.")
-            return
-        end
-
-        -- Robust parse: optional capture groups can be stale; tokenize full line.
-        local line = _getFullMatchLine()
-        local tokens = {}
-        for w in line:gmatch("%S+") do
-            tokens[#tokens + 1] = w
-        end
-        local mode = tokens[2] or ""
-
-        local kit = _getKit()
-
-        -- Phase 7 split: delegate FIRST, fallback inline
-        local okM, mod = _safeRequire("dwkit.commands.dwevents")
-        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
-            local ctx = {
-                out = function(line2) _out(line2) end,
-                err = function(msg) _err(msg) end,
-            }
-
-            local ok1, err1 = pcall(mod.dispatch, ctx, kit.bus.eventRegistry, mode)
-            if ok1 then
-                return
-            end
-
-            local ok2, err2 = pcall(mod.dispatch, nil, kit.bus.eventRegistry, mode)
-            if ok2 then
-                return
-            end
-
-            _out("[DWKit Events] NOTE: dwevents delegate failed; falling back to inline handler")
-            _out("  err1=" .. tostring(err1))
-            _out("  err2=" .. tostring(err2))
-        end
-
-        -- Inline fallback (legacy behaviour)
-        if mode == "md" then
-            if type(kit.bus.eventRegistry.toMarkdown) ~= "function" then
-                _err("DWKit.bus.eventRegistry.toMarkdown not available.")
-                return
-            end
-            local ok, md = pcall(kit.bus.eventRegistry.toMarkdown, {})
-            if not ok then
-                _err("dwevents md failed: " .. tostring(md))
-                return
-            end
-            _out(tostring(md))
-            return
-        end
-
-        kit.bus.eventRegistry.listAll()
-    end)
-
-    -- Phase 7 split: dwevent delegates to dwkit.commands.dwevent (with fallback)
-    local dweventPattern = [[^dwevent\s+(\S+)\s*$]]
-    local id8 = _mkAlias(dweventPattern, function()
-        if not _hasEventRegistry() then
-            _err("DWKit.bus.eventRegistry not available. Run loader.init() first.")
-            return
-        end
-
-        local evName = (matches and matches[2]) and tostring(matches[2]) or ""
-        if evName == "" then
-            _err("Usage: dwevent <EventName>")
-            return
-        end
-
-        local kit = _getKit()
-
-        -- Phase 7 split: delegate FIRST, fallback inline
-        local okM, mod = _safeRequire("dwkit.commands.dwevent")
-        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
-            local ctx = {
-                out = function(line2) _out(line2) end,
-                err = function(msg) _err(msg) end,
-            }
-
-            local ok1, err1 = pcall(mod.dispatch, ctx, kit.bus.eventRegistry, evName)
-            if ok1 then
-                return
-            end
-
-            local ok2, err2 = pcall(mod.dispatch, nil, kit.bus.eventRegistry, evName)
-            if ok2 then
-                return
-            end
-
-            _out("[DWKit Event] NOTE: dwevent delegate failed; falling back to inline handler")
-            _out("  err1=" .. tostring(err1))
-            _out("  err2=" .. tostring(err2))
-        end
-
-        -- Inline fallback (legacy behaviour)
-        local ok, _, err = kit.bus.eventRegistry.help(evName)
-        if not ok then
-            _err(err or ("Unknown event: " .. evName))
-        end
-    end)
-
-    local dwbootPattern = [[^dwboot\s*$]]
-    local id9 = _mkAlias(dwbootPattern, function()
-        -- Phase 3 split: try delegated handler FIRST (best-effort), then fallback to legacy inline output.
-        local okM, mod = _safeRequire("dwkit.commands.dwboot")
-        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
-            local ctx = {
-                out = function(line) _out(line) end,
-                err = function(msg) _err(msg) end,
-                callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
-                legacyPrint = function() _printBootHealth() end,
-            }
-
-            local ok1, err1 = pcall(mod.dispatch, ctx)
-            if ok1 then
-                return
-            end
-
-            local ok2, err2 = pcall(mod.dispatch)
-            if ok2 then
-                return
-            end
-
-            _out("[DWKit Boot] NOTE: dwboot delegate failed; falling back to inline handler")
-            _out("  err1=" .. tostring(err1))
-            _out("  err2=" .. tostring(err2))
-        end
-
-        _printBootHealth()
-    end)
-
-    local dwservicesPattern = [[^dwservices\s*$]]
-    local id10 = _mkAlias(dwservicesPattern, function()
-        -- Phase 8 split: delegate FIRST, fallback to inline legacy printer.
-        local okM, mod = _safeRequire("dwkit.commands.dwservices")
-        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
-            local kit = _getKit()
-            local ctx = {
-                out = function(line) _out(line) end,
-                err = function(msg) _err(msg) end,
-                callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
-                legacyPrint = function() _printServicesHealth() end,
-            }
-
-            -- tolerant signatures
-            local ok1, err1 = pcall(mod.dispatch, ctx, kit)
-            if ok1 then return end
-
-            local ok2, err2 = pcall(mod.dispatch, ctx)
-            if ok2 then return end
-
-            local ok3, err3 = pcall(mod.dispatch, kit)
-            if ok3 then return end
-
-            _out("[DWKit Services] NOTE: dwservices delegate failed; falling back to inline handler")
-            _out("  err1=" .. tostring(err1))
-            _out("  err2=" .. tostring(err2))
-            _out("  err3=" .. tostring(err3))
-        end
-
-        _printServicesHealth()
-    end)
-
-    -- Phase 9 split: dwpresence delegates to dwkit.commands.dwpresence (with fallback)
-    local dwpresencePattern = [[^dwpresence(?:\s+(.+))?\s*$]]
-    local id11 = _mkAlias(dwpresencePattern, function()
-        local line = _getFullMatchLine()
-        local tokens = {}
-        for w in tostring(line or ""):gmatch("%S+") do
-            tokens[#tokens + 1] = w
-        end
-
-        local kit = _getKit()
-
-        local okM, mod = _safeRequire("dwkit.commands.dwpresence")
-        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
-            local ctx = {
-                out = function(line2) _out(line2) end,
-                err = function(msg) _err(msg) end,
-                ppTable = function(t, opts) _ppTable(t, opts) end,
-                callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
-                getKit = function() return kit end,
-                getService = function(name) return _getService(name) end,
-                printServiceSnapshot = function(label, svcName) _printServiceSnapshot(label, svcName) end,
-            }
-
-            -- tolerant signatures; treat explicit false as "not handled"
-            local ok1, r1 = pcall(mod.dispatch, ctx, kit, tokens)
-            if ok1 and r1 ~= false then return end
-
-            local ok2, r2 = pcall(mod.dispatch, ctx, tokens)
-            if ok2 and r2 ~= false then return end
-
-            local ok3, r3 = pcall(mod.dispatch, tokens)
-            if ok3 and r3 ~= false then return end
-
-            _out("[DWKit Presence] NOTE: dwpresence delegate returned false; falling back to inline handler")
-        end
-
-        -- Inline fallback (legacy behaviour)
-        _printServiceSnapshot("PresenceService", "presenceService")
-    end)
-
-    -- Phase 1 split: dwroom delegates to dwkit.commands.dwroom
-    local dwroomPattern = [[^dwroom(?:\s+(status|clear|ingestclip|fixture|refresh))?(?:\s+(\S+))?\s*$]]
-    local id11b = _mkAlias(dwroomPattern, function()
-        local svc = _getRoomEntitiesServiceBestEffort()
-        if type(svc) ~= "table" then
-            _err("RoomEntitiesService not available. Run loader.init() first.")
-            return
-        end
-
-        -- FIX (v2026-01-21F): tokenize FULL match line (matches[0]) when captures exist
-        local line = _getFullMatchLine()
-        local tokens = {}
-        for w in line:gmatch("%S+") do
-            tokens[#tokens + 1] = w
-        end
-
-        local sub = tokens[2] or ""
-        local arg = ""
-        if #tokens >= 3 then
-            arg = table.concat(tokens, " ", 3)
-        end
-
-        local okM, mod = _safeRequire("dwkit.commands.dwroom")
-        if not okM or type(mod) ~= "table" or type(mod.dispatch) ~= "function" then
-            _err("dwkit.commands.dwroom not available. Ensure src/dwkit/commands/dwroom.lua exists.")
-            return
-        end
-
-        local ctx = {
-            out = function(line2) _out(line2) end,
-            err = function(msg) _err(msg) end,
-            callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
-            getClipboardText = function() return _getClipboardTextBestEffort() end,
-            resolveSendFn = function() return _resolveSendFn() end,
-            looksLikePrompt = function(line2) return _looksLikePrompt(line2) end,
-            killTrigger = function(id) _killTriggerBestEffort(id) end,
-            killTimer = function(id) _killTimerBestEffort(id) end,
-            tempRegexTrigger = function(pat, fn) return tempRegexTrigger(pat, fn) end,
-            tempTimer = function(sec, fn) return tempTimer(sec, fn) end,
-            printRoomEntitiesStatus = function(s) _printRoomEntitiesStatus(s) end,
+-- ------------------------------------------------------------
+-- SAFE alias generation from Command Registry (best-effort)
+-- ------------------------------------------------------------
+local function _getSafeCommandNamesBestEffort(kit)
+    kit = (type(kit) == "table") and kit or _getKit()
+    if type(kit) ~= "table" then return nil end
+
+    -- Try DWKit.cmd helper methods first (preferred)
+    if type(kit.cmd) == "table" then
+        local candidates = {
+            "getSafeNames",
+            "listSafeNames",
+            "safeNames",
+            "getSafeCommands",
+            "getSafe",
         }
 
-        local okCall, errOrNil = pcall(mod.dispatch, ctx, svc, sub, arg)
-        if not okCall then
-            _err("dwroom handler threw error: " .. tostring(errOrNil))
+        for _, fnName in ipairs(candidates) do
+            if type(kit.cmd[fnName]) == "function" then
+                local ok, a, b, c, err = _callBestEffort(kit.cmd, fnName)
+                if ok then
+                    local v = a
+                    if type(v) == "table" then
+                        -- Accept array of names OR map of name->record
+                        local names = {}
+                        local isArray = (v[1] ~= nil)
+                        if isArray then
+                            for _, x in ipairs(v) do
+                                if type(x) == "string" and x ~= "" then
+                                    names[#names + 1] = x
+                                end
+                            end
+                        else
+                            for k, _ in pairs(v) do
+                                if type(k) == "string" and k ~= "" then
+                                    names[#names + 1] = k
+                                end
+                            end
+                        end
+                        if #names > 0 then
+                            table.sort(names)
+                            return names
+                        end
+                    end
+                end
+            end
         end
-    end)
+    end
 
-    -- Phase 1 split: dwwho delegates to dwkit.commands.dwwho
-    local dwwhoPattern = [[^dwwho(?:\s+(status|clear|ingestclip|fixture|refresh|set))?(?:\s+(.+))?\s*$]]
-    local id11c = _mkAlias(dwwhoPattern, function()
+    -- Try command_registry module directly (best-effort)
+    do
+        local okR, reg = _safeRequire("dwkit.bus.command_registry")
+        if okR and type(reg) == "table" then
+            local candidates = {
+                "getSafeNames",
+                "listSafeNames",
+                "safeNames",
+                "getSafe",
+            }
+            for _, fnName in ipairs(candidates) do
+                if type(reg[fnName]) == "function" then
+                    local ok, v = pcall(reg[fnName], reg)
+                    if ok and type(v) == "table" then
+                        local names = {}
+                        local isArray = (v[1] ~= nil)
+                        if isArray then
+                            for _, x in ipairs(v) do
+                                if type(x) == "string" and x ~= "" then
+                                    names[#names + 1] = x
+                                end
+                            end
+                        else
+                            for k, _ in pairs(v) do
+                                if type(k) == "string" and k ~= "" then
+                                    names[#names + 1] = k
+                                end
+                            end
+                        end
+                        if #names > 0 then
+                            table.sort(names)
+                            return names
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+-- ------------------------------------------------------------
+-- Generic alias callback dispatcher (SAFE)
+--   Strategy:
+--     0) Inline special-case for dwcommands (directly uses DWKit.cmd.* to avoid legacy split errors)
+--     1) Prefer split module: dwkit.commands.<cmd>.dispatch(ctx, kit, tokens)
+--        with signature-flex calls.
+--     2) Fall back to DWKit.cmd.run(cmd, argString) if present (best-effort).
+--     3) Small last-resort fallbacks for a few key commands via alias_legacy.
+-- ------------------------------------------------------------
+local function _dispatchGenericCommand(cmd, kit, tokens)
+    cmd = tostring(cmd or "")
+    kit = (type(kit) == "table") and kit or _getKit()
+    tokens = (type(tokens) == "table") and tokens or {}
+
+    if cmd == "" then return true end
+
+    -- (0) dwcommands inline (fixes: "DWKit.cmd.listAll not available" spam)
+    if cmd == "dwcommands" then
+        if type(kit) ~= "table" or type(kit.cmd) ~= "table" then
+            _err("DWKit.cmd not available. Run loader.init() first.")
+            return true
+        end
+
+        local sub = tostring(tokens[2] or "")
+        if sub == "" then
+            local okCall, _, _, _, err = _callBestEffort(kit.cmd, "listAll")
+            if not okCall then
+                _err("DWKit.cmd.listAll not available: " .. tostring(err))
+            end
+            return true
+        end
+
+        if sub == "safe" then
+            local okCall, _, _, _, err = _callBestEffort(kit.cmd, "listSafe")
+            if not okCall then
+                _err("DWKit.cmd.listSafe not available: " .. tostring(err))
+            end
+            return true
+        end
+
+        if sub == "game" then
+            local okCall, _, _, _, err = _callBestEffort(kit.cmd, "listGame")
+            if not okCall then
+                _err("DWKit.cmd.listGame not available: " .. tostring(err))
+            end
+            return true
+        end
+
+        if sub == "md" then
+            local okCall, md, _, _, err = _callBestEffort(kit.cmd, "toMarkdown")
+            if not okCall or type(md) ~= "string" then
+                _err("DWKit.cmd.toMarkdown not available: " .. tostring(err))
+                return true
+            end
+            _out(md)
+            return true
+        end
+
+        _err("Usage: dwcommands [safe|game|md]")
+        return true
+    end
+
+    local ctx = {
+        out = function(line) _out(line) end,
+        err = function(msg) _err(msg) end,
+        ppTable = function(t, opts) _legacyPpTable(t, opts) end,
+        callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
+        getKit = function() return kit end,
+        getService = function(name) return _getService(name) end,
+        printServiceSnapshot = function(label, svcName) _legacyPrintServiceSnapshot(label, svcName) end,
+        makeEventDiagCtx = function() return _makeEventDiagCtx() end,
+        getEventDiagState = function() return STATE.eventDiag end,
+        legacyPrintVersion = function() _legacyPrintVersionSummary() end,
+        legacyPrintBoot = function() _legacyPrintBootHealth() end,
+        legacyPrintServices = function() _legacyPrintServicesHealth() end,
+        legacyPrintIdentity = function() _legacyPrintIdentity() end,
+    }
+
+    -- 1) Split module dispatch
+    local okM, mod = _safeRequire("dwkit.commands." .. cmd)
+    if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
+        local ok1, r1 = pcall(mod.dispatch, ctx, kit, tokens)
+        if ok1 and r1 ~= false then return true end
+
+        local ok2, r2 = pcall(mod.dispatch, ctx, tokens)
+        if ok2 and r2 ~= false then return true end
+
+        local ok3, r3 = pcall(mod.dispatch, tokens)
+        if ok3 and r3 ~= false then return true end
+    end
+
+    -- 2) Try DWKit.cmd.run (best-effort)
+    if type(kit) == "table" and type(kit.cmd) == "table" and type(kit.cmd.run) == "function" then
+        local argString = ""
+        if #tokens >= 2 then
+            argString = table.concat(tokens, " ", 2)
+        end
+
+        local okA = pcall(kit.cmd.run, cmd, argString)
+        if okA then return true end
+
+        local okB = pcall(kit.cmd.run, kit.cmd, cmd, argString)
+        if okB then return true end
+    end
+
+    -- 3) Micro-fallbacks for a few essential commands
+    if cmd == "dwid" then
+        _legacyPrintIdentity()
+        return true
+    end
+    if cmd == "dwversion" then
+        _legacyPrintVersionSummary()
+        return true
+    end
+    if cmd == "dwboot" then
+        _legacyPrintBootHealth()
+        return true
+    end
+    if cmd == "dwservices" then
+        _legacyPrintServicesHealth()
+        return true
+    end
+    if cmd == "dwpresence" then
+        _legacyPrintServiceSnapshot("PresenceService", "presenceService")
+        return true
+    end
+    if cmd == "dwactions" then
+        _legacyPrintServiceSnapshot("ActionModelService", "actionModelService")
+        return true
+    end
+    if cmd == "dwskills" then
+        _legacyPrintServiceSnapshot("SkillRegistryService", "skillRegistryService")
+        return true
+    end
+
+    _err("Command handler not available for: " .. cmd .. " (no split module / no DWKit.cmd.run).")
+    return true
+end
+
+-- ------------------------------------------------------------
+-- Special-case alias builders (need service/state injection)
+-- ------------------------------------------------------------
+local function _installAlias_dwwho()
+    local pat = [[^dwwho(?:\s+(status|clear|ingestclip|fixture|refresh|set))?(?:\s+(.+))?\s*$]]
+    return _mkAlias(pat, function()
         local svc = _getWhoStoreServiceBestEffort()
-
         if type(svc) ~= "table" then
-            _err("WhoStoreService not available or incomplete. Create/repair src/dwkit/services/whostore_service.lua, then loader.init().")
+            _err(
+                "WhoStoreService not available or incomplete. Create/repair src/dwkit/services/whostore_service.lua, then loader.init().")
             return
         end
 
-        -- FIX (v2026-01-21F): tokenize FULL match line (matches[0]) when captures exist
         local line = _getFullMatchLine()
         local tokens = {}
-        for w in line:gmatch("%S+") do
+        for w in tostring(line or ""):gmatch("%S+") do
             tokens[#tokens + 1] = w
         end
 
@@ -2204,7 +1619,6 @@ function M.install(opts)
 
         if #tokens >= 3 then
             if sub == "set" then
-                -- Allow: dwwho set Bob Alice  => "Bob,Alice"
                 local names = {}
                 for i = 3, #tokens do
                     names[#names + 1] = tokens[i]
@@ -2229,265 +1643,73 @@ function M.install(opts)
             resolveSendFn = function() return _resolveSendFn() end,
             killTrigger = function(id) _killTriggerBestEffort(id) end,
             killTimer = function(id) _killTimerBestEffort(id) end,
-            tempRegexTrigger = function(pat, fn) return tempRegexTrigger(pat, fn) end,
+            tempRegexTrigger = function(p, fn) return tempRegexTrigger(p, fn) end,
             tempTimer = function(sec, fn) return tempTimer(sec, fn) end,
             whoIngestTextBestEffort = function(s, text, meta) return _whoIngestTextBestEffort(s, text, meta) end,
             printWhoStatus = function(s) _printWhoStatus(s) end,
         }
 
         local ok1, err1 = pcall(mod.dispatch, ctx, svc, sub, arg)
-        if ok1 then
-            return
-        end
+        if ok1 then return end
 
         local ok2, err2 = pcall(mod.dispatch, ctx, svc, sub)
-        if ok2 then
-            return
-        end
+        if ok2 then return end
 
         _err("dwwho handler threw error: " .. tostring(err1 or err2))
     end)
+end
 
-    -- Phase 9 split: dwactions delegates to dwkit.commands.dwactions (with fallback)
-    local dwactionsPattern = [[^dwactions(?:\s+(.+))?\s*$]]
-    local id12 = _mkAlias(dwactionsPattern, function()
-        local line = _getFullMatchLine()
-        local tokens = {}
-        for w in tostring(line or ""):gmatch("%S+") do
-            tokens[#tokens + 1] = w
-        end
-
-        local kit = _getKit()
-
-        local okM, mod = _safeRequire("dwkit.commands.dwactions")
-        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
-            local ctx = {
-                out = function(line2) _out(line2) end,
-                err = function(msg) _err(msg) end,
-                ppTable = function(t, opts) _ppTable(t, opts) end,
-                callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
-                getKit = function() return kit end,
-                getService = function(name) return _getService(name) end,
-                printServiceSnapshot = function(label, svcName) _printServiceSnapshot(label, svcName) end,
-            }
-
-            local ok1, r1 = pcall(mod.dispatch, ctx, kit, tokens)
-            if ok1 and r1 ~= false then return end
-
-            local ok2, r2 = pcall(mod.dispatch, ctx, tokens)
-            if ok2 and r2 ~= false then return end
-
-            local ok3, r3 = pcall(mod.dispatch, tokens)
-            if ok3 and r3 ~= false then return end
-
-            _out("[DWKit Actions] NOTE: dwactions delegate returned false; falling back to inline handler")
-        end
-
-        -- Inline fallback (legacy behaviour)
-        _printServiceSnapshot("ActionModelService", "actionModelService")
-    end)
-
-    -- Phase 9 split: dwskills delegates to dwkit.commands.dwskills (with fallback)
-    local dwskillsPattern = [[^dwskills(?:\s+(.+))?\s*$]]
-    local id13 = _mkAlias(dwskillsPattern, function()
-        local line = _getFullMatchLine()
-        local tokens = {}
-        for w in tostring(line or ""):gmatch("%S+") do
-            tokens[#tokens + 1] = w
-        end
-
-        local kit = _getKit()
-
-        local okM, mod = _safeRequire("dwkit.commands.dwskills")
-        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
-            local ctx = {
-                out = function(line2) _out(line2) end,
-                err = function(msg) _err(msg) end,
-                ppTable = function(t, opts) _ppTable(t, opts) end,
-                callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
-                getKit = function() return kit end,
-                getService = function(name) return _getService(name) end,
-                printServiceSnapshot = function(label, svcName) _printServiceSnapshot(label, svcName) end,
-            }
-
-            local ok1, r1 = pcall(mod.dispatch, ctx, kit, tokens)
-            if ok1 and r1 ~= false then return end
-
-            local ok2, r2 = pcall(mod.dispatch, ctx, tokens)
-            if ok2 and r2 ~= false then return end
-
-            local ok3, r3 = pcall(mod.dispatch, tokens)
-            if ok3 and r3 ~= false then return end
-
-            _out("[DWKit Skills] NOTE: dwskills delegate returned false; falling back to inline handler")
-        end
-
-        -- Inline fallback (legacy behaviour)
-        _printServiceSnapshot("SkillRegistryService", "skillRegistryService")
-    end)
-
-    -- Phase 10 split: dwscorestore delegates to dwkit.commands.dwscorestore (with fallback)
-    local dwscorestorePattern = [[^dwscorestore(?:\s+(\S+))?(?:\s+(\S+))?\s*$]]
-    local id14 = _mkAlias(dwscorestorePattern, function()
-        local svc = _getScoreStoreServiceBestEffort()
+local function _installAlias_dwroom()
+    local pat = [[^dwroom(?:\s+(status|clear|ingestclip|fixture|refresh))?(?:\s+(\S+))?\s*$]]
+    return _mkAlias(pat, function()
+        local svc = _getRoomEntitiesServiceBestEffort()
         if type(svc) ~= "table" then
-            _err("ScoreStoreService not available. Run loader.init() first.")
+            _err("RoomEntitiesService not available. Run loader.init() first.")
             return
         end
 
-        -- NOTE: pattern has capture groups; parse directly (safe enough here)
-        local sub = (matches and matches[2]) and tostring(matches[2]) or ""
-        local arg = (matches and matches[3]) and tostring(matches[3]) or ""
-
-        local okM, mod = _safeRequire("dwkit.commands.dwscorestore")
-        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
-            local ctx = {
-                out = function(line2) _out(line2) end,
-                err = function(msg) _err(msg) end,
-                callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
-            }
-
-            local ok1, err1 = pcall(mod.dispatch, ctx, svc, sub, arg)
-            if ok1 then
-                return
-            end
-
-            local ok2, err2 = pcall(mod.dispatch, nil, svc, sub, arg)
-            if ok2 then
-                return
-            end
-
-            _out("[DWKit ScoreStore] NOTE: dwscorestore delegate failed; falling back to inline handler")
-            _out("  err1=" .. tostring(err1))
-            _out("  err2=" .. tostring(err2))
+        local line = _getFullMatchLine()
+        local tokens = {}
+        for w in tostring(line or ""):gmatch("%S+") do
+            tokens[#tokens + 1] = w
         end
 
-        -- Inline fallback (legacy behaviour)
-        local function usage()
-            _out("[DWKit ScoreStore] Usage:")
-            _out("  dwscorestore")
-            _out("  dwscorestore status")
-            _out("  dwscorestore persist on|off|status")
-            _out("  dwscorestore fixture [basic]")
-            _out("  dwscorestore clear")
-            _out("  dwscorestore wipe [disk]")
-            _out("  dwscorestore reset [disk]")
-            _out("")
-            _out("Notes:")
-            _out("  - clear = clears snapshot only (history preserved)")
-            _out("  - wipe/reset = clears snapshot + history")
-            _out("  - wipe/reset disk = also deletes persisted file (best-effort; requires store.delete)")
+        local sub = tokens[2] or ""
+        local arg = ""
+        if #tokens >= 3 then
+            arg = table.concat(tokens, " ", 3)
         end
 
-        if sub == "" or sub == "status" then
-            local ok, _, _, _, err = _callBestEffort(svc, "printSummary")
-            if not ok then
-                _err("ScoreStoreService.printSummary failed: " .. tostring(err))
-            end
+        local okM, mod = _safeRequire("dwkit.commands.dwroom")
+        if not okM or type(mod) ~= "table" or type(mod.dispatch) ~= "function" then
+            _err("dwkit.commands.dwroom not available. Ensure src/dwkit/commands/dwroom.lua exists.")
             return
         end
 
-        if sub == "persist" then
-            if arg ~= "on" and arg ~= "off" and arg ~= "status" then
-                usage()
-                return
-            end
+        local ctx = {
+            out = function(line2) _out(line2) end,
+            err = function(msg) _err(msg) end,
+            callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
+            getClipboardText = function() return _getClipboardTextBestEffort() end,
+            resolveSendFn = function() return _resolveSendFn() end,
+            looksLikePrompt = function(line2) return _looksLikePrompt(line2) end,
+            killTrigger = function(id) _killTriggerBestEffort(id) end,
+            killTimer = function(id) _killTimerBestEffort(id) end,
+            tempRegexTrigger = function(p, fn) return tempRegexTrigger(p, fn) end,
+            tempTimer = function(sec, fn) return tempTimer(sec, fn) end,
+            printRoomEntitiesStatus = function(s) _printRoomEntitiesStatus(s) end,
+        }
 
-            if arg == "status" then
-                local ok, _, _, _, err = _callBestEffort(svc, "printSummary")
-                if not ok then
-                    _err("ScoreStoreService.printSummary failed: " .. tostring(err))
-                end
-                return
-            end
-
-            if type(svc.configurePersistence) ~= "function" then
-                _err("ScoreStoreService.configurePersistence not available.")
-                return
-            end
-
-            local enable = (arg == "on")
-            local ok, _, _, _, err = _callBestEffort(svc, "configurePersistence", { enabled = enable, loadExisting = true })
-            if not ok then
-                _err("configurePersistence failed: " .. tostring(err))
-                return
-            end
-
-            local ok2, _, _, _, err2 = _callBestEffort(svc, "printSummary")
-            if not ok2 then
-                _err("ScoreStoreService.printSummary failed: " .. tostring(err2))
-            end
-            return
+        local okCall, errOrNil = pcall(mod.dispatch, ctx, svc, sub, arg)
+        if not okCall then
+            _err("dwroom handler threw error: " .. tostring(errOrNil))
         end
-
-        if sub == "fixture" then
-            local name = (arg ~= "" and arg) or "basic"
-            if type(svc.ingestFixture) ~= "function" then
-                _err("ScoreStoreService.ingestFixture not available.")
-                return
-            end
-            local ok, _, _, _, err = _callBestEffort(svc, "ingestFixture", name, { source = "fixture" })
-            if not ok then
-                _err("ingestFixture failed: " .. tostring(err))
-                return
-            end
-            local ok2, _, _, _, err2 = _callBestEffort(svc, "printSummary")
-            if not ok2 then
-                _err("ScoreStoreService.printSummary failed: " .. tostring(err2))
-            end
-            return
-        end
-
-        if sub == "clear" then
-            if type(svc.clear) ~= "function" then
-                _err("ScoreStoreService.clear not available.")
-                return
-            end
-            local ok, _, _, _, err = _callBestEffort(svc, "clear", { source = "manual" })
-            if not ok then
-                _err("clear failed: " .. tostring(err))
-                return
-            end
-            local ok2, _, _, _, err2 = _callBestEffort(svc, "printSummary")
-            if not ok2 then
-                _err("ScoreStoreService.printSummary failed: " .. tostring(err2))
-            end
-            return
-        end
-
-        if sub == "wipe" or sub == "reset" then
-            if arg ~= "" and arg ~= "disk" then
-                usage()
-                return
-            end
-            if type(svc.wipe) ~= "function" then
-                _err("ScoreStoreService.wipe not available. Update dwkit.services.score_store_service first.")
-                return
-            end
-
-            local meta = { source = "manual" }
-            if arg == "disk" then
-                meta.deleteFile = true
-            end
-
-            local ok, _, _, _, err = _callBestEffort(svc, "wipe", meta)
-            if not ok then
-                _err(sub .. " failed: " .. tostring(err))
-                return
-            end
-
-            local ok2, _, _, _, err2 = _callBestEffort(svc, "printSummary")
-            if not ok2 then
-                _err("ScoreStoreService.printSummary failed: " .. tostring(err2))
-            end
-            return
-        end
-
-        usage()
     end)
+end
 
-    local dweventtapPattern = [[^dweventtap(?:\s+(on|off|status|show|clear))?(?:\s+(\d+))?\s*$]]
-    local id15 = _mkAlias(dweventtapPattern, function()
+local function _installAlias_eventDiagTap()
+    local pat = [[^dweventtap(?:\s+(on|off|status|show|clear))?(?:\s+(\d+))?\s*$]]
+    return _mkAlias(pat, function()
         local mode = (matches and matches[2]) and tostring(matches[2]) or ""
         local n = (matches and matches[3]) and tostring(matches[3]) or ""
 
@@ -2534,10 +1756,16 @@ function M.install(opts)
 
         _err("Usage: dweventtap [on|off|status|show|clear] [n]")
     end)
+end
 
-    local dweventsubPattern = [[^dweventsub\s+(\S+)\s*$]]
-    local id16 = _mkAlias(dweventsubPattern, function()
+local function _installAlias_eventDiagSub()
+    local pat = [[^dweventsub(?:\s+(\S+))?\s*$]]
+    return _mkAlias(pat, function()
         local evName = (matches and matches[2]) and tostring(matches[2]) or ""
+        if evName == "" then
+            _err("Usage: dweventsub <EventName>")
+            return
+        end
 
         local mod = _getEventDiagModuleBestEffort()
         if type(mod) ~= "table" then
@@ -2558,10 +1786,16 @@ function M.install(opts)
             _err("event_diag.subOn threw error: " .. tostring(errOrNil))
         end
     end)
+end
 
-    local dweventunsubPattern = [[^dweventunsub\s+(\S+)\s*$]]
-    local id17 = _mkAlias(dweventunsubPattern, function()
+local function _installAlias_eventDiagUnsub()
+    local pat = [[^dweventunsub(?:\s+(\S+))?\s*$]]
+    return _mkAlias(pat, function()
         local evName = (matches and matches[2]) and tostring(matches[2]) or ""
+        if evName == "" then
+            _err("Usage: dweventunsub <EventName|all>")
+            return
+        end
 
         local mod = _getEventDiagModuleBestEffort()
         if type(mod) ~= "table" then
@@ -2582,9 +1816,11 @@ function M.install(opts)
             _err("event_diag.subOff threw error: " .. tostring(errOrNil))
         end
     end)
+end
 
-    local dweventlogPattern = [[^dweventlog(?:\s+(\d+))?\s*$]]
-    local id18 = _mkAlias(dweventlogPattern, function()
+local function _installAlias_eventDiagLog()
+    local pat = [[^dweventlog(?:\s+(\d+))?\s*$]]
+    return _mkAlias(pat, function()
         local n = (matches and matches[2]) and tostring(matches[2]) or ""
 
         local mod = _getEventDiagModuleBestEffort()
@@ -2606,33 +1842,29 @@ function M.install(opts)
             _err("event_diag.printLog threw error: " .. tostring(errOrNil))
         end
     end)
+end
 
-    -- Phase 9 split: dwdiag delegates to dwkit.commands.dwdiag (with fallback)
-    local dwdiagPattern = [[^dwdiag(?:\s+(.+))?\s*$]]
-    local id19 = _mkAlias(dwdiagPattern, function()
-        local line = _getFullMatchLine()
-        local tokens = {}
-        for w in tostring(line or ""):gmatch("%S+") do
-            tokens[#tokens + 1] = w
-        end
-
+local function _installAlias_dwdiag()
+    local pat = [[^dwdiag(?:\s+(.+))?\s*$]]
+    return _mkAlias(pat, function()
         local kit = _getKit()
+        local tokens = _tokenizeFromMatches()
 
         local okM, mod = _safeRequire("dwkit.commands.dwdiag")
         if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
             local ctx = {
                 out = function(line2) _out(line2) end,
                 err = function(msg) _err(msg) end,
-                ppTable = function(t, opts) _ppTable(t, opts) end,
+                ppTable = function(t, opts2) _legacyPpTable(t, opts2) end,
                 callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
 
                 getKit = function() return kit end,
                 makeEventDiagCtx = function() return _makeEventDiagCtx() end,
                 getEventDiagState = function() return STATE.eventDiag end,
 
-                legacyPrintVersion = function() _printVersionSummary() end,
-                legacyPrintBoot = function() _printBootHealth() end,
-                legacyPrintServices = function() _printServicesHealth() end,
+                legacyPrintVersion = function() _legacyPrintVersionSummary() end,
+                legacyPrintBoot = function() _legacyPrintBootHealth() end,
+                legacyPrintServices = function() _legacyPrintServicesHealth() end,
             }
 
             local ok1, r1 = pcall(mod.dispatch, ctx, kit, tokens)
@@ -2647,24 +1879,23 @@ function M.install(opts)
             _out("[DWKit Diag] NOTE: dwdiag delegate returned false; falling back to inline handler")
         end
 
-        -- Inline fallback (legacy behaviour)
         _out("[DWKit Diag] bundle (dwdiag)")
         _out("  NOTE: SAFE + manual-only. Does not enable event tap or subscriptions.")
         _out("")
 
         _out("== dwversion ==")
         _out("")
-        _printVersionSummary()
+        _legacyPrintVersionSummary()
         _out("")
 
         _out("== dwboot ==")
         _out("")
-        _printBootHealth()
+        _legacyPrintBootHealth()
         _out("")
 
         _out("== dwservices ==")
         _out("")
-        _printServicesHealth()
+        _legacyPrintServicesHealth()
         _out("")
 
         _out("== event diag status ==")
@@ -2679,383 +1910,158 @@ function M.install(opts)
             _err("dwkit.commands.event_diag not available (cannot print event diag status)")
         end
     end)
+end
 
-    -- dwgui: SAFE config + optional lifecycle helpers
-    -- Phase 2 split: delegates to dwkit.commands.dwgui when available, with fallback here.
-    local dwguiPattern =
-    [[^dwgui(?:\s+(status|list|enable|disable|visible|validate|apply|dispose|reload|state))?(?:\s+(\S+))?(?:\s+(\S+))?\s*$]]
-    local id20a = _mkAlias(dwguiPattern, function()
-        local gs = _getGuiSettingsBestEffort()
-        if type(gs) ~= "table" then
-            _err("DWKit.config.guiSettings not available. Run loader.init() first.")
-            return
-        end
-
-        local alreadyLoaded = false
-        if type(gs.isLoaded) == "function" then
-            local okLoaded, v = pcall(gs.isLoaded)
-            alreadyLoaded = (okLoaded and v == true)
-        end
-
-        if (not alreadyLoaded) and type(gs.load) == "function" then
-            pcall(gs.load, { quiet = true })
-        end
-
-        -- IMPORTANT: tokenize FULL match line (matches[0]) when captures exist
-        local line = _getFullMatchLine()
-        local tokens = {}
-        for w in line:gmatch("%S+") do
-            tokens[#tokens + 1] = w
-        end
-
-        -- tokens[1] = "dwgui"
-        local sub  = tokens[2] or ""
-        local uiId = tokens[3] or ""
-        local arg3 = tokens[4] or ""
-
-        -- Try delegated handler FIRST (best-effort).
-        -- Signature tolerance:
-        --   dispatch(ctx, gs, sub, uiId, arg3)
-        --   dispatch(ctx, sub, uiId, arg3)
-        do
-            local okM, mod = _safeRequire("dwkit.commands.dwgui")
-            if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
-                local ctx = {
-                    out = function(line2) _out(line2) end,
-                    err = function(msg) _err(msg) end,
-                    ppTable = function(t, opts) _ppTable(t, opts) end,
-                    callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
-
-                    getGuiSettings = function() return gs end,
-                    getUiValidator = function() return _getUiValidatorBestEffort() end,
-                    printGuiStatusAndList = function(x) _printGuiStatusAndList(x) end,
-                    printNoUiNote = function(context) _printNoUiNote(context) end,
-
-                    safeRequire = function(name) return _safeRequire(name) end,
-                }
-
-                local ok1, err1 = pcall(mod.dispatch, ctx, gs, sub, uiId, arg3)
-                if ok1 then
-                    return
-                end
-
-                local ok2, err2 = pcall(mod.dispatch, ctx, sub, uiId, arg3)
-                if ok2 then
-                    return
-                end
-
-                -- If delegation fails, we fall back to inline legacy handler below.
-                _out("[DWKit GUI] NOTE: dwgui delegate failed; falling back to inline handler")
-                _out("  err1=" .. tostring(err1))
-                _out("  err2=" .. tostring(err2))
-            end
-        end
-
-        -- Inline fallback (legacy behaviour)
-        local function usage()
-            _out("[DWKit GUI] Usage:")
-            _out("  dwgui")
-            _out("  dwgui status")
-            _out("  dwgui list")
-            _out("  dwgui enable <uiId>")
-            _out("  dwgui disable <uiId>")
-            _out("  dwgui visible <uiId> on|off")
-            _out("  dwgui validate")
-            _out("  dwgui validate enabled")
-            _out("  dwgui validate <uiId>")
-            _out("  dwgui apply")
-            _out("  dwgui apply <uiId>")
-            _out("  dwgui dispose <uiId>")
-            _out("  dwgui reload")
-            _out("  dwgui reload <uiId>")
-            _out("  dwgui state <uiId>")
-        end
-
-        if sub == "" or sub == "status" or sub == "list" then
-            _printGuiStatusAndList(gs)
-            return
-        end
-
-        if (sub == "enable" or sub == "disable") then
-            if uiId == "" then
-                usage()
-                return
-            end
-            if type(gs.setEnabled) ~= "function" then
-                _err("guiSettings.setEnabled not available.")
-                return
-            end
-            local enable = (sub == "enable")
-            local okCall, errOrNil = pcall(gs.setEnabled, uiId, enable)
-            if not okCall then
-                _err("setEnabled failed: " .. tostring(errOrNil))
-                return
-            end
-            _out(string.format("[DWKit GUI] setEnabled uiId=%s enabled=%s", tostring(uiId), enable and "ON" or "OFF"))
-            return
-        end
-
-        if sub == "visible" then
-            if uiId == "" or (arg3 ~= "on" and arg3 ~= "off") then
-                usage()
-                return
-            end
-            if type(gs.setVisible) ~= "function" then
-                _err("guiSettings.setVisible not available.")
-                return
-            end
-            local vis = (arg3 == "on")
-            local okCall, errOrNil = pcall(gs.setVisible, uiId, vis)
-            if not okCall then
-                _err("setVisible failed: " .. tostring(errOrNil))
-                return
-            end
-            _out(string.format("[DWKit GUI] setVisible uiId=%s visible=%s", tostring(uiId), vis and "ON" or "OFF"))
-            return
-        end
-
-        if sub == "validate" then
-            local v = _getUiValidatorBestEffort()
-            if type(v) ~= "table" or type(v.validateAll) ~= "function" then
-                _err("dwkit.ui.ui_validator.validateAll not available.")
-                return
-            end
-
-            local target = uiId
-            local verbose = (arg3 == "verbose" or uiId == "verbose")
-
-            -- validate enabled shortcut
-            if uiId == "enabled" then
-                target = "enabled"
-            end
-
-            if target == "" then
-                local okCall, a, b, c, err = _callBestEffort(v, "validateAll", { source = "dwgui" })
-                if not okCall or a ~= true then
-                    _err("validateAll failed: " .. tostring(b or c or err))
-                    return
-                end
-                if verbose then
-                    _ppTable(b, { maxDepth = 3, maxItems = 40 })
-                else
-                    _out("[DWKit GUI] validateAll OK")
-                end
-                return
-            end
-
-            if target == "enabled" and type(v.validateEnabled) == "function" then
-                local okCall, a, b, c, err = _callBestEffort(v, "validateEnabled", { source = "dwgui" })
-                if not okCall or a ~= true then
-                    _err("validateEnabled failed: " .. tostring(b or c or err))
-                    return
-                end
-                if verbose then
-                    _ppTable(b, { maxDepth = 3, maxItems = 40 })
-                else
-                    _out("[DWKit GUI] validateEnabled OK")
-                end
-                return
-            end
-
-            if target ~= "" and type(v.validateOne) == "function" then
-                local okCall, a, b, c, err = _callBestEffort(v, "validateOne", target, { source = "dwgui" })
-                if not okCall or a ~= true then
-                    _err("validateOne failed: " .. tostring(b or c or err))
-                    return
-                end
-                if verbose then
-                    _ppTable(b, { maxDepth = 3, maxItems = 40 })
-                else
-                    _out("[DWKit GUI] validateOne OK uiId=" .. tostring(target))
-                end
-                return
-            end
-
-            _err("validate target unsupported (missing validateEnabled/validateOne)")
-            return
-        end
-
-        if sub == "apply" or sub == "dispose" or sub == "reload" or sub == "state" then
-            local okUM, um = _safeRequire("dwkit.ui.ui_manager")
-            if not okUM or type(um) ~= "table" then
-                _err("dwkit.ui.ui_manager not available.")
-                return
-            end
-
-            local function callAny(fnNames, ...)
-                for _, fn in ipairs(fnNames or {}) do
-                    if type(um[fn]) == "function" then
-                        local okCall, errOrNil = pcall(um[fn], ...)
-                        if not okCall then
-                            _err("ui_manager." .. tostring(fn) .. " failed: " .. tostring(errOrNil))
-                        end
-                        return true
-                    end
-                end
-                return false
-            end
-
-            if sub == "apply" then
-                if uiId == "" then
-                    if callAny({ "applyAll" }, { source = "dwgui" }) then return end
-                else
-                    if callAny({ "applyOne" }, uiId, { source = "dwgui" }) then return end
-                end
-                _err("ui_manager apply not supported")
-                return
-            end
-
-            if sub == "dispose" then
-                if uiId == "" then
-                    usage()
-                    return
-                end
-                if callAny({ "disposeOne" }, uiId, { source = "dwgui" }) then return end
-                _err("ui_manager.disposeOne not supported")
-                return
-            end
-
-            if sub == "reload" then
-                if uiId == "" then
-                    if callAny({ "reloadAllEnabled", "reloadAll" }, { source = "dwgui" }) then return end
-                else
-                    if callAny({ "reloadOne" }, uiId, { source = "dwgui" }) then return end
-                end
-                _err("ui_manager reload not supported")
-                return
-            end
-
-            if sub == "state" then
-                if uiId == "" then
-                    usage()
-                    return
-                end
-                if callAny({ "printState", "stateOne" }, uiId) then return end
-                _err("ui_manager state not supported")
-                return
-            end
-        end
-
-        usage()
-    end)
-
-    -- Phase 9 split: dwrelease delegates to dwkit.commands.dwrelease (with fallback)
-    local dwreleasePattern = [[^dwrelease(?:\s+(.+))?\s*$]]
-    local id20 = _mkAlias(dwreleasePattern, function()
-        local line = _getFullMatchLine()
-        local tokens = {}
-        for w in tostring(line or ""):gmatch("%S+") do
-            tokens[#tokens + 1] = w
-        end
-
+local function _installAlias_routered(cmdName)
+    cmdName = tostring(cmdName or "")
+    local pat = "^" .. cmdName .. "(?:\\s+(.+))?\\s*$"
+    return _mkAlias(pat, function()
         local kit = _getKit()
+        local ctx = _makeRouterCtx()
+        local tokens = _tokenizeFromMatches()
 
-        local okM, mod = _safeRequire("dwkit.commands.dwrelease")
-        if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
-            local ctx = {
-                out = function(line2) _out(line2) end,
-                err = function(msg) _err(msg) end,
-                ppTable = function(t, opts) _ppTable(t, opts) end,
-                callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
-                getKit = function() return kit end,
-
-                legacyPrint = function() _printReleaseChecklist() end,
-                legacyPrintVersion = function() _printVersionSummary() end,
-            }
-
-            local ok1, r1 = pcall(mod.dispatch, ctx, kit, tokens)
-            if ok1 and r1 ~= false then return end
-
-            local ok2, r2 = pcall(mod.dispatch, ctx, tokens)
-            if ok2 and r2 ~= false then return end
-
-            local ok3, r3 = pcall(mod.dispatch, tokens)
-            if ok3 and r3 ~= false then return end
-
-            _out("[DWKit Release] NOTE: dwrelease delegate returned false; falling back to inline handler")
+        local ok = _dispatch(ctx, kit, tokens)
+        if ok ~= true then
+            _err(cmdName .. " dispatch failed (unhandled)")
         end
-
-        -- Inline fallback (legacy behaviour)
-        _printReleaseChecklist()
     end)
+end
 
-    local all = {
-        id1, id2, id3, id4, id5, id6, id7, id8, id9,
-        id10, id11, id11b, id11c, id12, id13, id14,
-        id15, id16, id17, id18, id19,
-        id20a, id20
+-- ------------------------------------------------------------
+-- Install (AUTO SAFE aliases + special-cases)
+-- ------------------------------------------------------------
+function M.install(opts)
+    opts = opts or {}
+
+    if type(tempAlias) ~= "function" then
+        STATE.lastError = "tempAlias() not available"
+        return false, STATE.lastError
+    end
+
+    if STATE.installed then
+        return true, nil
+    end
+
+    -- Always cleanup persisted aliases first (safe across reloads)
+    _cleanupPriorAliasesBestEffort()
+
+    local kit = _getKit()
+    if type(kit) ~= "table" then
+        STATE.lastError = "DWKit not available. Run loader.init() first."
+        return false, STATE.lastError
+    end
+
+    -- Build SAFE names from registry (best-effort).
+    -- If registry enumeration fails, we will fall back to a minimal static list.
+    local safeNames = _getSafeCommandNamesBestEffort(kit)
+
+    if type(safeNames) ~= "table" or #safeNames == 0 then
+        -- Minimal fallback set (keeps your current SAFE surface alive)
+        safeNames = {
+            "dwactions",
+            "dwboot",
+            "dwcommands",
+            "dwdiag",
+            "dwevent",
+            "dweventlog",
+            "dwevents",
+            "dweventsub",
+            "dweventtap",
+            "dweventunsub",
+            "dwgui",
+            "dwhelp",
+            "dwid",
+            "dwinfo",
+            "dwpresence",
+            "dwrelease",
+            "dwroom",
+            "dwscorestore",
+            "dwservices",
+            "dwskills",
+            "dwtest",
+            "dwversion",
+            "dwwho",
+        }
+    end
+
+    -- Special-case aliases (need state/services/router)
+    local special = {
+        dwwho = true,
+        dwroom = true,
+        dweventtap = true,
+        dweventsub = true,
+        dweventunsub = true,
+        dweventlog = true,
+        dwgui = true,
+        dwscorestore = true,
+        dwrelease = true,
+        dwdiag = true,
+        -- NOTE: dwcommands stays auto-generated, but runtime dispatch is now inline-safe in _dispatchGenericCommand()
     }
 
-    for _, id in ipairs(all) do
-        if not id then
-            STATE.lastError = "Failed to create one or more aliases"
-            if type(killAlias) == "function" then
-                for _, xid in ipairs(all) do
-                    if xid then pcall(killAlias, xid) end
+    local created = {} -- cmdName -> aliasId
+
+    -- 1) Special-case installs
+    created.dwwho = _installAlias_dwwho()
+    created.dwroom = _installAlias_dwroom()
+    created.dweventtap = _installAlias_eventDiagTap()
+    created.dweventsub = _installAlias_eventDiagSub()
+    created.dweventunsub = _installAlias_eventDiagUnsub()
+    created.dweventlog = _installAlias_eventDiagLog()
+    created.dwdiag = _installAlias_dwdiag()
+
+    created.dwgui = _installAlias_routered("dwgui")
+    created.dwscorestore = _installAlias_routered("dwscorestore")
+    created.dwrelease = _installAlias_routered("dwrelease")
+
+    -- 2) Auto-generate SAFE aliases for everything else
+    for _, cmdName in ipairs(safeNames) do
+        cmdName = tostring(cmdName or "")
+        if cmdName ~= "" and (special[cmdName] ~= true) then
+            local pat = "^" .. cmdName .. "(?:\\s+(.+))?\\s*$"
+            local id = _mkAlias(pat, function()
+                if not _hasCmd() then
+                    _err("DWKit.cmd not available. Run loader.init() first.")
+                    return
                 end
-            end
-            return false, STATE.lastError
+                local k = _getKit()
+                local tokens = _tokenizeFromMatches()
+                local cmd = tokens[1] or cmdName
+                _dispatchGenericCommand(cmd, k, tokens)
+            end)
+            created[cmdName] = id
         end
     end
 
-    STATE.aliasIds.dwcommands   = id1
-    STATE.aliasIds.dwhelp       = id2
-    STATE.aliasIds.dwtest       = id3
-    STATE.aliasIds.dwinfo       = id4
-    STATE.aliasIds.dwid         = id5
-    STATE.aliasIds.dwversion    = id6
-    STATE.aliasIds.dwevents     = id7
-    STATE.aliasIds.dwevent      = id8
-    STATE.aliasIds.dwboot       = id9
+    -- Validate all alias creations succeeded
+    local anyFail = false
+    for k, v in pairs(created) do
+        if v == nil then
+            anyFail = true
+            break
+        end
+    end
 
-    STATE.aliasIds.dwservices   = id10
-    STATE.aliasIds.dwpresence   = id11
-    STATE.aliasIds.dwroom       = id11b
-    STATE.aliasIds.dwwho        = id11c
-    STATE.aliasIds.dwactions    = id12
-    STATE.aliasIds.dwskills     = id13
-    STATE.aliasIds.dwscorestore = id14
+    if anyFail then
+        STATE.lastError = "Failed to create one or more aliases"
+        if type(killAlias) == "function" then
+            for _, xid in pairs(created) do
+                if xid then pcall(killAlias, xid) end
+            end
+        end
+        STATE.aliasIds = {}
+        return false, STATE.lastError
+    end
 
-    STATE.aliasIds.dweventtap   = id15
-    STATE.aliasIds.dweventsub   = id16
-    STATE.aliasIds.dweventunsub = id17
-    STATE.aliasIds.dweventlog   = id18
+    STATE.aliasIds = created
+    STATE.installed = true
+    STATE.lastError = nil
 
-    STATE.aliasIds.dwdiag       = id19
-    STATE.aliasIds.dwgui        = id20a
-    STATE.aliasIds.dwrelease    = id20
-
-    STATE.installed             = true
-    STATE.lastError             = nil
-
-    _setGlobalAliasIds({
-        dwcommands   = id1,
-        dwhelp       = id2,
-        dwtest       = id3,
-        dwinfo       = id4,
-        dwid         = id5,
-        dwversion    = id6,
-        dwevents     = id7,
-        dwevent      = id8,
-        dwboot       = id9,
-        dwservices   = id10,
-        dwpresence   = id11,
-        dwroom       = id11b,
-        dwwho        = id11c,
-        dwactions    = id12,
-        dwskills     = id13,
-        dwscorestore = id14,
-        dweventtap   = id15,
-        dweventsub   = id16,
-        dweventunsub = id17,
-        dweventlog   = id18,
-        dwdiag       = id19,
-        dwgui        = id20a,
-        dwrelease    = id20,
-    })
+    _setGlobalAliasIds(created)
 
     if not opts.quiet then
-        _out("[DWKit Alias] Installed: dwcommands, dwhelp, dwtest, dwinfo, dwid, dwversion, dwevents, dwevent, dwboot, dwservices, dwpresence, dwroom, dwwho, dwactions, dwskills, dwscorestore, dweventtap, dweventsub, dweventunsub, dweventlog, dwdiag, dwgui, dwrelease")
+        local keys = _sortedKeys(created)
+        _out("[DWKit Alias] Installed (" .. tostring(#keys) .. "): " .. table.concat(keys, ", "))
     end
 
     return true, nil
