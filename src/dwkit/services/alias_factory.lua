@@ -3,7 +3,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.alias_factory
 -- Owner       : Services
--- Version     : v2026-01-27C
+-- Version     : v2026-01-27E
 -- Purpose     :
 --   - Objective extraction from command_aliases.lua:
 --       * SAFE command enumeration (best-effort)
@@ -13,10 +13,12 @@
 --   - This module is dependency-injected to avoid importing Mudlet globals directly.
 --   - Preferred path: deps.makeCtx(kind, kit) is provided, so ctx creation/enrichment
 --     is centralized elsewhere (e.g. dwkit.services.command_ctx).
---   - Fallback path: if deps.makeCtx is absent, we build a minimal ctx best-effort.
+--   - Fallback path: if deps.makeCtx is absent, we build a MINIMAL ctx (out/err + require/call)
+--     with NO legacy printers and NO event-diag helpers. Keep responsibilities small.
 --
 -- Public API:
 --   - getSafeCommandNamesBestEffort(deps, kit) -> table|nil
+--   - getDefaultSafeCommandNamesBestEffort(deps) -> table
 --   - installAutoSafeAliases(deps, kit, safeNames, specialMap) -> table createdMap
 --
 -- deps contract (minimum):
@@ -31,23 +33,13 @@
 --   deps.out(line)
 --   deps.err(msg)
 --
--- deps contract (optional, for enriched ctx):
+-- deps contract (preferred):
 --   deps.makeCtx(kind, kit) -> ctx
---
--- Optional legacy/event helpers for fallback ctx (best-effort only):
---   deps.legacyPpTable(t, opts)
---   deps.makeEventDiagCtx() -> ctx
---   deps.getEventDiagStateBestEffort(kit) -> table|nil
---   deps.legacyPrintVersionSummary()
---   deps.legacyPrintBoot()
---   deps.legacyPrintServices()
---   deps.legacyPrintIdentity()
---   deps.legacyPrintServiceSnapshot(label, svcName)
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-27C"
+M.VERSION = "v2026-01-27E"
 
 local function _sortedKeys(t)
     local keys = {}
@@ -133,18 +125,23 @@ function M.getSafeCommandNamesBestEffort(deps, kit)
     return nil
 end
 
-local function _ppTableFallback(deps, t, opts2)
-    if type(deps.legacyPpTable) == "function" then
-        return deps.legacyPpTable(t, opts2)
+function M.getDefaultSafeCommandNamesBestEffort(deps)
+    deps = (type(deps) == "table") and deps or {}
+    if type(deps.safeRequire) == "function" then
+        local ok, mod = deps.safeRequire("dwkit.services.safe_command_defaults")
+        if ok and type(mod) == "table" and type(mod.get) == "function" then
+            local ok2, v = pcall(mod.get)
+            if ok2 and type(v) == "table" and #v > 0 then
+                return v
+            end
+        end
     end
-    if type(deps.out) == "function" then
-        deps.out(tostring(t))
-        return
-    end
-    print(tostring(t))
+
+    -- last-resort minimal fallback if safeRequire is absent or defaults module missing
+    return { "dwcommands", "dwhelp", "dwtest", "dwversion" }
 end
 
-local function _makeGenericAliasCtxFallback(deps, k)
+local function _makeMinimalCtx(deps, k)
     deps = (type(deps) == "table") and deps or {}
     local out = (type(deps.out) == "function") and deps.out or function(line) print(tostring(line)) end
     local err = (type(deps.err) == "function") and deps.err or function(msg) out("ERROR: " .. tostring(msg)) end
@@ -152,32 +149,10 @@ local function _makeGenericAliasCtxFallback(deps, k)
     return {
         out = out,
         err = err,
-        ppTable = function(t, opts2) _ppTableFallback(deps, t, opts2) end,
-        callBestEffort = deps.callBestEffort,
         safeRequire = deps.safeRequire,
-
+        callBestEffort = deps.callBestEffort,
         getKit = function() return k end,
         getService = deps.getService,
-
-        printServiceSnapshot = function(label, svcName)
-            if type(deps.legacyPrintServiceSnapshot) == "function" then
-                return deps.legacyPrintServiceSnapshot(label, svcName)
-            end
-        end,
-
-        makeEventDiagCtx = deps.makeEventDiagCtx,
-
-        getEventDiagState = function()
-            if type(deps.getEventDiagStateBestEffort) == "function" then
-                return deps.getEventDiagStateBestEffort(k)
-            end
-            return nil
-        end,
-
-        legacyPrintVersionSummary = deps.legacyPrintVersionSummary,
-        legacyPrintBoot = deps.legacyPrintBoot,
-        legacyPrintServices = deps.legacyPrintServices,
-        legacyPrintIdentity = deps.legacyPrintIdentity,
     }
 end
 
@@ -226,7 +201,7 @@ function M.installAutoSafeAliases(deps, kit, safeNames, specialMap)
                     ctx = deps.makeCtx("generic", k)
                 end
                 if type(ctx) ~= "table" then
-                    ctx = _makeGenericAliasCtxFallback(deps, k)
+                    ctx = _makeMinimalCtx(deps, k)
                 end
 
                 R.dispatchGenericCommand(ctx, k, cmd, tokens)

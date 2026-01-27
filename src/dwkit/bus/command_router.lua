@@ -3,28 +3,29 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_router
 -- Owner       : Bus
--- Version     : v2026-01-27E
+-- Version     : v2026-01-27F
 -- Purpose     :
 --   - Centralize SAFE command routing (moved out of command_aliases.lua).
---   - Provide routered dispatch for commands that need special routing:
---       * dwgui / dwscorestore / dwrelease
 --   - Provide generic dispatch wrapper to:
 --       * call split command modules (dwkit.commands.<cmd>.dispatch)
 --       * fall back to DWKit.cmd.run (best-effort)
---       * keep micro-fallbacks (identity/version/boot/services + service snapshots)
+--       * keep micro-fallback printers (identity/version/boot/services + service snapshots)
 --
 -- IMPORTANT:
 --   - This module does NOT install Mudlet aliases.
 --   - Alias installation remains in dwkit.services.command_aliases.
---   - Context (ctx) functions are provided by the caller (out/err/safeRequire/callBestEffort/etc).
---   - Option A: ctx is now normalized best-effort via dwkit.core.mudlet_ctx.ensure().
---   - StepD: fallback printers can now be supplied by dwkit.services.legacy_printers
---           even when ctx lacks legacy helpers.
+--   - Context (ctx) functions are provided by the caller.
+--   - ctx is normalized best-effort via dwkit.core.mudlet_ctx.ensure().
+--
+-- NOTE (StepN):
+--   - Routered special-cases for dwgui/dwscorestore/dwrelease removed.
+--     These should now be handled by their split command modules via dispatch().
+--   - dispatchRoutered() is retained for backward compatibility and forwards to generic dispatch.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-27E"
+M.VERSION = "v2026-01-27F"
 
 local Ctx = require("dwkit.core.mudlet_ctx")
 local Legacy = require("dwkit.services.legacy_printers")
@@ -37,229 +38,18 @@ local function _sortedKeys(t)
     return keys
 end
 
-local function _printGuiStatusAndList(ctx, gs)
-    if type(ctx) ~= "table" then return end
-    if type(gs) ~= "table" or type(gs.status) ~= "function" or type(gs.list) ~= "function" then
-        ctx.err("guiSettings not available.")
-        return
-    end
-
-    local okS, st = pcall(gs.status)
-    if not okS or type(st) ~= "table" then
-        ctx.err("guiSettings.status failed")
-        return
-    end
-
-    ctx.out("[DWKit GUI] status (dwgui)")
-    ctx.out("  version=" .. tostring(gs.VERSION or "unknown"))
-    ctx.out("  loaded=" .. tostring(st.loaded == true))
-    ctx.out("  relPath=" .. tostring(st.relPath or ""))
-    ctx.out("  uiCount=" .. tostring(st.uiCount or 0))
-    if type(st.options) == "table" then
-        ctx.out("  options.visiblePersistenceEnabled=" .. tostring(st.options.visiblePersistenceEnabled == true))
-        ctx.out("  options.enabledDefault=" .. tostring(st.options.enabledDefault == true))
-        ctx.out("  options.visibleDefault=" .. tostring(st.options.visibleDefault == true))
-    end
-    if st.lastError then
-        ctx.out("  lastError=" .. tostring(st.lastError))
-    end
-
-    local okL, uiMap = pcall(gs.list)
-    if not okL or type(uiMap) ~= "table" then
-        ctx.err("guiSettings.list failed")
-        return
-    end
-
-    ctx.out("")
-    ctx.out("[DWKit GUI] list (uiId -> enabled/visible)")
-
-    local keys = _sortedKeys(uiMap)
-    if #keys == 0 then
-        ctx.out("  (none)")
-        return
-    end
-
-    for _, uiId in ipairs(keys) do
-        local rec = uiMap[uiId]
-        local en = (type(rec) == "table" and rec.enabled == true) and "ON" or "OFF"
-        local vis = "(unset)"
-        if type(rec) == "table" then
-            if rec.visible == true then
-                vis = "ON"
-            elseif rec.visible == false then
-                vis = "OFF"
-            end
-        end
-        ctx.out("  - " .. tostring(uiId) .. "  enabled=" .. en .. "  visible=" .. vis)
-    end
-end
-
-local function _printNoUiNote(ctx, context)
-    context = tostring(context or "UI")
-    ctx.out("  NOTE: No UI modules found for this profile (" .. context .. ").")
-    ctx.out("  Tips:")
-    ctx.out("    - dwgui list")
-    ctx.out("    - dwgui enable <uiId>")
-    ctx.out("    - dwgui apply   (optional: render enabled UI)")
-end
-
-local function _getGuiSettingsBestEffort(kit, ctx)
-    if type(kit) == "table" and type(kit.config) == "table" and type(kit.config.guiSettings) == "table" then
-        return kit.config.guiSettings
-    end
-    if type(ctx) == "table" and type(ctx.safeRequire) == "function" then
-        local ok, mod = ctx.safeRequire("dwkit.config.gui_settings")
-        if ok and type(mod) == "table" then return mod end
-    end
-    return nil
-end
-
-local function _getUiValidatorBestEffort(ctx)
-    if type(ctx) == "table" and type(ctx.safeRequire) == "function" then
-        local ok, mod = ctx.safeRequire("dwkit.ui.ui_validator")
-        if ok and type(mod) == "table" then return mod end
-    end
-    return nil
-end
-
+-- Back-compat entry point.
+-- Old callers may have used this for dwgui/dwscorestore/dwrelease, but those are now normal split commands.
 function M.dispatchRoutered(ctx, kit, tokens)
     ctx = Ctx.ensure(ctx, { kit = kit, errPrefix = "[DWKit Router]" })
     kit = (type(kit) == "table") and kit or (type(ctx.getKit) == "function" and ctx.getKit()) or nil
-
     tokens = (type(tokens) == "table") and tokens or {}
+
     local cmd = tostring(tokens[1] or "")
+    if cmd == "" then return true end
 
-    if cmd == "dwgui" then
-        local gs = _getGuiSettingsBestEffort(kit, ctx)
-        if type(gs) ~= "table" then
-            ctx.err("DWKit.config.guiSettings not available. Run loader.init() first.")
-            return true
-        end
-
-        local alreadyLoaded = false
-        if type(gs.isLoaded) == "function" then
-            local okLoaded, v = pcall(gs.isLoaded)
-            alreadyLoaded = (okLoaded and v == true)
-        end
-
-        if (not alreadyLoaded) and type(gs.load) == "function" then
-            pcall(gs.load, { quiet = true })
-        end
-
-        local sub = tokens[2] or ""
-        local uiId = tokens[3] or ""
-        local arg3 = tokens[4] or ""
-
-        local okM, mod = ctx.safeRequire("dwkit.commands.dwgui")
-        if not okM or type(mod) ~= "table" or type(mod.dispatch) ~= "function" then
-            ctx.err("dwkit.commands.dwgui not available (dispatch missing).")
-            return true
-        end
-
-        local dctx = {
-            out = ctx.out,
-            err = ctx.err,
-            ppTable = ctx.ppTable,
-            callBestEffort = ctx.callBestEffort,
-
-            getGuiSettings = function() return gs end,
-            getUiValidator = function() return _getUiValidatorBestEffort(ctx) end,
-            printGuiStatusAndList = function(x) _printGuiStatusAndList(ctx, x) end,
-            printNoUiNote = function(context) _printNoUiNote(ctx, context) end,
-
-            safeRequire = ctx.safeRequire,
-        }
-
-        local ok1, err1 = pcall(mod.dispatch, dctx, gs, sub, uiId, arg3)
-        if ok1 then return true end
-
-        local ok2, err2 = pcall(mod.dispatch, dctx, sub, uiId, arg3)
-        if ok2 then return true end
-
-        ctx.err("dwgui dispatch failed.")
-        ctx.err("  err1=" .. tostring(err1))
-        ctx.err("  err2=" .. tostring(err2))
-        return true
-    end
-
-    if cmd == "dwscorestore" then
-        if type(ctx.getService) ~= "function" then
-            ctx.err("ctx.getService not available (cannot resolve scoreStoreService).")
-            return true
-        end
-
-        local svc = ctx.getService("scoreStoreService")
-        if type(svc) ~= "table" then
-            local okS, mod = ctx.safeRequire("dwkit.services.score_store_service")
-            if okS and type(mod) == "table" then
-                svc = mod
-            end
-        end
-
-        if type(svc) ~= "table" then
-            ctx.err("ScoreStoreService not available. Run loader.init() first.")
-            return true
-        end
-
-        local sub = tokens[2] or ""
-        local arg = tokens[3] or ""
-
-        local okM, mod = ctx.safeRequire("dwkit.commands.dwscorestore")
-        if not okM or type(mod) ~= "table" or type(mod.dispatch) ~= "function" then
-            ctx.err("dwkit.commands.dwscorestore not available (dispatch missing).")
-            return true
-        end
-
-        local dctx = {
-            out = ctx.out,
-            err = ctx.err,
-            callBestEffort = ctx.callBestEffort,
-        }
-
-        local ok1, err1 = pcall(mod.dispatch, dctx, svc, sub, arg)
-        if ok1 then return true end
-
-        local ok2, err2 = pcall(mod.dispatch, nil, svc, sub, arg)
-        if ok2 then return true end
-
-        ctx.err("dwscorestore dispatch failed.")
-        ctx.err("  err1=" .. tostring(err1))
-        ctx.err("  err2=" .. tostring(err2))
-        return true
-    end
-
-    if cmd == "dwrelease" then
-        local okM, mod = ctx.safeRequire("dwkit.commands.dwrelease")
-        if not okM or type(mod) ~= "table" or type(mod.dispatch) ~= "function" then
-            ctx.err("dwkit.commands.dwrelease not available (dispatch missing).")
-            return true
-        end
-
-        local dctx = {
-            out = ctx.out,
-            err = ctx.err,
-            ppTable = ctx.ppTable,
-            callBestEffort = ctx.callBestEffort,
-            getKit = function() return kit end,
-        }
-
-        local ok1, a1, b1 = pcall(mod.dispatch, dctx, kit, tokens)
-        if ok1 and a1 ~= false then return true end
-
-        local ok2, a2, b2 = pcall(mod.dispatch, dctx, tokens)
-        if ok2 and a2 ~= false then return true end
-
-        local ok3, a3, b3 = pcall(mod.dispatch, tokens)
-        if ok3 and a3 ~= false then return true end
-
-        ctx.err("dwrelease dispatch failed.")
-        ctx.err("  err1=" .. tostring(b1 or a1))
-        ctx.err("  err2=" .. tostring(b2 or a2))
-        ctx.err("  err3=" .. tostring(b3 or a3))
-        return true
-    end
-
-    return false
+    -- Forward to generic dispatch (single source of truth).
+    return M.dispatchGenericCommand(ctx, kit, cmd, tokens)
 end
 
 function M.dispatchGenericCommand(ctx, kit, cmd, tokens)
@@ -272,6 +62,9 @@ function M.dispatchGenericCommand(ctx, kit, cmd, tokens)
 
     if cmd == "" then return true end
 
+    -- ------------------------------------------------------------
+    -- Special-case dwcommands (uses DWKit.cmd list methods)
+    -- ------------------------------------------------------------
     if cmd == "dwcommands" then
         if type(kit) ~= "table" or type(kit.cmd) ~= "table" then
             ctx.err("DWKit.cmd not available. Run loader.init() first.")
@@ -317,6 +110,9 @@ function M.dispatchGenericCommand(ctx, kit, cmd, tokens)
         return true
     end
 
+    -- ------------------------------------------------------------
+    -- Prefer split command module: dwkit.commands.<cmd>.dispatch
+    -- ------------------------------------------------------------
     do
         local okM, mod = ctx.safeRequire("dwkit.commands." .. cmd)
         if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
@@ -331,6 +127,9 @@ function M.dispatchGenericCommand(ctx, kit, cmd, tokens)
         end
     end
 
+    -- ------------------------------------------------------------
+    -- Next: DWKit.cmd.run fallback (best-effort)
+    -- ------------------------------------------------------------
     if type(kit) == "table" and type(kit.cmd) == "table" and type(kit.cmd.run) == "function" then
         local argString = ""
         if #tokens >= 2 then
@@ -346,74 +145,89 @@ function M.dispatchGenericCommand(ctx, kit, cmd, tokens)
 
     -- ------------------------------------------------------------
     -- Micro-fallbacks (best-effort, SAFE)
+    -- Keeps router resilient if a split module is missing.
     -- ------------------------------------------------------------
     local caVer = (type(ctx) == "table" and ctx.commandAliasesVersion) or "unknown"
 
-    if cmd == "dwid" then
-        if type(ctx.legacyPrintIdentity) == "function" then
-            ctx.legacyPrintIdentity()
-        else
-            Legacy.printIdentity(ctx, kit)
-        end
-        return true
-    end
+    local fallback = {
+        dwid = function()
+            if type(ctx.legacyPrintIdentity) == "function" then
+                ctx.legacyPrintIdentity()
+            else
+                Legacy.printIdentity(ctx, kit)
+            end
+        end,
 
-    if cmd == "dwversion" then
-        if type(ctx.legacyPrintVersionSummary) == "function" then
-            ctx.legacyPrintVersionSummary()
-        else
-            Legacy.printVersionSummary(ctx, kit, caVer)
-        end
-        return true
-    end
+        dwversion = function()
+            if type(ctx.legacyPrintVersionSummary) == "function" then
+                ctx.legacyPrintVersionSummary()
+            else
+                Legacy.printVersionSummary(ctx, kit, caVer)
+            end
+        end,
 
-    if cmd == "dwboot" then
-        if type(ctx.legacyPrintBoot) == "function" then
-            ctx.legacyPrintBoot()
-        else
-            Legacy.printBootHealth(ctx, kit)
-        end
-        return true
-    end
+        dwboot = function()
+            if type(ctx.legacyPrintBoot) == "function" then
+                ctx.legacyPrintBoot()
+            else
+                Legacy.printBootHealth(ctx, kit)
+            end
+        end,
 
-    if cmd == "dwservices" then
-        if type(ctx.legacyPrintServices) == "function" then
-            ctx.legacyPrintServices()
-        else
-            Legacy.printServicesHealth(ctx, kit)
-        end
-        return true
-    end
+        dwservices = function()
+            if type(ctx.legacyPrintServices) == "function" then
+                ctx.legacyPrintServices()
+            else
+                Legacy.printServicesHealth(ctx, kit)
+            end
+        end,
 
-    if cmd == "dwpresence" then
-        if type(ctx.printServiceSnapshot) == "function" then
-            ctx.printServiceSnapshot("PresenceService", "presenceService")
-        else
-            Legacy.printServiceSnapshot(ctx, kit, "PresenceService", "presenceService")
-        end
-        return true
-    end
+        dwpresence = function()
+            if type(ctx.printServiceSnapshot) == "function" then
+                ctx.printServiceSnapshot("PresenceService", "presenceService")
+            else
+                Legacy.printServiceSnapshot(ctx, kit, "PresenceService", "presenceService")
+            end
+        end,
 
-    if cmd == "dwactions" then
-        if type(ctx.printServiceSnapshot) == "function" then
-            ctx.printServiceSnapshot("ActionModelService", "actionModelService")
-        else
-            Legacy.printServiceSnapshot(ctx, kit, "ActionModelService", "actionModelService")
-        end
-        return true
-    end
+        dwactions = function()
+            if type(ctx.printServiceSnapshot) == "function" then
+                ctx.printServiceSnapshot("ActionModelService", "actionModelService")
+            else
+                Legacy.printServiceSnapshot(ctx, kit, "ActionModelService", "actionModelService")
+            end
+        end,
 
-    if cmd == "dwskills" then
-        if type(ctx.printServiceSnapshot) == "function" then
-            ctx.printServiceSnapshot("SkillRegistryService", "skillRegistryService")
-        else
-            Legacy.printServiceSnapshot(ctx, kit, "SkillRegistryService", "skillRegistryService")
-        end
+        dwskills = function()
+            if type(ctx.printServiceSnapshot) == "function" then
+                ctx.printServiceSnapshot("SkillRegistryService", "skillRegistryService")
+            else
+                Legacy.printServiceSnapshot(ctx, kit, "SkillRegistryService", "skillRegistryService")
+            end
+        end,
+    }
+
+    local f = fallback[cmd]
+    if type(f) == "function" then
+        f()
         return true
     end
 
     ctx.err("Command handler not available for: " .. cmd .. " (no split module / no DWKit.cmd.run).")
     return true
+end
+
+function M._debugSummaryFallbacks()
+    local keys = _sortedKeys({
+        dwid = true,
+        dwversion = true,
+        dwboot = true,
+        dwservices = true,
+        dwpresence = true,
+        dwactions = true,
+        dwskills = true,
+    })
+    return { count = #keys, keys = keys }
 end
 
 return M

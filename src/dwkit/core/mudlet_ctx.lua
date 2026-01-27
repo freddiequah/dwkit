@@ -3,7 +3,7 @@
 -- #########################################################################
 -- Module Name : dwkit.core.mudlet_ctx
 -- Owner       : Core
--- Version     : v2026-01-27A
+-- Version     : v2026-01-27B
 -- Purpose     :
 --   - Centralize Mudlet context plumbing ("ctx") in ONE place.
 --   - Provide a canonical ctx object with best-effort wrappers for Mudlet APIs
@@ -29,7 +29,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-27A"
+M.VERSION = "v2026-01-27B"
 
 function M.getKitBestEffort()
     if type(_G) == "table" and type(_G.DWKit) == "table" then
@@ -92,6 +92,13 @@ local function _getServiceBestEffort(kit, name)
     if type(kit) ~= "table" or type(kit.services) ~= "table" then return nil end
     local s = kit.services[name]
     if type(s) == "table" then return s end
+    return nil
+end
+
+local function _getGuiSettingsBestEffort(kit)
+    if type(kit) == "table" and type(kit.config) == "table" and type(kit.config.guiSettings) == "table" then
+        return kit.config.guiSettings
+    end
     return nil
 end
 
@@ -203,6 +210,9 @@ function M.make(opts)
         -- kit/service
         getKit = function() return kit end,
         getService = function(name) return _getServiceBestEffort(kit, name) end,
+
+        -- config (best-effort, core-safe)
+        getGuiSettings = function() return _getGuiSettingsBestEffort(kit) end,
 
         -- helpers
         sortedKeys = _sortedKeys,

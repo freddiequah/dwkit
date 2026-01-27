@@ -3,7 +3,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-27K
+-- Version     : v2026-01-27Q
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for DWKit commands.
 --   - AUTO-GENERATES SAFE aliases from the Command Registry (best-effort).
@@ -51,6 +51,35 @@
 --   - command_aliases no longer provides legacy/event wrapper helpers in deps.
 --     alias_factory should rely on deps.makeCtx() (CommandCtx) as the single source of truth.
 --
+-- NOTE (StepH):
+--   - command-surface lifecycle cleanup (event diag shutdown + reset split command modules)
+--     moved OUT of this module into:
+--       * dwkit.services.alias_control.cleanupCommandSurfaceBestEffort()
+--
+-- NOTE (StepL):
+--   - command_aliases no longer depends on dwkit.core.mudlet_ctx directly.
+--     It uses dwkit.services.command_ctx as the single ctx entrypoint.
+--
+-- NOTE (StepM):
+--   - command_aliases no longer carries duplicated "ctx fallback helpers".
+--     It relies on CTX0 (CommandCtx) for out/err/safeRequire/callBestEffort/tokenize/sortedKeys/getService.
+--
+-- NOTE (StepN):
+--   - command_aliases no longer reports Event Diagnostics summary in getState().
+--     Event-diag reporting/summary is owned by:
+--       * dwkit.services.event_diag_state (e.g. getSummary/getState)
+--       * event-diag commands (dwevent* / dwdiag etc.)
+--
+-- NOTE (StepO):
+--   - Removed CTX0 fallback shim. command_aliases assumes CommandCtx.make() is available and canonical.
+--
+-- NOTE (StepQ):
+--   - alias_factory is now REQUIRED (fail-fast if missing).
+--   - Removed all fallback alias generation paths from this module:
+--       * no safe_command_defaults fallback
+--       * no manual alias loop fallback
+--     This makes command_aliases a thin orchestrator only.
+--
 -- IMPORTANT:
 --   - tempAlias objects persist in Mudlet even if this module is reloaded via package.loaded=nil.
 --   - This module stores alias ids in DWKit root (kit._commandAliasesAliasIds) and cleans them up
@@ -65,13 +94,27 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-27K"
+M.VERSION = "v2026-01-27Q"
 
-local Ctx = require("dwkit.core.mudlet_ctx")
 local AliasCtl = require("dwkit.services.alias_control")
 local CommandCtx = require("dwkit.services.command_ctx")
 
-local CTX0 = Ctx.make({ errPrefix = "[DWKit Alias]" })
+-- Base ctx for this module (single entrypoint via CommandCtx)
+local CTX0 = CommandCtx.make({
+    kit = nil, -- best-effort resolve
+    errPrefix = "[DWKit Alias]",
+    commandAliasesVersion = M.VERSION,
+})
+
+-- Canonical ctx surface (no duplicated helpers here)
+local _out = CTX0.out
+local _err = CTX0.err
+local _getKit = CTX0.getKit
+local _sortedKeys = CTX0.sortedKeys
+local _safeRequire = CTX0.safeRequire
+local _callBestEffort = CTX0.callBestEffort
+local _tokenizeFromMatches = CTX0.tokenizeFromMatches
+local _getService = CTX0.getService
 
 local STATE = {
     installed = false,
@@ -83,32 +126,9 @@ local STATE = {
     lastError = nil,
 }
 
-local function _out(line) CTX0.out(line) end
-local function _err(msg) CTX0.err(msg) end
-
-local function _getKit()
-    return CTX0.getKit()
-end
-
 local function _hasCmd()
     local kit = _getKit()
     return type(kit) == "table" and type(kit.cmd) == "table"
-end
-
-local function _sortedKeys(t)
-    return CTX0.sortedKeys(t)
-end
-
-local function _safeRequire(modName)
-    return CTX0.safeRequire(modName)
-end
-
-local function _callBestEffort(obj, fnName, ...)
-    return CTX0.callBestEffort(obj, fnName, ...)
-end
-
-local function _tokenizeFromMatches()
-    return CTX0.tokenizeFromMatches()
 end
 
 -- ------------------------------------------------------------
@@ -142,77 +162,11 @@ function M.getState()
         aliasIds[k] = v
     end
 
-    local kit = _getKit()
-    local ctx = CommandCtx.make({
-        kit = kit,
-        errPrefix = "[DWKit Alias]",
-        commandAliasesVersion = M.VERSION,
-    })
-
-    local d = nil
-    if type(ctx.getEventDiagState) == "function" then
-        d = ctx.getEventDiagState()
-    end
-
-    local subCount = 0
-    if type(d) == "table" and type(d.subs) == "table" then
-        for _ in pairs(d.subs) do subCount = subCount + 1 end
-    end
-
     return {
         installed = STATE.installed and true or false,
         aliasIds = aliasIds,
-        eventDiag = {
-            maxLog = (type(d) == "table" and d.maxLog) or 50,
-            logCount = (type(d) == "table" and type(d.log) == "table") and #d.log or 0,
-            tapToken = (type(d) == "table") and d.tapToken or nil,
-            subsCount = subCount,
-        },
         lastError = STATE.lastError,
     }
-end
-
-local function _getEventDiagStateServiceBestEffort()
-    local ok, mod = _safeRequire("dwkit.services.event_diag_state")
-    if ok and type(mod) == "table" then
-        return mod
-    end
-    return nil
-end
-
-local function _resetSplitCommandModulesBestEffort()
-    local mods = {
-        "dwkit.commands.dwroom",
-        "dwkit.commands.dwwho",
-        "dwkit.commands.dwgui",
-        "dwkit.commands.dwboot",
-        "dwkit.commands.dwcommands",
-        "dwkit.commands.dwhelp",
-        "dwkit.commands.dwtest",
-        "dwkit.commands.dwid",
-        "dwkit.commands.dwversion",
-        "dwkit.commands.dwinfo",
-        "dwkit.commands.dwevents",
-        "dwkit.commands.dwevent",
-        "dwkit.commands.dweventtap",
-        "dwkit.commands.dweventsub",
-        "dwkit.commands.dweventunsub",
-        "dwkit.commands.dweventlog",
-        "dwkit.commands.dwservices",
-        "dwkit.commands.dwpresence",
-        "dwkit.commands.dwactions",
-        "dwkit.commands.dwskills",
-        "dwkit.commands.dwdiag",
-        "dwkit.commands.dwrelease",
-        "dwkit.commands.dwscorestore",
-    }
-
-    for _, name in ipairs(mods) do
-        local okM, mod = _safeRequire(name)
-        if okM and type(mod) == "table" and type(mod.reset) == "function" then
-            pcall(mod.reset)
-        end
-    end
 end
 
 function M.uninstall()
@@ -222,13 +176,8 @@ function M.uninstall()
 
         do
             local kit0 = _getKit()
-            local S0 = _getEventDiagStateServiceBestEffort()
-            if S0 and type(S0.shutdown) == "function" then
-                pcall(S0.shutdown, kit0)
-            end
+            pcall(AliasCtl.cleanupCommandSurfaceBestEffort, kit0, { reason = "uninstall-not-installed" })
         end
-
-        _resetSplitCommandModulesBestEffort()
 
         STATE.aliasIds = {}
         STATE.lastError = nil
@@ -238,13 +187,8 @@ function M.uninstall()
 
     do
         local kit = _getKit()
-        local S = _getEventDiagStateServiceBestEffort()
-        if S and type(S.shutdown) == "function" then
-            pcall(S.shutdown, kit)
-        end
+        pcall(AliasCtl.cleanupCommandSurfaceBestEffort, kit, { reason = "uninstall" })
     end
-
-    _resetSplitCommandModulesBestEffort()
 
     if type(killAlias) ~= "function" then
         STATE.lastError = "killAlias() not available"
@@ -287,7 +231,7 @@ local function _mkAlias(pattern, fn)
 end
 
 -- ------------------------------------------------------------
--- Install (AUTO SAFE aliases via alias_factory)
+-- Install (AUTO SAFE aliases via alias_factory) - REQUIRED
 -- ------------------------------------------------------------
 function M.install(opts)
     opts = opts or {}
@@ -309,26 +253,29 @@ function M.install(opts)
         return false, STATE.lastError
     end
 
+    -- StepQ: alias_factory is required (fail-fast)
     local okF, F = _safeRequire("dwkit.services.alias_factory")
     if not okF or type(F) ~= "table" then
-        F = nil
+        STATE.lastError = "alias_factory not available (required)"
+        STATE.aliasIds = {}
+        return false, STATE.lastError
     end
 
     local deps = {
-        safeRequire = function(name) return _safeRequire(name) end,
-        callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
-        mkAlias = function(pat, fn) return _mkAlias(pat, fn) end,
-        tokenizeFromMatches = function() return _tokenizeFromMatches() end,
-        hasCmd = function() return _hasCmd() end,
-        getKit = function() return _getKit() end,
-        getService = function(name) return CTX0.getService(name) end,
+        safeRequire = _safeRequire,
+        callBestEffort = _callBestEffort,
+        mkAlias = _mkAlias,
+        tokenizeFromMatches = _tokenizeFromMatches,
+        hasCmd = _hasCmd,
+        getKit = _getKit,
+        getService = _getService,
         getRouter = function()
             local ok, mod = _safeRequire("dwkit.bus.command_router")
             if ok and type(mod) == "table" then return mod end
             return nil
         end,
-        out = function(line) _out(line) end,
-        err = function(msg) _err(msg) end,
+        out = _out,
+        err = _err,
 
         -- Single source of truth: enriched ctx via CommandCtx
         makeCtx = function(kind, k)
@@ -340,72 +287,37 @@ function M.install(opts)
         end,
     }
 
+    -- StepQ: Safe name selection is owned by alias_factory only
     local safeNames = nil
-    if F and type(F.getSafeCommandNamesBestEffort) == "function" then
+    if type(F.getSafeCommandNamesBestEffort) == "function" then
         safeNames = F.getSafeCommandNamesBestEffort(deps, kit)
+    end
+    if type(safeNames) ~= "table" or #safeNames == 0 then
+        if type(F.getDefaultSafeCommandNamesBestEffort) == "function" then
+            safeNames = F.getDefaultSafeCommandNamesBestEffort(deps)
+        end
     end
 
     if type(safeNames) ~= "table" or #safeNames == 0 then
-        safeNames = {
-            "dwactions",
-            "dwboot",
-            "dwcommands",
-            "dwdiag",
-            "dwevent",
-            "dweventlog",
-            "dwevents",
-            "dweventsub",
-            "dweventtap",
-            "dweventunsub",
-            "dwgui",
-            "dwhelp",
-            "dwid",
-            "dwinfo",
-            "dwpresence",
-            "dwrelease",
-            "dwroom",
-            "dwscorestore",
-            "dwservices",
-            "dwskills",
-            "dwtest",
-            "dwversion",
-            "dwwho",
-        }
+        STATE.lastError = "No SAFE commands available (alias_factory returned empty)"
+        STATE.aliasIds = {}
+        return false, STATE.lastError
     end
 
-    local created = {}
+    if type(F.installAutoSafeAliases) ~= "function" then
+        STATE.lastError = "alias_factory.installAutoSafeAliases missing (required)"
+        STATE.aliasIds = {}
+        return false, STATE.lastError
+    end
 
-    if F and type(F.installAutoSafeAliases) == "function" then
-        -- No special-cases now (including dwdiag)
-        local special = {}
-        local autoCreated = F.installAutoSafeAliases(deps, kit, safeNames, special)
-        if type(autoCreated) == "table" then
-            for k, v in pairs(autoCreated) do
-                created[k] = v
-            end
-        end
-    else
-        _out("[DWKit Alias] NOTE: alias_factory not available; SAFE auto generation skipped")
+    -- No special-cases now (including dwdiag)
+    local special = {}
+    local created = F.installAutoSafeAliases(deps, kit, safeNames, special)
 
-        local R = deps.getRouter()
-        if type(R) ~= "table" or type(R.dispatchGenericCommand) ~= "function" then
-            STATE.lastError = "command_router not available (dispatchGenericCommand missing)"
-            STATE.aliasIds = {}
-            return false, STATE.lastError
-        end
-
-        for _, cmdName in ipairs(safeNames) do
-            cmdName = tostring(cmdName or "")
-            if cmdName ~= "" then
-                local pat = "^" .. cmdName .. "(?:\\s+(.+))?\\s*$"
-                created[cmdName] = _mkAlias(pat, function()
-                    local k = _getKit()
-                    local tokens = _tokenizeFromMatches()
-                    local ctx = deps.makeCtx("generic", k)
-                    R.dispatchGenericCommand(ctx, k, cmdName, tokens)
-                end)
-            end
-        end
+    if type(created) ~= "table" then
+        STATE.lastError = "alias_factory did not return created aliases table"
+        STATE.aliasIds = {}
+        return false, STATE.lastError
     end
 
     local anyFail = false

@@ -10,12 +10,16 @@
 --       * getCommandAliasesAliasIds / setCommandAliasesAliasIds
 --       * cleanupPriorCommandAliasesBestEffort
 --       * killAliasStrict
+--
+-- StepH extension (Slimming):
+--   - Owns command-surface lifecycle best-effort cleanup so command_aliases.lua stays thin:
+--       * cleanupCommandSurfaceBestEffort (event diag shutdown + reset split command modules)
 -- ########################################################################
 
 local M = {}
 
 M.serviceId = "dwkit.services.alias_control"
-M.serviceVersion = "v2026-01-27A" -- bump
+M.serviceVersion = "v2026-01-27B" -- bump
 
 local _CMD_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -396,6 +400,73 @@ function M.killAliasStrict(id)
   if res == false then
     return false, "killAlias returned false for id=" .. tostring(id)
   end
+  return true
+end
+
+-- ============================================================
+-- StepH: command-surface lifecycle cleanup (Slimming)
+-- ============================================================
+
+local function _safeRequire(name)
+  local ok, mod = pcall(require, name)
+  if ok and type(mod) == "table" then
+    return mod
+  end
+  return nil
+end
+
+local function _splitCommandModuleNames()
+  -- Keep policy here (not in command_aliases.lua)
+  return {
+    "dwkit.commands.dwroom",
+    "dwkit.commands.dwwho",
+    "dwkit.commands.dwgui",
+    "dwkit.commands.dwboot",
+    "dwkit.commands.dwcommands",
+    "dwkit.commands.dwhelp",
+    "dwkit.commands.dwtest",
+    "dwkit.commands.dwid",
+    "dwkit.commands.dwversion",
+    "dwkit.commands.dwinfo",
+    "dwkit.commands.dwevents",
+    "dwkit.commands.dwevent",
+    "dwkit.commands.dweventtap",
+    "dwkit.commands.dweventsub",
+    "dwkit.commands.dweventunsub",
+    "dwkit.commands.dweventlog",
+    "dwkit.commands.dwservices",
+    "dwkit.commands.dwpresence",
+    "dwkit.commands.dwactions",
+    "dwkit.commands.dwskills",
+    "dwkit.commands.dwdiag",
+    "dwkit.commands.dwrelease",
+    "dwkit.commands.dwscorestore",
+  }
+end
+
+function M.cleanupCommandSurfaceBestEffort(kit, opts)
+  opts = opts or {}
+  local k = _resolveKit(kit)
+
+  -- 1) Event diag state shutdown (best-effort)
+  do
+    local S = _safeRequire("dwkit.services.event_diag_state")
+    if S and type(S.shutdown) == "function" then
+      pcall(S.shutdown, k)
+    end
+  end
+
+  -- 2) Reset split command modules (best-effort)
+  do
+    local mods = _splitCommandModuleNames()
+    for _, name in ipairs(mods) do
+      local mod = _safeRequire(name)
+      if mod and type(mod.reset) == "function" then
+        pcall(mod.reset)
+      end
+    end
+  end
+
   return true
 end
 
