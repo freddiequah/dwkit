@@ -3,7 +3,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwversion
 -- Owner       : Commands
--- Version     : v2026-01-27A
+-- Version     : v2026-01-27B
 -- Purpose     :
 --   - Command module for: dwversion
 --   - Prints consolidated DWKit module versions + runtime baseline (SAFE diagnostics)
@@ -11,13 +11,13 @@
 --   - Does NOT start timers or automation
 --
 -- Public API  :
---   - dispatch(ctx, kit, aliasVersion) -> boolean handled
+--   - dispatch(ctx, kit, tokensOrAliasVersion) -> boolean handled
 --   - reset() -> nil
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-27A"
+M.VERSION = "v2026-01-27B"
 
 local function _mkOut(ctx)
     if type(ctx) == "table" and type(ctx.out) == "function" then
@@ -112,7 +112,36 @@ local function _formatAliasVersion(aliasVersion)
     return "unknown"
 end
 
-local function _printVersionSummary(ctx, out, kit, aliasVersion)
+-- Detect when the 3rd parameter is actually alias tokens (router passes tokens).
+local function _looksLikeTokensTable(x)
+    if type(x) ~= "table" then return false end
+    -- tokens usually have numeric indices, first is the command name string
+    if type(x[1]) == "string" then return true end
+    return false
+end
+
+-- Best-effort: discover alias version from attached services or module.
+local function _getAliasVersionBestEffort(kit)
+    if type(kit) == "table" and type(kit.services) == "table" then
+        -- your actual attachment key (confirmed): DWKit.services.commandAliases
+        if type(kit.services.commandAliases) == "table" then
+            return kit.services.commandAliases
+        end
+        -- allow alternative casing just in case
+        if type(kit.services.commandaliases) == "table" then
+            return kit.services.commandaliases
+        end
+    end
+
+    local okA, modA = _safeRequire("dwkit.services.command_aliases")
+    if okA and type(modA) == "table" then
+        return modA
+    end
+
+    return nil
+end
+
+local function _printVersionSummary(ctx, out, kit, thirdArg)
     if type(kit) ~= "table" then
         out("[DWKit] ERROR: DWKit global not available. Run loader.init() first.")
         return true
@@ -189,6 +218,15 @@ local function _printVersionSummary(ctx, out, kit, aliasVersion)
         end
     end
 
+    -- Third arg may be tokens (router) OR aliasVersion (direct call). Normalize.
+    local aliasVersion = thirdArg
+    if _looksLikeTokensTable(thirdArg) then
+        aliasVersion = nil
+    end
+    if aliasVersion == nil then
+        aliasVersion = _getAliasVersionBestEffort(kit)
+    end
+
     out("[DWKit] Version summary:")
     out("  identity        = " .. idVersion)
     out("  runtimeBaseline = " .. rbVersion)
@@ -206,7 +244,7 @@ local function _printVersionSummary(ctx, out, kit, aliasVersion)
     return true
 end
 
-function M.dispatch(ctx, kit, aliasVersion)
+function M.dispatch(ctx, kit, tokensOrAliasVersion)
     local out = _mkOut(ctx)
     local err = _mkErr(ctx, out)
 
@@ -215,7 +253,7 @@ function M.dispatch(ctx, kit, aliasVersion)
     end
 
     local okCall, handled = pcall(function()
-        return _printVersionSummary(ctx, out, kit, aliasVersion)
+        return _printVersionSummary(ctx, out, kit, tokensOrAliasVersion)
     end)
 
     if okCall and handled then
