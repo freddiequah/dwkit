@@ -1,18 +1,29 @@
 -- #########################################################################
+-- BEGIN FILE: src/dwkit/services/command_aliases.lua
+-- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-27A
+-- Version     : v2026-01-27C
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for DWKit commands.
 --   - AUTO-GENERATES SAFE aliases from the Command Registry (best-effort).
 --   - Keeps only a small set of "special-case" aliases that require:
 --       * service injection (dwwho/dwroom)
---       * module state injection (event diag: dweventtap/sub/unsub/log)
---       * event diag bundle access (dwdiag)
+--       * diag bundle access (dwdiag)
 --
 -- NOTE (Slimming Step 1):
 --   - Router fallbacks (dwgui/dwscorestore/dwrelease + generic dispatch wrapper)
 --     have been extracted to: dwkit.bus.command_router
+--
+-- NOTE (Slimming Step 2):
+--   - Event diagnostics state injection has been extracted to:
+--       * dwkit.services.event_diag_state
+--       * dwkit.commands.dweventtap / dweventsub / dweventunsub / dweventlog
+--     so these can be auto-generated like normal SAFE commands.
+--
+-- NOTE (Slimming Step 3 - THIS CHANGE):
+--   - SAFE command enumeration + auto SAFE alias generation loop extracted to:
+--       * dwkit.services.alias_factory
 --
 -- IMPORTANT:
 --   - tempAlias objects persist in Mudlet even if this module is reloaded via package.loaded=nil.
@@ -28,7 +39,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-27A"
+M.VERSION = "v2026-01-27C"
 
 local _GLOBAL_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
@@ -40,14 +51,6 @@ local STATE = {
     aliasIds = {},
 
     lastError = nil,
-
-    -- Event diagnostics harness (SAFE; manual)
-    eventDiag = {
-        maxLog = 50,
-        log = {},       -- ring buffer (simple trim)
-        tapToken = nil, -- token from eventBus.tapOn
-        subs = {},      -- eventName -> token (from eventBus.on)
-    },
 
     -- Who capture session (manual; used by dwwho refresh)
     whoCapture = {
@@ -491,7 +494,7 @@ local function _roomCaptureReset()
 end
 
 -- ------------------------------------------------------------
--- Event diagnostics helpers (STATE.eventDiag injection)
+-- Event diagnostics ctx helpers (NO state stored here)
 -- ------------------------------------------------------------
 local function _getEventBusBestEffort()
     local kit = _getKit()
@@ -517,14 +520,6 @@ local function _getEventRegistryBestEffort()
     return nil
 end
 
-local function _getEventDiagModuleBestEffort()
-    local ok, mod = _safeRequire("dwkit.commands.event_diag")
-    if ok and type(mod) == "table" then
-        return mod
-    end
-    return nil
-end
-
 local function _makeEventDiagCtx()
     return {
         out = function(line) _out(line) end,
@@ -544,6 +539,25 @@ local function _makeEventDiagCtx()
             return _getEventRegistryBestEffort()
         end,
     }
+end
+
+local function _getEventDiagStateServiceBestEffort()
+    local ok, mod = _safeRequire("dwkit.services.event_diag_state")
+    if ok and type(mod) == "table" then
+        return mod
+    end
+    return nil
+end
+
+local function _getEventDiagStateBestEffort(kit)
+    local S = _getEventDiagStateServiceBestEffort()
+    if S and type(S.getState) == "function" then
+        local okCall, st = pcall(S.getState, kit)
+        if okCall and type(st) == "table" then
+            return st
+        end
+    end
+    return nil
 end
 
 -- ------------------------------------------------------------
@@ -641,22 +655,26 @@ function M.isInstalled()
 end
 
 function M.getState()
-    local d = STATE.eventDiag
-    local subCount = 0
-    for _ in pairs((d and d.subs) or {}) do subCount = subCount + 1 end
-
     local aliasIds = {}
     for k, v in pairs(STATE.aliasIds or {}) do
         aliasIds[k] = v
+    end
+
+    local kit = _getKit()
+    local d = _getEventDiagStateBestEffort(kit)
+
+    local subCount = 0
+    if type(d) == "table" and type(d.subs) == "table" then
+        for _ in pairs(d.subs) do subCount = subCount + 1 end
     end
 
     return {
         installed = STATE.installed and true or false,
         aliasIds = aliasIds,
         eventDiag = {
-            maxLog = (d and d.maxLog) or 50,
-            logCount = #(d and d.log or {}),
-            tapToken = d and d.tapToken or nil,
+            maxLog = (type(d) == "table" and d.maxLog) or 50,
+            logCount = (type(d) == "table" and type(d.log) == "table") and #d.log or 0,
+            tapToken = (type(d) == "table") and d.tapToken or nil,
             subsCount = subCount,
         },
         lastError = STATE.lastError,
@@ -677,6 +695,10 @@ local function _resetSplitCommandModulesBestEffort()
         "dwkit.commands.dwinfo",
         "dwkit.commands.dwevents",
         "dwkit.commands.dwevent",
+        "dwkit.commands.dweventtap",
+        "dwkit.commands.dweventsub",
+        "dwkit.commands.dweventunsub",
+        "dwkit.commands.dweventlog",
         "dwkit.commands.dwservices",
         "dwkit.commands.dwpresence",
         "dwkit.commands.dwactions",
@@ -702,29 +724,21 @@ function M.uninstall()
     _whoCaptureReset()
     _roomCaptureReset()
 
+    -- event diag shutdown (best-effort; unload-safe)
+    do
+        local kit = _getKit()
+        local S = _getEventDiagStateServiceBestEffort()
+        if S and type(S.shutdown) == "function" then
+            pcall(S.shutdown, kit)
+        end
+    end
+
     -- Phase splits: reset extracted command modules (best-effort)
     _resetSplitCommandModulesBestEffort()
 
     if not STATE.installed then
         STATE.lastError = nil
         return true, nil
-    end
-
-    do
-        local kit = _getKit()
-        if type(kit) == "table" and type(kit.bus) == "table" and type(kit.bus.eventBus) == "table" then
-            local d = STATE.eventDiag
-            if d and d.tapToken ~= nil and type(kit.bus.eventBus.tapOff) == "function" then
-                pcall(kit.bus.eventBus.tapOff, d.tapToken)
-                d.tapToken = nil
-            end
-            if d and type(kit.bus.eventBus.off) == "function" then
-                for ev, tok in pairs(d.subs or {}) do
-                    pcall(kit.bus.eventBus.off, tok)
-                    d.subs[ev] = nil
-                end
-            end
-        end
     end
 
     if type(killAlias) ~= "function" then
@@ -761,105 +775,15 @@ local function _mkAlias(pattern, fn)
 end
 
 -- ------------------------------------------------------------
--- SAFE alias generation from Command Registry (best-effort)
--- ------------------------------------------------------------
-local function _getSafeCommandNamesBestEffort(kit)
-    kit = (type(kit) == "table") and kit or _getKit()
-    if type(kit) ~= "table" then return nil end
-
-    -- Try DWKit.cmd helper methods first (preferred)
-    if type(kit.cmd) == "table" then
-        local candidates = {
-            "getSafeNames",
-            "listSafeNames",
-            "safeNames",
-            "getSafeCommands",
-            "getSafe",
-        }
-
-        for _, fnName in ipairs(candidates) do
-            if type(kit.cmd[fnName]) == "function" then
-                local ok, a = _callBestEffort(kit.cmd, fnName)
-                if ok then
-                    local v = a
-                    if type(v) == "table" then
-                        -- Accept array of names OR map of name->record
-                        local names = {}
-                        local isArray = (v[1] ~= nil)
-                        if isArray then
-                            for _, x in ipairs(v) do
-                                if type(x) == "string" and x ~= "" then
-                                    names[#names + 1] = x
-                                end
-                            end
-                        else
-                            for k, _ in pairs(v) do
-                                if type(k) == "string" and k ~= "" then
-                                    names[#names + 1] = k
-                                end
-                            end
-                        end
-                        if #names > 0 then
-                            table.sort(names)
-                            return names
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    -- Try command_registry module directly (best-effort)
-    do
-        local okR, reg = _safeRequire("dwkit.bus.command_registry")
-        if okR and type(reg) == "table" then
-            local candidates = {
-                "getSafeNames",
-                "listSafeNames",
-                "safeNames",
-                "getSafe",
-            }
-            for _, fnName in ipairs(candidates) do
-                if type(reg[fnName]) == "function" then
-                    local ok, v = pcall(reg[fnName], reg)
-                    if ok and type(v) == "table" then
-                        local names = {}
-                        local isArray = (v[1] ~= nil)
-                        if isArray then
-                            for _, x in ipairs(v) do
-                                if type(x) == "string" and x ~= "" then
-                                    names[#names + 1] = x
-                                end
-                            end
-                        else
-                            for k, _ in pairs(v) do
-                                if type(k) == "string" and k ~= "" then
-                                    names[#names + 1] = k
-                                end
-                            end
-                        end
-                        if #names > 0 then
-                            table.sort(names)
-                            return names
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    return nil
-end
-
--- ------------------------------------------------------------
--- Special-case alias builders (need service/state injection)
+-- Special-case alias builders (need service/router)
 -- ------------------------------------------------------------
 local function _installAlias_dwwho()
     local pat = [[^dwwho(?:\s+(status|clear|ingestclip|fixture|refresh|set))?(?:\s+(.+))?\s*$]]
     return _mkAlias(pat, function()
         local svc = _getWhoStoreServiceBestEffort()
         if type(svc) ~= "table" then
-            _err("WhoStoreService not available or incomplete. Create/repair src/dwkit/services/whostore_service.lua, then loader.init().")
+            _err(
+                "WhoStoreService not available or incomplete. Create/repair src/dwkit/services/whostore_service.lua, then loader.init().")
             return
         end
 
@@ -962,143 +886,6 @@ local function _installAlias_dwroom()
     end)
 end
 
-local function _installAlias_eventDiagTap()
-    local pat = [[^dweventtap(?:\s+(on|off|status|show|clear))?(?:\s+(\d+))?\s*$]]
-    return _mkAlias(pat, function()
-        local mode = (matches and matches[2]) and tostring(matches[2]) or ""
-        local n = (matches and matches[3]) and tostring(matches[3]) or ""
-
-        local mod = _getEventDiagModuleBestEffort()
-        if type(mod) ~= "table" then
-            _err("dwkit.commands.event_diag not available. Ensure src/dwkit/commands/event_diag.lua exists.")
-            return
-        end
-
-        local ctx = _makeEventDiagCtx()
-        local d = STATE.eventDiag
-
-        local function call(fnName, ...)
-            if type(mod[fnName]) ~= "function" then
-                _err("event_diag." .. tostring(fnName) .. " not available")
-                return
-            end
-            local okCall, errOrNil = pcall(mod[fnName], ctx, d, ...)
-            if not okCall then
-                _err("event_diag." .. tostring(fnName) .. " threw error: " .. tostring(errOrNil))
-            end
-        end
-
-        if mode == "" or mode == "status" then
-            call("printStatus")
-            return
-        end
-        if mode == "on" then
-            call("tapOn")
-            return
-        end
-        if mode == "off" then
-            call("tapOff")
-            return
-        end
-        if mode == "show" then
-            call("printLog", n)
-            return
-        end
-        if mode == "clear" then
-            call("logClear")
-            return
-        end
-
-        _err("Usage: dweventtap [on|off|status|show|clear] [n]")
-    end)
-end
-
-local function _installAlias_eventDiagSub()
-    local pat = [[^dweventsub(?:\s+(\S+))?\s*$]]
-    return _mkAlias(pat, function()
-        local evName = (matches and matches[2]) and tostring(matches[2]) or ""
-        if evName == "" then
-            _err("Usage: dweventsub <EventName>")
-            return
-        end
-
-        local mod = _getEventDiagModuleBestEffort()
-        if type(mod) ~= "table" then
-            _err("dwkit.commands.event_diag not available. Ensure src/dwkit/commands/event_diag.lua exists.")
-            return
-        end
-
-        local ctx = _makeEventDiagCtx()
-        local d = STATE.eventDiag
-
-        if type(mod.subOn) ~= "function" then
-            _err("event_diag.subOn not available")
-            return
-        end
-
-        local okCall, errOrNil = pcall(mod.subOn, ctx, d, evName)
-        if not okCall then
-            _err("event_diag.subOn threw error: " .. tostring(errOrNil))
-        end
-    end)
-end
-
-local function _installAlias_eventDiagUnsub()
-    local pat = [[^dweventunsub(?:\s+(\S+))?\s*$]]
-    return _mkAlias(pat, function()
-        local evName = (matches and matches[2]) and tostring(matches[2]) or ""
-        if evName == "" then
-            _err("Usage: dweventunsub <EventName|all>")
-            return
-        end
-
-        local mod = _getEventDiagModuleBestEffort()
-        if type(mod) ~= "table" then
-            _err("dwkit.commands.event_diag not available. Ensure src/dwkit/commands/event_diag.lua exists.")
-            return
-        end
-
-        local ctx = _makeEventDiagCtx()
-        local d = STATE.eventDiag
-
-        if type(mod.subOff) ~= "function" then
-            _err("event_diag.subOff not available")
-            return
-        end
-
-        local okCall, errOrNil = pcall(mod.subOff, ctx, d, evName)
-        if not okCall then
-            _err("event_diag.subOff threw error: " .. tostring(errOrNil))
-        end
-    end)
-end
-
-local function _installAlias_eventDiagLog()
-    local pat = [[^dweventlog(?:\s+(\d+))?\s*$]]
-    return _mkAlias(pat, function()
-        local n = (matches and matches[2]) and tostring(matches[2]) or ""
-
-        local mod = _getEventDiagModuleBestEffort()
-        if type(mod) ~= "table" then
-            _err("dwkit.commands.event_diag not available. Ensure src/dwkit/commands/event_diag.lua exists.")
-            return
-        end
-
-        local ctx = _makeEventDiagCtx()
-        local d = STATE.eventDiag
-
-        if type(mod.printLog) ~= "function" then
-            _err("event_diag.printLog not available")
-            return
-        end
-
-        local okCall, errOrNil = pcall(mod.printLog, ctx, d, n)
-        if not okCall then
-            _err("event_diag.printLog threw error: " .. tostring(errOrNil))
-        end
-    end)
-end
-
 local function _installAlias_dwdiag()
     local pat = [[^dwdiag(?:\s+(.+))?\s*$]]
     return _mkAlias(pat, function()
@@ -1115,7 +902,9 @@ local function _installAlias_dwdiag()
 
                 getKit = function() return kit end,
                 makeEventDiagCtx = function() return _makeEventDiagCtx() end,
-                getEventDiagState = function() return STATE.eventDiag end,
+                getEventDiagState = function()
+                    return _getEventDiagStateBestEffort(kit)
+                end,
 
                 legacyPrintVersionSummary = function() _legacyPrintVersionSummary() end,
                 legacyPrintBoot = function() _legacyPrintBootHealth() end,
@@ -1155,9 +944,10 @@ local function _installAlias_dwdiag()
 
         _out("== event diag status ==")
         _out("")
-        local modED = _getEventDiagModuleBestEffort()
-        if type(modED) == "table" and type(modED.printStatus) == "function" then
-            local okCall, errOrNil = pcall(modED.printStatus, _makeEventDiagCtx(), STATE.eventDiag)
+        local okED, modED = _safeRequire("dwkit.commands.event_diag")
+        if okED and type(modED) == "table" and type(modED.printStatus) == "function" then
+            local d = _getEventDiagStateBestEffort(kit) or {}
+            local okCall, errOrNil = pcall(modED.printStatus, _makeEventDiagCtx(), d)
             if not okCall then
                 _err("event_diag.printStatus threw error: " .. tostring(errOrNil))
             end
@@ -1189,7 +979,7 @@ local function _installAlias_routered(cmdName)
 end
 
 -- ------------------------------------------------------------
--- Install (AUTO SAFE aliases + special-cases)
+-- Install (AUTO SAFE aliases via alias_factory + special-cases)
 -- ------------------------------------------------------------
 function M.install(opts)
     opts = opts or {}
@@ -1212,9 +1002,39 @@ function M.install(opts)
         return false, STATE.lastError
     end
 
+    -- Load alias_factory (best-effort) for SAFE enumeration + auto SAFE alias creation
+    local okF, F = _safeRequire("dwkit.services.alias_factory")
+    if not okF or type(F) ~= "table" then
+        F = nil
+    end
+
+    local deps = {
+        safeRequire = function(name) return _safeRequire(name) end,
+        callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
+        mkAlias = function(pat, fn) return _mkAlias(pat, fn) end,
+        tokenizeFromMatches = function() return _tokenizeFromMatches() end,
+        hasCmd = function() return _hasCmd() end,
+        getKit = function() return _getKit() end,
+        getService = function(name) return _getService(name) end,
+        getRouter = function() return _getRouterBestEffort() end,
+        out = function(line) _out(line) end,
+        err = function(msg) _err(msg) end,
+        legacyPpTable = function(t, opts2) _legacyPpTable(t, opts2) end,
+        makeEventDiagCtx = function() return _makeEventDiagCtx() end,
+        getEventDiagStateBestEffort = function(k) return _getEventDiagStateBestEffort(k) end,
+        legacyPrintVersionSummary = function() _legacyPrintVersionSummary() end,
+        legacyPrintBoot = function() _legacyPrintBootHealth() end,
+        legacyPrintServices = function() _legacyPrintServicesHealth() end,
+        legacyPrintIdentity = function() _legacyPrintIdentity() end,
+        legacyPrintServiceSnapshot = function(label, svcName) return _legacyPrintServiceSnapshot(label, svcName) end,
+    }
+
     -- Build SAFE names from registry (best-effort).
-    -- If registry enumeration fails, we will fall back to a minimal static list.
-    local safeNames = _getSafeCommandNamesBestEffort(kit)
+    -- If enumeration fails, fall back to a minimal static list.
+    local safeNames = nil
+    if F and type(F.getSafeCommandNamesBestEffort) == "function" then
+        safeNames = F.getSafeCommandNamesBestEffort(deps, kit)
+    end
 
     if type(safeNames) ~= "table" or #safeNames == 0 then
         -- Minimal fallback set (keeps your current SAFE surface alive)
@@ -1245,18 +1065,15 @@ function M.install(opts)
         }
     end
 
-    -- Special-case aliases (need state/services/router)
+    -- Special-case aliases (need services/router)
     local special = {
         dwwho = true,
         dwroom = true,
-        dweventtap = true,
-        dweventsub = true,
-        dweventunsub = true,
-        dweventlog = true,
         dwgui = true,
         dwscorestore = true,
         dwrelease = true,
         dwdiag = true,
+        -- NOTE: event diag commands are now normal SAFE commands (split modules).
         -- NOTE: dwcommands stays auto-generated; generic router keeps inline-safe behavior.
     }
 
@@ -1265,59 +1082,24 @@ function M.install(opts)
     -- 1) Special-case installs
     created.dwwho = _installAlias_dwwho()
     created.dwroom = _installAlias_dwroom()
-    created.dweventtap = _installAlias_eventDiagTap()
-    created.dweventsub = _installAlias_eventDiagSub()
-    created.dweventunsub = _installAlias_eventDiagUnsub()
-    created.dweventlog = _installAlias_eventDiagLog()
     created.dwdiag = _installAlias_dwdiag()
 
     created.dwgui = _installAlias_routered("dwgui")
     created.dwscorestore = _installAlias_routered("dwscorestore")
     created.dwrelease = _installAlias_routered("dwrelease")
 
-    -- 2) Auto-generate SAFE aliases for everything else
-    for _, cmdName in ipairs(safeNames) do
-        cmdName = tostring(cmdName or "")
-        if cmdName ~= "" and (special[cmdName] ~= true) then
-            local pat = "^" .. cmdName .. "(?:\\s+(.+))?\\s*$"
-            local id = _mkAlias(pat, function()
-                if not _hasCmd() then
-                    _err("DWKit.cmd not available. Run loader.init() first.")
-                    return
-                end
-
-                local k = _getKit()
-                local tokens = _tokenizeFromMatches()
-                local cmd = tokens[1] or cmdName
-
-                local R = _getRouterBestEffort()
-                if type(R) ~= "table" or type(R.dispatchGenericCommand) ~= "function" then
-                    _err("command_router not available (dispatchGenericCommand missing)")
-                    return
-                end
-
-                local ctx = {
-                    out = function(line) _out(line) end,
-                    err = function(msg) _err(msg) end,
-                    ppTable = function(t, opts2) _legacyPpTable(t, opts2) end,
-                    callBestEffort = function(obj, fnName, ...) return _callBestEffort(obj, fnName, ...) end,
-                    safeRequire = function(name) return _safeRequire(name) end,
-
-                    getKit = function() return k end,
-                    getService = function(name) return _getService(name) end,
-                    printServiceSnapshot = function(label, svcName) _legacyPrintServiceSnapshot(label, svcName) end,
-                    makeEventDiagCtx = function() return _makeEventDiagCtx() end,
-                    getEventDiagState = function() return STATE.eventDiag end,
-                    legacyPrintVersionSummary = function() _legacyPrintVersionSummary() end,
-                    legacyPrintBoot = function() _legacyPrintBootHealth() end,
-                    legacyPrintServices = function() _legacyPrintServicesHealth() end,
-                    legacyPrintIdentity = function() _legacyPrintIdentity() end,
-                }
-
-                R.dispatchGenericCommand(ctx, k, cmd, tokens)
-            end)
-            created[cmdName] = id
+    -- 2) Auto-generate SAFE aliases for everything else (delegated)
+    if F and type(F.installAutoSafeAliases) == "function" then
+        local autoCreated = F.installAutoSafeAliases(deps, kit, safeNames, special)
+        if type(autoCreated) == "table" then
+            for k, v in pairs(autoCreated) do
+                created[k] = v
+            end
         end
+    else
+        -- Fallback to error (we keep hard minimal set via special + manual will still be too small)
+        -- But we still continue to validate below; nils will trigger fail.
+        _out("[DWKit Alias] NOTE: alias_factory not available; SAFE auto generation skipped")
     end
 
     -- Validate all alias creations succeeded
@@ -1355,3 +1137,7 @@ function M.install(opts)
 end
 
 return M
+
+-- #########################################################################
+-- END FILE: src/dwkit/services/command_aliases.lua
+-- #########################################################################
