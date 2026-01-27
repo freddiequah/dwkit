@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwroom
 -- Owner       : Commands
--- Version     : v2026-01-23B
+-- Version     : v2026-01-27B
 -- Purpose     :
 --   - Command handler for "dwroom" alias (SAFE manual surface).
 --   - Implements RoomEntities SAFE inspection + helpers:
@@ -15,11 +15,6 @@
 --
 -- IMPORTANT:
 --   - MUST remain SAFE: no send(), no sendAll(), no gameplay commands.
---   - refresh MUST NOT capture output or fire triggers/timers.
---   - refresh is best-effort: it calls whichever SAFE refresh/reclassify APIs exist.
---   - After successful refresh/reclassify, attempt to ensure UI refresh:
---       1) svc.emitUpdated(meta) if available
---       2) fallback to eventBus.emit(updatedEventName, payload, meta) if available
 --
 -- FIX (v2026-01-23A):
 --   - event_bus.emit requires meta (3rd arg) to deliver in this environment.
@@ -32,14 +27,24 @@
 --   - fixture now requests forceEmit=true so the deterministic seed always produces
 --     an Updated event (useful for UI/pipeline validation).
 --
+-- FIX (v2026-01-27A):
+--   - Added router-compatible dispatch signature:
+--       dispatch(ctx, kit, tokens)
+--     so command_router.dispatchGenericCommand can call split modules directly.
+--
+-- FIX (v2026-01-27B) [StepB/B3]:
+--   - dwroom no longer depends on ctx.printRoomEntitiesStatus injection.
+--   - Status now prints full counts using svc.getState() (best-effort).
+--
 -- Public API  :
 --   - dispatch(ctx, roomEntitiesService, sub, arg) -> nil
+--   - dispatch(ctx, kit, tokens)                  -> nil
 --   - reset() -> nil
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-23B"
+M.VERSION = "v2026-01-27B"
 
 local function _mkOut(ctx)
     if type(ctx) == "table" and type(ctx.out) == "function" then
@@ -101,15 +106,49 @@ local function _usage(out)
     out("  - refresh best-effort: reclassify/emitUpdated or eventBus.emit if available.")
 end
 
+local function _roomCountsFromState(state)
+    state = (type(state) == "table") and state or {}
+    local function cnt(t)
+        if type(t) ~= "table" then return 0 end
+        local n = 0
+        for _ in pairs(t) do n = n + 1 end
+        return n
+    end
+    return {
+        players = cnt(state.players),
+        mobs = cnt(state.mobs),
+        items = cnt(state.items),
+        unknown = cnt(state.unknown),
+    }
+end
+
 local function _printStatus(ctx, svc)
-    if type(ctx) == "table" and type(ctx.printRoomEntitiesStatus) == "function" then
-        ctx.printRoomEntitiesStatus(svc)
+    local out = _mkOut(ctx)
+    local err = _mkErr(ctx)
+
+    if type(svc) ~= "table" then
+        err("RoomEntitiesService not available.")
         return
     end
 
-    local out = _mkOut(ctx)
+    local state = {}
+    if type(svc.getState) == "function" then
+        local ok, v, _, _, callErr = _call(ctx, svc, "getState")
+        if ok and type(v) == "table" then
+            state = v
+        elseif callErr then
+            out("[DWKit Room] getState failed: " .. tostring(callErr))
+        end
+    end
+
+    local c = _roomCountsFromState(state)
+
     out("[DWKit Room] status (dwroom)")
-    out("  serviceVersion=" .. tostring((type(svc) == "table" and svc.VERSION) or "unknown"))
+    out("  serviceVersion=" .. tostring(svc.VERSION or "unknown"))
+    out("  players=" .. tostring(c.players))
+    out("  mobs=" .. tostring(c.mobs))
+    out("  items=" .. tostring(c.items))
+    out("  unknown=" .. tostring(c.unknown))
 end
 
 local function _doClear(ctx, svc)
@@ -385,7 +424,23 @@ local function _doRefreshSafe(ctx, svc)
     out("  Tip: run dwroom status to confirm available APIs.")
 end
 
-function M.dispatch(ctx, svc, sub, arg)
+local function _resolveSvcFromKitOrCtx(ctx, kit)
+    if type(ctx) == "table" and type(ctx.getService) == "function" then
+        local s = ctx.getService("roomEntitiesService")
+        if type(s) == "table" then return s end
+    end
+
+    if type(kit) == "table" and type(kit.services) == "table" and type(kit.services.roomEntitiesService) == "table" then
+        return kit.services.roomEntitiesService
+    end
+
+    local ok, mod = _safeRequire("dwkit.services.roomentities_service")
+    if ok and type(mod) == "table" then return mod end
+
+    return nil
+end
+
+local function _dispatchCore(ctx, svc, sub, arg)
     local out = _mkOut(ctx)
 
     sub = tostring(sub or "")
@@ -417,6 +472,33 @@ function M.dispatch(ctx, svc, sub, arg)
     end
 
     _usage(out)
+end
+
+function M.dispatch(ctx, a, b, c)
+    -- Router signature: dispatch(ctx, kit, tokens)
+    if type(b) == "table" and type(b[1]) == "string" then
+        local kit = a
+        local tokens = b
+
+        local svc = _resolveSvcFromKitOrCtx(ctx, kit)
+        if type(svc) ~= "table" then
+            local err = _mkErr(ctx)
+            err("RoomEntitiesService not available. Run loader.init() first.")
+            return
+        end
+
+        local sub = tostring(tokens[2] or "")
+        local arg = ""
+        if #tokens >= 3 then
+            arg = table.concat(tokens, " ", 3)
+        end
+
+        _dispatchCore(ctx, svc, sub, arg)
+        return
+    end
+
+    -- Legacy signature: dispatch(ctx, svc, sub, arg)
+    _dispatchCore(ctx, a, b, c)
 end
 
 function M.reset()

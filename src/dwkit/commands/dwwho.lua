@@ -1,7 +1,8 @@
+-- FILE: src/dwkit/commands/dwwho.lua
 -- #########################################################################
 -- Module Name : dwkit.commands.dwwho
 -- Owner       : Commands
--- Version     : v2026-01-25A
+-- Version     : v2026-01-27A
 -- Purpose     :
 --   - Implements dwwho command handler (SAFE + GAME refresh capture).
 --   - Split out from dwkit.services.command_aliases (Phase 1 split).
@@ -28,25 +29,31 @@
 --     Capture now starts only on WHO header lines:
 --       "Players" or "Total players:"
 --
+-- Phase 5D (v2026-01-27A):
+--   - Added router-compatible dispatch signature:
+--       dispatch(ctx, kit, tokens)
+--     so command_router.dispatchGenericCommand can call split modules directly.
+--   - Ingest helpers are now internal (no longer require ctx.whoIngestTextBestEffort).
+--
 -- Public API  :
 --   - dispatch(ctx, whoStoreSvc, sub, argOpt)
+--   - dispatch(ctx, kit, tokens)  (router signature)
 --   - reset()  (best-effort cancel pending capture session)
 --
 -- Notes:
---   - ctx must provide:
+--   - ctx should provide:
 --       * out(line), err(msg)
---       * callBestEffort(obj, fnName, ...) -> ok, a, b, c, err
---       * getClipboardText() -> string|nil
---       * resolveSendFn() -> function|nil
---       * killTrigger(id), killTimer(id)
---       * tempRegexTrigger(pattern, fn) -> id
---       * tempTimer(seconds, fn) -> id
---       * whoIngestTextBestEffort(svc, text, meta) -> ok, err|nil
---       * printWhoStatus(svc)
+--       * callBestEffort(obj, fnName, ...) -> ok, a, b, c, err   (optional; improves compatibility)
+--       * getClipboardText() -> string|nil                       (optional; for ingestclip)
+--       * resolveSendFn() -> function|nil                        (required for refresh)
+--       * killTrigger(id), killTimer(id)                         (optional; best-effort cleanup)
+--       * tempRegexTrigger(pattern, fn) -> id                    (required for refresh)
+--       * tempTimer(seconds, fn) -> id                           (required for refresh)
+--       * getService(name) -> svc                                (optional; for router signature)
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-01-25A"
+M.VERSION = "v2026-01-27A"
 
 local CAP = {
     active = false,
@@ -72,18 +79,104 @@ local function _trim(s)
     return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
-local function _reset(ctx)
+local function _fallbackOut(line)
+    line = tostring(line or "")
+    if type(cecho) == "function" then
+        cecho(line .. "\n")
+    elseif type(echo) == "function" then
+        echo(line .. "\n")
+    else
+        print(line)
+    end
+end
+
+local function _fallbackErr(msg)
+    _fallbackOut("[DWKit Who] ERROR: " .. tostring(msg))
+end
+
+local function _getCtx(ctx)
+    ctx = (type(ctx) == "table") and ctx or {}
+    return {
+        out = (type(ctx.out) == "function") and ctx.out or _fallbackOut,
+        err = (type(ctx.err) == "function") and ctx.err or _fallbackErr,
+        callBestEffort = (type(ctx.callBestEffort) == "function") and ctx.callBestEffort or nil,
+        getClipboardText = (type(ctx.getClipboardText) == "function") and ctx.getClipboardText or nil,
+        resolveSendFn = (type(ctx.resolveSendFn) == "function") and ctx.resolveSendFn or nil,
+        killTrigger = (type(ctx.killTrigger) == "function") and ctx.killTrigger or nil,
+        killTimer = (type(ctx.killTimer) == "function") and ctx.killTimer or nil,
+        tempRegexTrigger = (type(ctx.tempRegexTrigger) == "function") and ctx.tempRegexTrigger or nil,
+        tempTimer = (type(ctx.tempTimer) == "function") and ctx.tempTimer or nil,
+        getService = (type(ctx.getService) == "function") and ctx.getService or nil,
+    }
+end
+
+local function _callBestEffort(ctx, obj, fnName, ...)
+    if type(ctx) == "table" and type(ctx.callBestEffort) == "function" then
+        return ctx.callBestEffort(obj, fnName, ...)
+    end
+
+    if type(obj) ~= "table" then
+        return false, nil, nil, nil, "svc not table"
+    end
+    local fn = obj[fnName]
+    if type(fn) ~= "function" then
+        return false, nil, nil, nil, "missing function: " .. tostring(fnName)
+    end
+
+    local ok1, a1, b1, c1 = pcall(fn, ...)
+    if ok1 then
+        return true, a1, b1, c1, nil
+    end
+
+    local ok2, a2, b2, c2 = pcall(fn, obj, ...)
+    if ok2 then
+        return true, a2, b2, c2, nil
+    end
+
+    return false, nil, nil, nil, "call failed: " .. tostring(a1) .. " | " .. tostring(a2)
+end
+
+local function _safeRequire(name)
+    local ok, mod = pcall(require, name)
+    if ok and type(mod) == "table" then return true, mod end
+    return false, mod
+end
+
+local function _resolveSvcFromKitOrCtx(C, kit)
+    if type(C.getService) == "function" then
+        local s = C.getService("whoStoreService")
+        if type(s) == "table" then return s end
+    end
+
+    if type(kit) == "table" and type(kit.services) == "table" and type(kit.services.whoStoreService) == "table" then
+        return kit.services.whoStoreService
+    end
+
+    local ok, mod = _safeRequire("dwkit.services.whostore_service")
+    if ok and type(mod) == "table" then
+        return mod
+    end
+
+    return nil
+end
+
+local function _reset(C)
     CAP.active = false
     CAP.started = false
     CAP.lines = nil
     CAP.startedAt = nil
 
-    if CAP.trigAny then
-        pcall(ctx.killTrigger, CAP.trigAny)
+    if CAP.trigAny and type(C.killTrigger) == "function" then
+        pcall(C.killTrigger, CAP.trigAny)
+        CAP.trigAny = nil
+    else
         CAP.trigAny = nil
     end
-    if CAP.timer then
-        pcall(ctx.killTimer, CAP.timer)
+
+    if CAP.timer and type(C.killTimer) == "function" then
+        pcall(C.killTimer, CAP.timer)
+        CAP.timer = nil
+    else
         CAP.timer = nil
     end
 end
@@ -97,55 +190,49 @@ function M.reset()
     CAP.timer = nil
 end
 
-local function _usage(ctx)
-    ctx.out("[DWKit Who] Usage:")
-    ctx.out("  dwwho")
-    ctx.out("  dwwho status")
-    ctx.out("  dwwho list")
-    ctx.out("  dwwho clear")
-    ctx.out("  dwwho ingestclip")
-    ctx.out("  dwwho fixture [basic|party]")
-    ctx.out("  dwwho set <name1,name2,...>")
-    ctx.out("  dwwho add <name>")
-    ctx.out("  dwwho remove <name>")
-    ctx.out("  dwwho refresh")
-    ctx.out("")
-    ctx.out("Notes:")
-    ctx.out("  - ingestclip reads your clipboard and parses it as WHO output")
-    ctx.out("  - SAFE: all except refresh (no gameplay sends)")
-    ctx.out("  - GAME: refresh sends 'who' to the MUD and captures output")
+local function _usage(C)
+    C.out("[DWKit Who] Usage:")
+    C.out("  dwwho")
+    C.out("  dwwho status")
+    C.out("  dwwho list")
+    C.out("  dwwho clear")
+    C.out("  dwwho ingestclip")
+    C.out("  dwwho fixture [basic|party]")
+    C.out("  dwwho set <name1,name2,...>")
+    C.out("  dwwho add <name>")
+    C.out("  dwwho remove <name>")
+    C.out("  dwwho refresh")
+    C.out("")
+    C.out("Notes:")
+    C.out("  - ingestclip reads your clipboard and parses it as WHO output")
+    C.out("  - SAFE: all except refresh (no gameplay sends)")
+    C.out("  - GAME: refresh sends 'who' to the MUD and captures output")
 end
 
-local function _printRefreshGuardStatus(ctx)
+local function _printRefreshGuardStatus(C)
     local inflight = (CAP.active == true)
-    ctx.out("[DWKit Who] refresh guard")
-    ctx.out("  refreshInFlight=" .. tostring(inflight))
-    ctx.out("  cooldownSec=" .. tostring(GUARD.cooldownSec))
-    ctx.out("  lastRefreshAttemptTs=" .. tostring(GUARD.lastAttemptTs or "nil"))
-    ctx.out("  lastRefreshOk=" .. tostring(GUARD.lastOk))
-    ctx.out("  lastRefreshOkTs=" .. tostring(GUARD.lastOkTs or "nil"))
-    ctx.out("  lastRefreshErr=" .. tostring(GUARD.lastErr or "nil"))
-    ctx.out("  lastSkipReason=" .. tostring(GUARD.lastSkipReason or "nil"))
+    C.out("[DWKit Who] refresh guard")
+    C.out("  refreshInFlight=" .. tostring(inflight))
+    C.out("  cooldownSec=" .. tostring(GUARD.cooldownSec))
+    C.out("  lastRefreshAttemptTs=" .. tostring(GUARD.lastAttemptTs or "nil"))
+    C.out("  lastRefreshOk=" .. tostring(GUARD.lastOk))
+    C.out("  lastRefreshOkTs=" .. tostring(GUARD.lastOkTs or "nil"))
+    C.out("  lastRefreshErr=" .. tostring(GUARD.lastErr or "nil"))
+    C.out("  lastSkipReason=" .. tostring(GUARD.lastSkipReason or "nil"))
 end
 
-local function _printStatusBestEffort(ctx, svc)
-    if type(ctx.printWhoStatus) == "function" then
-        ctx.printWhoStatus(svc)
-        _printRefreshGuardStatus(ctx)
-        return
-    end
-
+local function _printStatusBestEffort(C, svc)
     -- fallback status printing (minimal)
     if type(svc) ~= "table" or type(svc.getState) ~= "function" then
-        ctx.err("WhoStoreService not available (cannot print status)")
-        _printRefreshGuardStatus(ctx)
+        C.err("WhoStoreService not available (cannot print status)")
+        _printRefreshGuardStatus(C)
         return
     end
 
     local ok, st = pcall(svc.getState)
     if not ok or type(st) ~= "table" then
-        ctx.err("WhoStoreService.getState failed")
-        _printRefreshGuardStatus(ctx)
+        C.err("WhoStoreService.getState failed")
+        _printRefreshGuardStatus(C)
         return
     end
 
@@ -153,62 +240,87 @@ local function _printStatusBestEffort(ctx, svc)
     local n = 0
     for _ in pairs(players) do n = n + 1 end
 
-    ctx.out("[DWKit Who] status (fallback)")
-    ctx.out("  serviceVersion=" .. tostring(st.version or "?"))
-    ctx.out("  players=" .. tostring(n))
-    ctx.out("  lastUpdatedTs=" .. tostring(st.lastUpdatedTs or "nil"))
-    ctx.out("  source=" .. tostring(st.source or "nil"))
+    C.out("[DWKit Who] status (dwwho)")
+    C.out("  serviceVersion=" .. tostring(st.version or svc.VERSION or "?"))
+    C.out("  players=" .. tostring(n))
+    C.out("  lastUpdatedTs=" .. tostring(st.lastUpdatedTs or "nil"))
+    C.out("  source=" .. tostring(st.source or "nil"))
 
-    _printRefreshGuardStatus(ctx)
+    _printRefreshGuardStatus(C)
 end
 
-local function _finalize(ctx, ok, reason, svc)
+local function _ingestTextBestEffort(C, svc, text, meta)
+    meta = (type(meta) == "table") and meta or {}
+    text = tostring(text or "")
+
+    if type(svc) ~= "table" then
+        return false, "svc not available"
+    end
+
+    if type(svc.ingestWhoText) == "function" then
+        local okCall, a, b, c, err = _callBestEffort(C, svc, "ingestWhoText", text, meta)
+        if okCall and a ~= false then
+            return true, nil
+        end
+        return false, tostring(b or c or err or "ingestWhoText failed")
+    end
+
+    if type(svc.ingestWhoLines) == "function" then
+        local lines = {}
+        text = text:gsub("\r", "")
+        for line in text:gmatch("([^\n]+)") do
+            lines[#lines + 1] = line
+        end
+        local okCall, a, b, c, err = _callBestEffort(C, svc, "ingestWhoLines", lines, meta)
+        if okCall and a ~= false then
+            return true, nil
+        end
+        return false, tostring(b or c or err or "ingestWhoLines failed")
+    end
+
+    return false, "WhoStoreService ingestWhoText/ingestWhoLines not available"
+end
+
+local function _finalize(C, ok, reason, svc)
     local lines = CAP.lines or {}
-    _reset(ctx)
+    _reset(C)
 
     if not ok then
         GUARD.lastOk = false
         GUARD.lastErr = tostring(reason or "unknown")
-        ctx.out("[DWKit Who] refresh FAILED reason=" .. tostring(reason or "unknown"))
+        C.out("[DWKit Who] refresh FAILED reason=" .. tostring(reason or "unknown"))
         return
     end
 
     if type(svc) ~= "table" then
         GUARD.lastOk = false
         GUARD.lastErr = "WhoStoreService not available"
-        ctx.out("[DWKit Who] refresh FAILED: WhoStoreService not available")
+        C.out("[DWKit Who] refresh FAILED: WhoStoreService not available")
         return
     end
 
     local text = table.concat(lines, "\n")
 
-    if type(ctx.whoIngestTextBestEffort) ~= "function" then
-        GUARD.lastOk = false
-        GUARD.lastErr = "whoIngestTextBestEffort ctx helper missing"
-        ctx.out("[DWKit Who] refresh ingest FAILED err=whoIngestTextBestEffort ctx helper missing")
-        return
-    end
-
-    local okIngest, err = ctx.whoIngestTextBestEffort(svc, text, { source = "dwwho:refresh" })
+    local okIngest, err = _ingestTextBestEffort(C, svc, text, { source = "dwwho:refresh" })
     if okIngest then
         GUARD.lastOk = true
         GUARD.lastOkTs = os.time()
         GUARD.lastErr = nil
 
-        ctx.out("[DWKit Who] refresh OK lines=" .. tostring(#lines))
-        _printStatusBestEffort(ctx, svc)
+        C.out("[DWKit Who] refresh OK lines=" .. tostring(#lines))
+        _printStatusBestEffort(C, svc)
     else
         GUARD.lastOk = false
         GUARD.lastErr = tostring(err or "ingest failed")
-        ctx.out("[DWKit Who] refresh ingest FAILED err=" .. tostring(err))
+        C.out("[DWKit Who] refresh ingest FAILED err=" .. tostring(err))
     end
 end
 
-local function _shouldSkipRefresh(ctx)
+local function _shouldSkipRefresh(C)
     -- Anti-overlap: never cancel old session automatically; SKIP instead.
     if CAP.active == true then
         GUARD.lastSkipReason = "inflight"
-        ctx.out("[DWKit Who] refresh skipped (already running)")
+        C.out("[DWKit Who] refresh skipped (already running)")
         return true
     end
 
@@ -220,7 +332,7 @@ local function _shouldSkipRefresh(ctx)
         if delta >= 0 and delta < GUARD.cooldownSec then
             local wait = GUARD.cooldownSec - delta
             GUARD.lastSkipReason = "cooldown(" .. tostring(wait) .. "s)"
-            ctx.out("[DWKit Who] refresh blocked by cooldown (wait " .. tostring(wait) .. "s)")
+            C.out("[DWKit Who] refresh blocked by cooldown (wait " .. tostring(wait) .. "s)")
             return true
         end
     end
@@ -228,21 +340,35 @@ local function _shouldSkipRefresh(ctx)
     return false
 end
 
-local function _startCapture(ctx, svc, opts)
+local function _startCapture(C, svc, opts)
     opts = opts or {}
     local timeoutSec = tonumber(opts.timeoutSec or 5) or 5
     if timeoutSec < 2 then timeoutSec = 2 end
     if timeoutSec > 10 then timeoutSec = 10 end
 
-    if _shouldSkipRefresh(ctx) then
+    if _shouldSkipRefresh(C) then
         return
     end
 
-    local sendFn = ctx.resolveSendFn()
+    if type(C.resolveSendFn) ~= "function" then
+        GUARD.lastOk = false
+        GUARD.lastErr = "resolveSendFn ctx helper missing"
+        C.out("[DWKit Who] refresh FAILED: resolveSendFn ctx helper missing")
+        return
+    end
+
+    local sendFn = C.resolveSendFn()
     if type(sendFn) ~= "function" then
         GUARD.lastOk = false
         GUARD.lastErr = "send/sendAll not available"
-        ctx.out("[DWKit Who] refresh FAILED: send/sendAll not available in this Mudlet environment")
+        C.out("[DWKit Who] refresh FAILED: send/sendAll not available in this Mudlet environment")
+        return
+    end
+
+    if type(C.tempRegexTrigger) ~= "function" or type(C.tempTimer) ~= "function" then
+        GUARD.lastOk = false
+        GUARD.lastErr = "tempRegexTrigger/tempTimer ctx helpers missing"
+        C.out("[DWKit Who] refresh FAILED: tempRegexTrigger/tempTimer ctx helpers missing")
         return
     end
 
@@ -256,7 +382,7 @@ local function _startCapture(ctx, svc, opts)
     CAP.lines = {}
     CAP.startedAt = GUARD.lastAttemptTs
 
-    CAP.trigAny = ctx.tempRegexTrigger([[^(.*)$]], function()
+    CAP.trigAny = C.tempRegexTrigger([[^(.*)$]], function()
         if not CAP.active then return end
         local line = (matches and matches[2]) and tostring(matches[2]) or ""
 
@@ -272,16 +398,16 @@ local function _startCapture(ctx, svc, opts)
         CAP.lines[#CAP.lines + 1] = line
 
         if line:match("^%s*%d+%s+characters displayed%.%s*$") then
-            _finalize(ctx, true, nil, svc)
+            _finalize(C, true, nil, svc)
         end
     end)
 
-    CAP.timer = ctx.tempTimer(timeoutSec, function()
+    CAP.timer = C.tempTimer(timeoutSec, function()
         if not CAP.active then return end
-        _finalize(ctx, false, "timeout(" .. tostring(timeoutSec) .. "s)", svc)
+        _finalize(C, false, "timeout(" .. tostring(timeoutSec) .. "s)", svc)
     end)
 
-    ctx.out("[DWKit Who] refresh: sending 'who' + capturing output...")
+    C.out("[DWKit Who] refresh: sending 'who' + capturing output...")
     pcall(sendFn, "who")
 end
 
@@ -349,82 +475,82 @@ local function _splitNamesCSV(rest)
     return names
 end
 
-local function _svcSetNames(ctx, svc, names, source)
+local function _svcSetNames(C, svc, names, source)
     if type(svc) ~= "table" then
-        ctx.err("WhoStoreService not available")
+        C.err("WhoStoreService not available")
         return
     end
 
     local payload = { players = names }
 
-    local okCall, _, _, _, err = ctx.callBestEffort(svc, "setState", payload, { source = source or "cmd:dwwho:set" })
+    local okCall, _, _, _, err = _callBestEffort(C, svc, "setState", payload, { source = source or "cmd:dwwho:set" })
     if not okCall then
-        ctx.err("setState failed: " .. tostring(err))
+        C.err("setState failed: " .. tostring(err))
         return
     end
 
-    ctx.out("[DWKit Who] set OK count=" .. tostring(#names))
-    _printStatusBestEffort(ctx, svc)
+    C.out("[DWKit Who] set OK count=" .. tostring(#names))
+    _printStatusBestEffort(C, svc)
 end
 
-local function _svcAddName(ctx, svc, name, source)
+local function _svcAddName(C, svc, name, source)
     if type(svc) ~= "table" then
-        ctx.err("WhoStoreService not available")
+        C.err("WhoStoreService not available")
         return
     end
 
     local payload = { players = { name } }
 
-    local okCall, _, _, _, err = ctx.callBestEffort(svc, "update", payload, { source = source or "cmd:dwwho:add" })
+    local okCall, _, _, _, err = _callBestEffort(C, svc, "update", payload, { source = source or "cmd:dwwho:add" })
     if not okCall then
-        ctx.err("update(add) failed: " .. tostring(err))
+        C.err("update(add) failed: " .. tostring(err))
         return
     end
 
-    ctx.out("[DWKit Who] add OK name=" .. tostring(name))
-    _printStatusBestEffort(ctx, svc)
+    C.out("[DWKit Who] add OK name=" .. tostring(name))
+    _printStatusBestEffort(C, svc)
 end
 
-local function _svcRemoveName(ctx, svc, name, source)
+local function _svcRemoveName(C, svc, name, source)
     if type(svc) ~= "table" then
-        ctx.err("WhoStoreService not available")
+        C.err("WhoStoreService not available")
         return
     end
 
     local payload = { remove = { name } }
 
-    local okCall, _, _, _, err = ctx.callBestEffort(svc, "update", payload, { source = source or "cmd:dwwho:remove" })
+    local okCall, _, _, _, err = _callBestEffort(C, svc, "update", payload, { source = source or "cmd:dwwho:remove" })
     if not okCall then
-        ctx.err("update(remove) failed: " .. tostring(err))
+        C.err("update(remove) failed: " .. tostring(err))
         return
     end
 
-    ctx.out("[DWKit Who] remove OK name=" .. tostring(name))
-    _printStatusBestEffort(ctx, svc)
+    C.out("[DWKit Who] remove OK name=" .. tostring(name))
+    _printStatusBestEffort(C, svc)
 end
 
-local function _svcClear(ctx, svc)
-    local okCall, _, _, _, err = ctx.callBestEffort(svc, "clear", { source = "cmd:dwwho:clear" })
+local function _svcClear(C, svc)
+    local okCall, _, _, _, err = _callBestEffort(C, svc, "clear", { source = "cmd:dwwho:clear" })
     if not okCall then
-        ctx.err("clear failed: " .. tostring(err))
+        C.err("clear failed: " .. tostring(err))
         return
     end
-    ctx.out("[DWKit Who] clear OK")
-    _printStatusBestEffort(ctx, svc)
+    C.out("[DWKit Who] clear OK")
+    _printStatusBestEffort(C, svc)
 end
 
-local function _svcList(ctx, svc)
+local function _svcList(C, svc)
     if type(svc) ~= "table" then
-        ctx.err("WhoStoreService not available")
+        C.err("WhoStoreService not available")
         return
     end
 
     if type(svc.getAllPlayers) == "function" then
         local ok, arr = pcall(svc.getAllPlayers)
         if ok and type(arr) == "table" then
-            ctx.out("[DWKit Who] list count=" .. tostring(#arr))
+            C.out("[DWKit Who] list count=" .. tostring(#arr))
             for i = 1, #arr do
-                ctx.out("  - " .. tostring(arr[i]))
+                C.out("  - " .. tostring(arr[i]))
             end
             return
         end
@@ -432,13 +558,13 @@ local function _svcList(ctx, svc)
 
     -- fallback: use getState().players map
     if type(svc.getState) ~= "function" then
-        ctx.err("WhoStoreService.getState not available")
+        C.err("WhoStoreService.getState not available")
         return
     end
 
     local ok, st = pcall(svc.getState)
     if not ok or type(st) ~= "table" then
-        ctx.err("WhoStoreService.getState failed")
+        C.err("WhoStoreService.getState failed")
         return
     end
 
@@ -451,9 +577,9 @@ local function _svcList(ctx, svc)
     end
     table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
 
-    ctx.out("[DWKit Who] list count=" .. tostring(#keys))
+    C.out("[DWKit Who] list count=" .. tostring(#keys))
     for i = 1, #keys do
-        ctx.out("  - " .. tostring(keys[i]))
+        C.out("  - " .. tostring(keys[i]))
     end
 end
 
@@ -493,9 +619,10 @@ local function _fixtureText(which)
     }, "\n"), "basic"
 end
 
-function M.dispatch(ctx, svc, sub, arg)
-    ctx = ctx or {}
-    if type(ctx.out) ~= "function" or type(ctx.err) ~= "function" then
+local function _dispatchCore(ctx, svc, sub, arg)
+    local C = _getCtx(ctx)
+
+    if type(C.out) ~= "function" or type(C.err) ~= "function" then
         return
     end
 
@@ -504,40 +631,35 @@ function M.dispatch(ctx, svc, sub, arg)
 
     -- default: status
     if verb == "" or verb == "status" then
-        _printStatusBestEffort(ctx, svc)
+        _printStatusBestEffort(C, svc)
         return
     end
 
     if verb == "clear" then
-        _svcClear(ctx, svc)
+        _svcClear(C, svc)
         return
     end
 
     if verb == "list" then
-        _svcList(ctx, svc)
+        _svcList(C, svc)
         return
     end
 
     if verb == "ingestclip" then
-        local text = ctx.getClipboardText()
+        local text = (type(C.getClipboardText) == "function") and C.getClipboardText() or nil
         if type(text) ~= "string" or text:gsub("%s+", "") == "" then
-            ctx.err("clipboard is empty (copy WHO output first).")
+            C.err("clipboard is empty (copy WHO output first).")
             return
         end
 
-        if type(ctx.whoIngestTextBestEffort) ~= "function" then
-            ctx.err("whoIngestTextBestEffort ctx helper missing")
-            return
-        end
-
-        local okIngest, err = ctx.whoIngestTextBestEffort(svc, text, { source = "dwwho:clipboard" })
+        local okIngest, err = _ingestTextBestEffort(C, svc, text, { source = "dwwho:clipboard" })
         if okIngest then
-            ctx.out("[DWKit Who] ingestclip OK")
-            _printStatusBestEffort(ctx, svc)
+            C.out("[DWKit Who] ingestclip OK")
+            _printStatusBestEffort(C, svc)
             return
         end
 
-        ctx.err("ingestclip failed: " .. tostring(err))
+        C.err("ingestclip failed: " .. tostring(err))
         return
     end
 
@@ -545,58 +667,82 @@ function M.dispatch(ctx, svc, sub, arg)
         local fixtureName = _trim(rest)
         local fixture, which = _fixtureText(fixtureName)
 
-        if type(ctx.whoIngestTextBestEffort) ~= "function" then
-            ctx.err("whoIngestTextBestEffort ctx helper missing")
-            return
-        end
-
-        local okIngest, err = ctx.whoIngestTextBestEffort(svc, fixture, { source = "dwwho:fixture:" .. tostring(which) })
+        local okIngest, err = _ingestTextBestEffort(C, svc, fixture, { source = "dwwho:fixture:" .. tostring(which) })
         if okIngest then
-            ctx.out("[DWKit Who] fixture OK name=" .. tostring(which))
-            _printStatusBestEffort(ctx, svc)
+            C.out("[DWKit Who] fixture OK name=" .. tostring(which))
+            _printStatusBestEffort(C, svc)
             return
         end
 
-        ctx.err("fixture ingest failed: " .. tostring(err))
+        C.err("fixture ingest failed: " .. tostring(err))
         return
     end
 
     if verb == "set" then
         local names = _splitNamesCSV(rest)
         if #names == 0 then
-            ctx.err("set requires names. Example: dwwho set Bob,Alice")
+            C.err("set requires names. Example: dwwho set Bob,Alice")
             return
         end
-        _svcSetNames(ctx, svc, names, "cmd:dwwho:set")
+        _svcSetNames(C, svc, names, "cmd:dwwho:set")
         return
     end
 
     if verb == "add" then
         local name = _trim(rest)
         if name == "" then
-            ctx.err("add requires a name. Example: dwwho add Bob")
+            C.err("add requires a name. Example: dwwho add Bob")
             return
         end
-        _svcAddName(ctx, svc, name, "cmd:dwwho:add")
+        _svcAddName(C, svc, name, "cmd:dwwho:add")
         return
     end
 
     if verb == "remove" or verb == "rm" or verb == "del" then
         local name = _trim(rest)
         if name == "" then
-            ctx.err("remove requires a name. Example: dwwho remove Bob")
+            C.err("remove requires a name. Example: dwwho remove Bob")
             return
         end
-        _svcRemoveName(ctx, svc, name, "cmd:dwwho:remove")
+        _svcRemoveName(C, svc, name, "cmd:dwwho:remove")
         return
     end
 
     if verb == "refresh" then
-        _startCapture(ctx, svc, { timeoutSec = 5 })
+        _startCapture(C, svc, { timeoutSec = 5 })
         return
     end
 
-    _usage(ctx)
+    _usage(C)
+end
+
+function M.dispatch(ctx, a, b, c)
+    -- Router signature: dispatch(ctx, kit, tokens)
+    if type(b) == "table" and type(b[1]) == "string" then
+        local C = _getCtx(ctx)
+        local kit = a
+        local tokens = b
+
+        local svc = _resolveSvcFromKitOrCtx(C, kit)
+        if type(svc) ~= "table" then
+            C.err("WhoStoreService not available. Run loader.init() first.")
+            return
+        end
+
+        local sub = tostring(tokens[2] or "")
+        local arg = ""
+        if #tokens >= 3 then
+            arg = table.concat(tokens, " ", 3)
+        end
+
+        _dispatchCore(ctx, svc, sub, arg)
+        return
+    end
+
+    -- Legacy signature: dispatch(ctx, svc, sub, arg)
+    _dispatchCore(ctx, a, b, c)
 end
 
 return M
+
+-- END FILE: src/dwkit/commands/dwwho.lua

@@ -1,19 +1,21 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwdiag
 -- Owner       : Commands
--- Version     : v2026-01-25A
+-- Version     : v2026-01-27C
 -- Purpose     :
 --   - Handler for "dwdiag" command surface.
 --   - SAFE: prints a diagnostic bundle (versions, boot, services, event diag status).
 --   - Manual only. No gameplay sends. No timers.
 --
--- Public API  :
---   - dispatch(ctx, kit) -> boolean ok, string|nil err
---   - reset() -> nil
+-- Dispatch compatibility:
+--   - dispatch(ctx, kit)
+--   - dispatch(tokens)
+--   - dispatch(ctx, tokens)
+--   - dispatch(ctx, kit, tokens)
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-01-25A"
+M.VERSION = "v2026-01-27C"
 
 local function _fallbackOut(line)
   line = tostring(line or "")
@@ -30,6 +32,19 @@ local function _fallbackErr(msg)
   _fallbackOut("[DWKit Diag] ERROR: " .. tostring(msg))
 end
 
+local function _safeRequire(modName)
+  local ok, mod = pcall(require, modName)
+  if ok and type(mod) == "table" then return true, mod, nil end
+  return false, nil, tostring(mod)
+end
+
+local function _getKit(kit)
+  if type(kit) == "table" then return kit end
+  if type(_G) == "table" and type(_G.DWKit) == "table" then return _G.DWKit end
+  if type(DWKit) == "table" then return DWKit end
+  return nil
+end
+
 local function _getCtx(ctx)
   ctx = (type(ctx) == "table") and ctx or {}
   return {
@@ -38,19 +53,6 @@ local function _getCtx(ctx)
     ppTable = (type(ctx.ppTable) == "function") and ctx.ppTable or nil,
     callBestEffort = (type(ctx.callBestEffort) == "function") and ctx.callBestEffort or nil,
   }
-end
-
-local function _resolveKit(kit)
-  if type(kit) == "table" then return kit end
-  if type(_G) == "table" and type(_G.DWKit) == "table" then return _G.DWKit end
-  if type(DWKit) == "table" then return DWKit end
-  return nil
-end
-
-local function _safeRequire(modName)
-  local ok, mod = pcall(require, modName)
-  if ok and type(mod) == "table" then return true, mod, nil end
-  return false, nil, tostring(mod)
 end
 
 local function _tryDispatch(C, modName, ...)
@@ -67,7 +69,7 @@ end
 
 local function _makeEventDiagCtx(C, kit)
   local function getEventBus()
-    local K = _resolveKit(kit)
+    local K = _getKit(kit)
     if type(K) == "table" and type(K.bus) == "table" and type(K.bus.eventBus) == "table" then
       return K.bus.eventBus
     end
@@ -77,7 +79,7 @@ local function _makeEventDiagCtx(C, kit)
   end
 
   local function getEventRegistry()
-    local K = _resolveKit(kit)
+    local K = _getKit(kit)
     if type(K) == "table" and type(K.bus) == "table" and type(K.bus.eventRegistry) == "table" then
       return K.bus.eventRegistry
     end
@@ -97,9 +99,81 @@ local function _makeEventDiagCtx(C, kit)
   }
 end
 
-function M.dispatch(ctx, kit)
+local function _getEventDiagStateBestEffort(kit)
+  local K = _getKit(kit)
+
+  -- Preferred: dedicated state service (post-slimming)
+  do
+    local okS, S = _safeRequire("dwkit.services.event_diag_state")
+    if okS and type(S) == "table" then
+      if type(S.getState) == "function" then
+        -- Prefer passing kit (matches how command_aliases uses it)
+        local ok, st = pcall(S.getState, K)
+        if ok and type(st) == "table" then return st end
+
+        -- Fallbacks for older signatures
+        ok, st = pcall(S.getState, S)
+        if ok and type(st) == "table" then return st end
+        ok, st = pcall(S.getState)
+        if ok and type(st) == "table" then return st end
+      end
+      if type(S.STATE) == "table" then return S.STATE end
+    end
+  end
+
+  -- Fallback: if kit exposes it somewhere
+  if type(K) == "table" and type(K.services) == "table" then
+    local s = K.services.eventDiagState
+    if type(s) == "table" then
+      if type(s.getState) == "function" then
+        local ok, st = pcall(s.getState, K)
+        if ok and type(st) == "table" then return st end
+        ok, st = pcall(s.getState, s)
+        if ok and type(st) == "table" then return st end
+        ok, st = pcall(s.getState)
+        if ok and type(st) == "table" then return st end
+      end
+      if type(s.STATE) == "table" then return s.STATE end
+    end
+  end
+
+  -- Last resort: synthetic state (keeps printStatus from nil-crashing)
+  return { maxLog = 50, log = {}, tapToken = nil, subs = {} }
+end
+
+local function _isArrayLike(t)
+  if type(t) ~= "table" then return false end
+  local n = #t
+  if n == 0 then return false end
+  for i = 1, n do if t[i] == nil then return false end end
+  return true
+end
+
+function M.dispatch(a1, a2, a3)
+  local ctx = nil
+  local kit = nil
+
+  -- dispatch(tokens)
+  if _isArrayLike(a1) and tostring(a1[1] or "") == "dwdiag" then
+    ctx = nil
+    kit = nil
+  else
+    ctx = a1
+
+    -- dispatch(ctx, tokens)
+    if _isArrayLike(a2) and tostring(a2[1] or "") == "dwdiag" then
+      kit = nil
+      -- dispatch(ctx, kit, tokens)
+    elseif _isArrayLike(a3) and tostring(a3[1] or "") == "dwdiag" then
+      kit = a2
+    else
+      -- dispatch(ctx, kit)
+      kit = a2
+    end
+  end
+
   local C = _getCtx(ctx)
-  local K = _resolveKit(kit)
+  local K = _getKit(kit)
 
   C.out("[DWKit Diag] bundle (dwdiag)")
   C.out("  NOTE: SAFE + manual-only. Does not enable event tap or subscriptions.")
@@ -125,12 +199,9 @@ function M.dispatch(ctx, kit)
   do
     local okE, modE, errE = _safeRequire("dwkit.commands.event_diag")
     if okE and type(modE.printStatus) == "function" then
-      -- event_diag expects (ctx, stateTable)
-      -- state lives in alias module historically; for dwdiag we just print "module available" + bus/reg status.
-      -- We supply a tiny synthetic state to avoid nil errors (printStatus should be tolerant).
       local diagCtx = _makeEventDiagCtx(C, K)
-      local syntheticState = { maxLog = 50, log = {}, tapToken = nil, subs = {} }
-      local okCall, errOrNil = pcall(modE.printStatus, diagCtx, syntheticState)
+      local st = _getEventDiagStateBestEffort(K)
+      local okCall, errOrNil = pcall(modE.printStatus, diagCtx, st)
       if not okCall then
         C.err("event_diag.printStatus threw error: " .. tostring(errOrNil))
       end
