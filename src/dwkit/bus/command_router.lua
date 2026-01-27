@@ -1,7 +1,9 @@
 -- #########################################################################
+-- BEGIN FILE: src/dwkit/bus/command_router.lua
+-- #########################################################################
 -- Module Name : dwkit.bus.command_router
 -- Owner       : Bus
--- Version     : v2026-01-27C
+-- Version     : v2026-01-27E
 -- Purpose     :
 --   - Centralize SAFE command routing (moved out of command_aliases.lua).
 --   - Provide routered dispatch for commands that need special routing:
@@ -15,11 +17,17 @@
 --   - This module does NOT install Mudlet aliases.
 --   - Alias installation remains in dwkit.services.command_aliases.
 --   - Context (ctx) functions are provided by the caller (out/err/safeRequire/callBestEffort/etc).
+--   - Option A: ctx is now normalized best-effort via dwkit.core.mudlet_ctx.ensure().
+--   - StepD: fallback printers can now be supplied by dwkit.services.legacy_printers
+--           even when ctx lacks legacy helpers.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-27C"
+M.VERSION = "v2026-01-27E"
+
+local Ctx = require("dwkit.core.mudlet_ctx")
+local Legacy = require("dwkit.services.legacy_printers")
 
 local function _sortedKeys(t)
     local keys = {}
@@ -29,9 +37,6 @@ local function _sortedKeys(t)
     return keys
 end
 
--- ------------------------------------------------------------
--- GUI helpers (legacy printing support)
--- ------------------------------------------------------------
 local function _printGuiStatusAndList(ctx, gs)
     if type(ctx) ~= "table" then return end
     if type(gs) ~= "table" or type(gs.status) ~= "function" or type(gs.list) ~= "function" then
@@ -117,11 +122,10 @@ local function _getUiValidatorBestEffort(ctx)
     return nil
 end
 
--- ------------------------------------------------------------
--- Routered dispatch: dwgui / dwscorestore / dwrelease
--- Returns: true if handled, false if not.
--- ------------------------------------------------------------
 function M.dispatchRoutered(ctx, kit, tokens)
+    ctx = Ctx.ensure(ctx, { kit = kit, errPrefix = "[DWKit Router]" })
+    kit = (type(kit) == "table") and kit or (type(ctx.getKit) == "function" and ctx.getKit()) or nil
+
     tokens = (type(tokens) == "table") and tokens or {}
     local cmd = tostring(tokens[1] or "")
 
@@ -142,18 +146,11 @@ function M.dispatchRoutered(ctx, kit, tokens)
             pcall(gs.load, { quiet = true })
         end
 
-        local sub  = tokens[2] or ""
+        local sub = tokens[2] or ""
         local uiId = tokens[3] or ""
         local arg3 = tokens[4] or ""
 
-        -- Delegate-only: dwkit.commands.dwgui owns behavior.
-        local okM, mod
-        if type(ctx.safeRequire) == "function" then
-            okM, mod = ctx.safeRequire("dwkit.commands.dwgui")
-        else
-            okM, mod = pcall(require, "dwkit.commands.dwgui")
-        end
-
+        local okM, mod = ctx.safeRequire("dwkit.commands.dwgui")
         if not okM or type(mod) ~= "table" or type(mod.dispatch) ~= "function" then
             ctx.err("dwkit.commands.dwgui not available (dispatch missing).")
             return true
@@ -193,7 +190,6 @@ function M.dispatchRoutered(ctx, kit, tokens)
 
         local svc = ctx.getService("scoreStoreService")
         if type(svc) ~= "table" then
-            -- Best-effort fallback require
             local okS, mod = ctx.safeRequire("dwkit.services.score_store_service")
             if okS and type(mod) == "table" then
                 svc = mod
@@ -208,7 +204,6 @@ function M.dispatchRoutered(ctx, kit, tokens)
         local sub = tokens[2] or ""
         local arg = tokens[3] or ""
 
-        -- Delegate-only: dwkit.commands.dwscorestore owns behavior.
         local okM, mod = ctx.safeRequire("dwkit.commands.dwscorestore")
         if not okM or type(mod) ~= "table" or type(mod.dispatch) ~= "function" then
             ctx.err("dwkit.commands.dwscorestore not available (dispatch missing).")
@@ -234,14 +229,7 @@ function M.dispatchRoutered(ctx, kit, tokens)
     end
 
     if cmd == "dwrelease" then
-        -- Delegate-only: dwkit.commands.dwrelease owns behavior.
-        local okM, mod
-        if type(ctx.safeRequire) == "function" then
-            okM, mod = ctx.safeRequire("dwkit.commands.dwrelease")
-        else
-            okM, mod = pcall(require, "dwkit.commands.dwrelease")
-        end
-
+        local okM, mod = ctx.safeRequire("dwkit.commands.dwrelease")
         if not okM or type(mod) ~= "table" or type(mod.dispatch) ~= "function" then
             ctx.err("dwkit.commands.dwrelease not available (dispatch missing).")
             return true
@@ -274,24 +262,16 @@ function M.dispatchRoutered(ctx, kit, tokens)
     return false
 end
 
--- ------------------------------------------------------------
--- Generic dispatch wrapper (moved from command_aliases.lua)
--- Expectations:
---   - ctx has: out, err, safeRequire, callBestEffort
---   - ctx may also supply: ppTable, getKit, getService, makeEventDiagCtx,
---     getEventDiagState, legacyPrintVersionSummary, legacyPrintBoot, legacyPrintServices,
---     legacyPrintIdentity, printServiceSnapshot
--- ------------------------------------------------------------
 function M.dispatchGenericCommand(ctx, kit, cmd, tokens)
+    ctx = Ctx.ensure(ctx, { kit = kit, errPrefix = "[DWKit Router]" })
     cmd = tostring(cmd or "")
     kit = (type(kit) == "table") and kit
-        or (type(ctx) == "table" and type(ctx.getKit) == "function" and ctx.getKit())
+        or (type(ctx.getKit) == "function" and ctx.getKit())
         or nil
     tokens = (type(tokens) == "table") and tokens or {}
 
     if cmd == "" then return true end
 
-    -- (0) dwcommands inline (keeps SAFE behavior independent of split module failures)
     if cmd == "dwcommands" then
         if type(kit) ~= "table" or type(kit.cmd) ~= "table" then
             ctx.err("DWKit.cmd not available. Run loader.init() first.")
@@ -337,7 +317,6 @@ function M.dispatchGenericCommand(ctx, kit, cmd, tokens)
         return true
     end
 
-    -- 1) Split module dispatch
     do
         local okM, mod = ctx.safeRequire("dwkit.commands." .. cmd)
         if okM and type(mod) == "table" and type(mod.dispatch) == "function" then
@@ -352,7 +331,6 @@ function M.dispatchGenericCommand(ctx, kit, cmd, tokens)
         end
     end
 
-    -- 2) Try DWKit.cmd.run (best-effort)
     if type(kit) == "table" and type(kit.cmd) == "table" and type(kit.cmd.run) == "function" then
         local argString = ""
         if #tokens >= 2 then
@@ -366,33 +344,71 @@ function M.dispatchGenericCommand(ctx, kit, cmd, tokens)
         if okB then return true end
     end
 
-    -- 3) Micro-fallbacks for a few essential commands
-    if cmd == "dwid" and type(ctx.legacyPrintIdentity) == "function" then
-        ctx.legacyPrintIdentity()
+    -- ------------------------------------------------------------
+    -- Micro-fallbacks (best-effort, SAFE)
+    -- ------------------------------------------------------------
+    local caVer = (type(ctx) == "table" and ctx.commandAliasesVersion) or "unknown"
+
+    if cmd == "dwid" then
+        if type(ctx.legacyPrintIdentity) == "function" then
+            ctx.legacyPrintIdentity()
+        else
+            Legacy.printIdentity(ctx, kit)
+        end
         return true
     end
-    if cmd == "dwversion" and type(ctx.legacyPrintVersionSummary) == "function" then
-        ctx.legacyPrintVersionSummary()
+
+    if cmd == "dwversion" then
+        if type(ctx.legacyPrintVersionSummary) == "function" then
+            ctx.legacyPrintVersionSummary()
+        else
+            Legacy.printVersionSummary(ctx, kit, caVer)
+        end
         return true
     end
-    if cmd == "dwboot" and type(ctx.legacyPrintBoot) == "function" then
-        ctx.legacyPrintBoot()
+
+    if cmd == "dwboot" then
+        if type(ctx.legacyPrintBoot) == "function" then
+            ctx.legacyPrintBoot()
+        else
+            Legacy.printBootHealth(ctx, kit)
+        end
         return true
     end
-    if cmd == "dwservices" and type(ctx.legacyPrintServices) == "function" then
-        ctx.legacyPrintServices()
+
+    if cmd == "dwservices" then
+        if type(ctx.legacyPrintServices) == "function" then
+            ctx.legacyPrintServices()
+        else
+            Legacy.printServicesHealth(ctx, kit)
+        end
         return true
     end
-    if cmd == "dwpresence" and type(ctx.printServiceSnapshot) == "function" then
-        ctx.printServiceSnapshot("PresenceService", "presenceService")
+
+    if cmd == "dwpresence" then
+        if type(ctx.printServiceSnapshot) == "function" then
+            ctx.printServiceSnapshot("PresenceService", "presenceService")
+        else
+            Legacy.printServiceSnapshot(ctx, kit, "PresenceService", "presenceService")
+        end
         return true
     end
-    if cmd == "dwactions" and type(ctx.printServiceSnapshot) == "function" then
-        ctx.printServiceSnapshot("ActionModelService", "actionModelService")
+
+    if cmd == "dwactions" then
+        if type(ctx.printServiceSnapshot) == "function" then
+            ctx.printServiceSnapshot("ActionModelService", "actionModelService")
+        else
+            Legacy.printServiceSnapshot(ctx, kit, "ActionModelService", "actionModelService")
+        end
         return true
     end
-    if cmd == "dwskills" and type(ctx.printServiceSnapshot) == "function" then
-        ctx.printServiceSnapshot("SkillRegistryService", "skillRegistryService")
+
+    if cmd == "dwskills" then
+        if type(ctx.printServiceSnapshot) == "function" then
+            ctx.printServiceSnapshot("SkillRegistryService", "skillRegistryService")
+        else
+            Legacy.printServiceSnapshot(ctx, kit, "SkillRegistryService", "skillRegistryService")
+        end
         return true
     end
 
@@ -401,3 +417,7 @@ function M.dispatchGenericCommand(ctx, kit, cmd, tokens)
 end
 
 return M
+
+-- #########################################################################
+-- END FILE: src/dwkit/bus/command_router.lua
+-- #########################################################################

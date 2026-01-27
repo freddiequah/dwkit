@@ -3,7 +3,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.alias_factory
 -- Owner       : Services
--- Version     : v2026-01-27A
+-- Version     : v2026-01-27C
 -- Purpose     :
 --   - Objective extraction from command_aliases.lua:
 --       * SAFE command enumeration (best-effort)
@@ -11,8 +11,9 @@
 --
 -- Design:
 --   - This module is dependency-injected to avoid importing Mudlet globals directly.
---   - Special-case aliases (dwwho/dwroom/dwdiag/dwgui/dwscorestore/dwrelease routered) remain
---     in dwkit.services.command_aliases (for now).
+--   - Preferred path: deps.makeCtx(kind, kit) is provided, so ctx creation/enrichment
+--     is centralized elsewhere (e.g. dwkit.services.command_ctx).
+--   - Fallback path: if deps.makeCtx is absent, we build a minimal ctx best-effort.
 --
 -- Public API:
 --   - getSafeCommandNamesBestEffort(deps, kit) -> table|nil
@@ -29,6 +30,11 @@
 --   deps.getRouter() -> routerModule|nil
 --   deps.out(line)
 --   deps.err(msg)
+--
+-- deps contract (optional, for enriched ctx):
+--   deps.makeCtx(kind, kit) -> ctx
+--
+-- Optional legacy/event helpers for fallback ctx (best-effort only):
 --   deps.legacyPpTable(t, opts)
 --   deps.makeEventDiagCtx() -> ctx
 --   deps.getEventDiagStateBestEffort(kit) -> table|nil
@@ -41,7 +47,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-27A"
+M.VERSION = "v2026-01-27C"
 
 local function _sortedKeys(t)
     local keys = {}
@@ -83,7 +89,6 @@ function M.getSafeCommandNamesBestEffort(deps, kit)
     kit = (type(kit) == "table") and kit or (type(deps.getKit) == "function" and deps.getKit()) or nil
     if type(kit) ~= "table" then return nil end
 
-    -- Try DWKit.cmd helper methods first (preferred)
     if type(kit.cmd) == "table" and type(deps.callBestEffort) == "function" then
         local candidates = {
             "getSafeNames",
@@ -104,7 +109,6 @@ function M.getSafeCommandNamesBestEffort(deps, kit)
         end
     end
 
-    -- Try command_registry module directly (best-effort)
     if type(deps.safeRequire) == "function" then
         local okR, reg = deps.safeRequire("dwkit.bus.command_registry")
         if okR and type(reg) == "table" then
@@ -129,16 +133,32 @@ function M.getSafeCommandNamesBestEffort(deps, kit)
     return nil
 end
 
-local function _makeGenericAliasCtx(deps, k)
+local function _ppTableFallback(deps, t, opts2)
+    if type(deps.legacyPpTable) == "function" then
+        return deps.legacyPpTable(t, opts2)
+    end
+    if type(deps.out) == "function" then
+        deps.out(tostring(t))
+        return
+    end
+    print(tostring(t))
+end
+
+local function _makeGenericAliasCtxFallback(deps, k)
+    deps = (type(deps) == "table") and deps or {}
+    local out = (type(deps.out) == "function") and deps.out or function(line) print(tostring(line)) end
+    local err = (type(deps.err) == "function") and deps.err or function(msg) out("ERROR: " .. tostring(msg)) end
+
     return {
-        out = deps.out,
-        err = deps.err,
-        ppTable = function(t, opts2) deps.legacyPpTable(t, opts2) end,
+        out = out,
+        err = err,
+        ppTable = function(t, opts2) _ppTableFallback(deps, t, opts2) end,
         callBestEffort = deps.callBestEffort,
         safeRequire = deps.safeRequire,
 
         getKit = function() return k end,
         getService = deps.getService,
+
         printServiceSnapshot = function(label, svcName)
             if type(deps.legacyPrintServiceSnapshot) == "function" then
                 return deps.legacyPrintServiceSnapshot(label, svcName)
@@ -146,6 +166,7 @@ local function _makeGenericAliasCtx(deps, k)
         end,
 
         makeEventDiagCtx = deps.makeEventDiagCtx,
+
         getEventDiagState = function()
             if type(deps.getEventDiagStateBestEffort) == "function" then
                 return deps.getEventDiagStateBestEffort(k)
@@ -200,7 +221,14 @@ function M.installAutoSafeAliases(deps, kit, safeNames, specialMap)
                     return
                 end
 
-                local ctx = _makeGenericAliasCtx(deps, k)
+                local ctx
+                if type(deps.makeCtx) == "function" then
+                    ctx = deps.makeCtx("generic", k)
+                end
+                if type(ctx) ~= "table" then
+                    ctx = _makeGenericAliasCtxFallback(deps, k)
+                end
+
                 R.dispatchGenericCommand(ctx, k, cmd, tokens)
             end)
 
@@ -211,7 +239,6 @@ function M.installAutoSafeAliases(deps, kit, safeNames, specialMap)
     return created
 end
 
--- Optional: debug helper for quick inspection
 function M._debugSummary(created)
     created = (type(created) == "table") and created or {}
     local keys = _sortedKeys(created)

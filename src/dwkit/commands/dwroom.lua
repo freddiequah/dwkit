@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwroom
 -- Owner       : Commands
--- Version     : v2026-01-27A
+-- Version     : v2026-01-27B
 -- Purpose     :
 --   - Command handler for "dwroom" alias (SAFE manual surface).
 --   - Implements RoomEntities SAFE inspection + helpers:
@@ -32,6 +32,10 @@
 --       dispatch(ctx, kit, tokens)
 --     so command_router.dispatchGenericCommand can call split modules directly.
 --
+-- FIX (v2026-01-27B) [StepB/B3]:
+--   - dwroom no longer depends on ctx.printRoomEntitiesStatus injection.
+--   - Status now prints full counts using svc.getState() (best-effort).
+--
 -- Public API  :
 --   - dispatch(ctx, roomEntitiesService, sub, arg) -> nil
 --   - dispatch(ctx, kit, tokens)                  -> nil
@@ -40,7 +44,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-27A"
+M.VERSION = "v2026-01-27B"
 
 local function _mkOut(ctx)
     if type(ctx) == "table" and type(ctx.out) == "function" then
@@ -102,15 +106,49 @@ local function _usage(out)
     out("  - refresh best-effort: reclassify/emitUpdated or eventBus.emit if available.")
 end
 
+local function _roomCountsFromState(state)
+    state = (type(state) == "table") and state or {}
+    local function cnt(t)
+        if type(t) ~= "table" then return 0 end
+        local n = 0
+        for _ in pairs(t) do n = n + 1 end
+        return n
+    end
+    return {
+        players = cnt(state.players),
+        mobs = cnt(state.mobs),
+        items = cnt(state.items),
+        unknown = cnt(state.unknown),
+    }
+end
+
 local function _printStatus(ctx, svc)
-    if type(ctx) == "table" and type(ctx.printRoomEntitiesStatus) == "function" then
-        ctx.printRoomEntitiesStatus(svc)
+    local out = _mkOut(ctx)
+    local err = _mkErr(ctx)
+
+    if type(svc) ~= "table" then
+        err("RoomEntitiesService not available.")
         return
     end
 
-    local out = _mkOut(ctx)
+    local state = {}
+    if type(svc.getState) == "function" then
+        local ok, v, _, _, callErr = _call(ctx, svc, "getState")
+        if ok and type(v) == "table" then
+            state = v
+        elseif callErr then
+            out("[DWKit Room] getState failed: " .. tostring(callErr))
+        end
+    end
+
+    local c = _roomCountsFromState(state)
+
     out("[DWKit Room] status (dwroom)")
-    out("  serviceVersion=" .. tostring((type(svc) == "table" and svc.VERSION) or "unknown"))
+    out("  serviceVersion=" .. tostring(svc.VERSION or "unknown"))
+    out("  players=" .. tostring(c.players))
+    out("  mobs=" .. tostring(c.mobs))
+    out("  items=" .. tostring(c.items))
+    out("  unknown=" .. tostring(c.unknown))
 end
 
 local function _doClear(ctx, svc)

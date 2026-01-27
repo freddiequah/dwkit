@@ -1,7 +1,9 @@
 -- #########################################################################
+-- BEGIN FILE: src/dwkit/commands/dwversion.lua
+-- #########################################################################
 -- Module Name : dwkit.commands.dwversion
 -- Owner       : Commands
--- Version     : v2026-01-24A
+-- Version     : v2026-01-27A
 -- Purpose     :
 --   - Command module for: dwversion
 --   - Prints consolidated DWKit module versions + runtime baseline (SAFE diagnostics)
@@ -15,7 +17,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-24A"
+M.VERSION = "v2026-01-27A"
 
 local function _mkOut(ctx)
     if type(ctx) == "table" and type(ctx.out) == "function" then
@@ -84,6 +86,30 @@ local function _getKitBestEffort(ctx)
         return DWKit
     end
     return nil
+end
+
+local function _formatAliasVersion(aliasVersion)
+    if aliasVersion == nil then
+        return "unknown"
+    end
+
+    local t = type(aliasVersion)
+    if t == "string" or t == "number" then
+        return tostring(aliasVersion)
+    end
+
+    if t == "table" then
+        local keys = { "VERSION", "serviceVersion", "version", "serviceVersionTag" }
+        for _, k in ipairs(keys) do
+            local v = aliasVersion[k]
+            if type(v) == "string" or type(v) == "number" then
+                return tostring(v)
+            end
+        end
+        return "unknown"
+    end
+
+    return "unknown"
 end
 
 local function _printVersionSummary(ctx, out, kit, aliasVersion)
@@ -170,7 +196,7 @@ local function _printVersionSummary(ctx, out, kit, aliasVersion)
     out("  commandRegistry = " .. cmdRegVersion)
     out("  eventRegistry   = " .. evRegVersion)
     out("  eventBus        = " .. evBusVersion)
-    out("  commandAliases  = " .. tostring(aliasVersion or "unknown"))
+    out("  commandAliases  = " .. _formatAliasVersion(aliasVersion))
     out("")
     out("[DWKit] Identity (locked):")
     out("  packageId=" .. pkgId .. " eventPrefix=" .. evp .. " dataFolder=" .. df .. " versionTagStyle=" .. vts)
@@ -205,3 +231,7 @@ function M.reset()
 end
 
 return M
+
+-- #########################################################################
+-- END FILE: src/dwkit/commands/dwversion.lua
+-- #########################################################################

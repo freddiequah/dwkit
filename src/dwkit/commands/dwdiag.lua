@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwdiag
 -- Owner       : Commands
--- Version     : v2026-01-27B
+-- Version     : v2026-01-27C
 -- Purpose     :
 --   - Handler for "dwdiag" command surface.
 --   - SAFE: prints a diagnostic bundle (versions, boot, services, event diag status).
@@ -15,7 +15,7 @@
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-01-27B"
+M.VERSION = "v2026-01-27C"
 
 local function _fallbackOut(line)
   line = tostring(line or "")
@@ -107,7 +107,12 @@ local function _getEventDiagStateBestEffort(kit)
     local okS, S = _safeRequire("dwkit.services.event_diag_state")
     if okS and type(S) == "table" then
       if type(S.getState) == "function" then
-        local ok, st = pcall(S.getState, S)
+        -- Prefer passing kit (matches how command_aliases uses it)
+        local ok, st = pcall(S.getState, K)
+        if ok and type(st) == "table" then return st end
+
+        -- Fallbacks for older signatures
+        ok, st = pcall(S.getState, S)
         if ok and type(st) == "table" then return st end
         ok, st = pcall(S.getState)
         if ok and type(st) == "table" then return st end
@@ -121,7 +126,9 @@ local function _getEventDiagStateBestEffort(kit)
     local s = K.services.eventDiagState
     if type(s) == "table" then
       if type(s.getState) == "function" then
-        local ok, st = pcall(s.getState, s)
+        local ok, st = pcall(s.getState, K)
+        if ok and type(st) == "table" then return st end
+        ok, st = pcall(s.getState, s)
         if ok and type(st) == "table" then return st end
         ok, st = pcall(s.getState)
         if ok and type(st) == "table" then return st end

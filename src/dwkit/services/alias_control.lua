@@ -1,13 +1,23 @@
 -- ########################################################################
+-- BEGIN FILE: src/dwkit/services/alias_control.lua
+-- ########################################################################
 -- DWKit: Alias Control Service
 -- Provides minimal always-on aliases: dwinit, dwalias
 -- Manages install/uninstall of command aliases (dwversion, dwcommands, etc.)
+--
+-- StepD extension:
+--   - Provides shared helpers for command alias-id persistence/cleanup:
+--       * getCommandAliasesAliasIds / setCommandAliasesAliasIds
+--       * cleanupPriorCommandAliasesBestEffort
+--       * killAliasStrict
 -- ########################################################################
 
 local M = {}
 
 M.serviceId = "dwkit.services.alias_control"
-M.serviceVersion = "v2026-01-24H" -- bump
+M.serviceVersion = "v2026-01-27A" -- bump
+
+local _CMD_ALIAS_IDS_KEY = "_commandAliasesAliasIds"
 
 local function nowMs()
   if type(getEpoch) == "function" then
@@ -102,7 +112,8 @@ local function installCoreAliases()
   if not id1 then return nil, e1 end
   table.insert(st.aliasIds, id1)
 
-  local id2, e2 = tempAliasSafe("^dwalias(?:\\s+(.*))?$", [[require("dwkit.services.alias_control")._dispatch("dwalias")]])
+  local id2, e2 = tempAliasSafe("^dwalias(?:\\s+(.*))?$",
+    [[require("dwkit.services.alias_control")._dispatch("dwalias")]])
   if not id2 then
     safeKillAlias(id1)
     return nil, e2
@@ -323,4 +334,73 @@ function M._dispatch(which)
   end
 end
 
+-- ============================================================
+-- StepD: shared helpers for command_aliases id lifecycle
+-- ============================================================
+
+local function _resolveKit(kit)
+  if type(kit) == "table" then return kit end
+  local root = getRoot()
+  return root
+end
+
+function M.getCommandAliasesAliasIds(kit)
+  local k = _resolveKit(kit)
+  local t = k[_CMD_ALIAS_IDS_KEY]
+  if type(t) == "table" then return t end
+  return nil
+end
+
+function M.setCommandAliasesAliasIds(kit, t)
+  local k = _resolveKit(kit)
+  if type(t) == "table" then
+    k[_CMD_ALIAS_IDS_KEY] = t
+  else
+    k[_CMD_ALIAS_IDS_KEY] = nil
+  end
+end
+
+function M.cleanupPriorCommandAliasesBestEffort(kit)
+  local k = _resolveKit(kit)
+  local t = M.getCommandAliasesAliasIds(k)
+  if type(t) ~= "table" then
+    return false
+  end
+  if type(killAlias) ~= "function" then
+    -- can't kill; but clear the store to avoid repeated attempts
+    M.setCommandAliasesAliasIds(k, nil)
+    return false
+  end
+
+  local any = false
+  for _, id in pairs(t) do
+    if id ~= nil then
+      any = true
+      pcall(killAlias, id)
+    end
+  end
+
+  M.setCommandAliasesAliasIds(k, nil)
+  return any
+end
+
+function M.killAliasStrict(id)
+  if not id then return true end
+  if type(killAlias) ~= "function" then
+    return false, "killAlias() not available"
+  end
+  local okCall, res = pcall(killAlias, id)
+  if not okCall then
+    return false, "killAlias threw error for id=" .. tostring(id)
+  end
+  if res == false then
+    return false, "killAlias returned false for id=" .. tostring(id)
+  end
+  return true
+end
+
 return M
+
+-- ########################################################################
+-- END FILE: src/dwkit/services/alias_control.lua
+-- ########################################################################
