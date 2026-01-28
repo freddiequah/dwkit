@@ -3,30 +3,21 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-01-28C
+-- Version     : v2026-01-28E
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
---   - Each suite is a named list of steps executed by verification.lua runner.
---
--- Public API  :
---   - getSuites() -> table suites
---   - getSuite(name) -> table|nil suite
---
+--   - Each suite is a table with: title, description, delay, steps.
+--   - steps can be:
+--       * "command string" (Mudlet command)
+--       * { cmd="...", note="...", expect="..." } for richer output
 -- Notes:
---   - This file SHOULD change frequently as features evolve.
---   - Keep verification.lua runner stable; update suites here instead.
---
--- Step format (suite.steps):
---   - String step: a command to execute (e.g., "dwwho", "who", "lua do ... end")
---   - Table step: { cmd="...", note="...", delay=0.4, expect="..." }
---
--- Hard rule:
---   - Any Lua command step MUST be single-line. (No '\n' allowed.)
+--   - KEEP Lua steps single-line: use `lua do ... end` only (Mudlet input paste safety).
+--   - Suites should avoid spamming gameplay commands; prefer SAFE commands.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-28C"
+M.VERSION = "v2026-01-28E"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -124,6 +115,34 @@ local SUITES = {
         steps = {
             "dwwho watch status",
             "dwwho",
+        },
+    },
+
+    -- UI smoke suite (console visible state; no screenshots)
+    -- IMPORTANT: UI modules' apply() uses gui_settings for enabled/visible; opts passed to apply() are ignored.
+    -- This suite sets gui_settings (noSave) then calls apply({}) and prints pasteable state.
+    ui_smoke = {
+        title = "ui_smoke",
+        description = "UI smoke: set gui_settings then apply; print visible true/false (no screenshots)",
+        delay = 0.25,
+        steps = {
+            {
+                cmd = 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("presence_ui", true, {noSave=true}); gs.setVisible("presence_ui", true, {noSave=true}); local UI=require("dwkit.ui.presence_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] presence_ui visible=%s enabled=%s hasContainer=%s hasLabel=%s", tostring(s.visible), tostring(s.enabled), tostring(s.widgets and s.widgets.hasContainer), tostring(s.widgets and s.widgets.hasLabel))) end',
+                note = "Show presence_ui via gui_settings + apply(); print state.",
+            },
+            {
+                cmd = 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("presence_ui", true, {noSave=true}); gs.setVisible("presence_ui", false, {noSave=true}); local UI=require("dwkit.ui.presence_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] presence_ui visible=%s enabled=%s", tostring(s.visible), tostring(s.enabled))) end',
+                note = "Hide presence_ui via gui_settings + apply(); print state.",
+            },
+
+            {
+                cmd = 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", true, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] roomentities_ui visible=%s enabled=%s hasContainer=%s hasLabel=%s", tostring(s.visible), tostring(s.enabled), tostring(s.widgets and s.widgets.hasContainer), tostring(s.widgets and s.widgets.hasLabel))) end',
+                note = "Show roomentities_ui via gui_settings + apply(); print state.",
+            },
+            {
+                cmd = 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", false, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] roomentities_ui visible=%s enabled=%s", tostring(s.visible), tostring(s.enabled))) end',
+                note = "Hide roomentities_ui via gui_settings + apply(); print state.",
+            },
         },
     },
 }
