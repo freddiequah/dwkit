@@ -3,7 +3,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-01-28E
+-- Version     : v2026-01-28F
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -17,7 +17,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-28E"
+M.VERSION = "v2026-01-28F"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -141,6 +141,23 @@ local SUITES = {
             },
             {
                 cmd = 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", false, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] roomentities_ui visible=%s enabled=%s", tostring(s.visible), tostring(s.enabled))) end',
+                note = "Hide roomentities_ui via gui_settings + apply(); print state.",
+            },
+        },
+    },
+
+    -- NEW: RoomEntities row-list smoke (console verification; no clicks required)
+    roomentities_smoke = {
+        title = "roomentities_smoke",
+        description = "RoomEntities row list: show UI, print lastRender counts/flags, hide UI (no screenshots)",
+        delay = 0.25,
+        steps = {
+            {
+                cmd = 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", true, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); local lr=s.lastRender or {}; local c=lr.counts or {}; print(string.format("[dwverify-roomentities] visible=%s enabled=%s rowUi=%s whoBoost=%s overrides=%s players=%s mobs=%s items=%s unknown=%s err=%s", tostring(s.visible), tostring(s.enabled), tostring(lr.usedRowUi), tostring(lr.usedWhoStoreBoost), tostring((s.overrides and s.overrides.activeOverrideCount) or 0), tostring(c.players), tostring(c.mobs), tostring(c.items), tostring(c.unknown), tostring(lr.lastError))) end',
+                note = "Show roomentities_ui, render, and print lastRender counters.",
+            },
+            {
+                cmd = 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", false, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-roomentities] hide visible=%s enabled=%s", tostring(s.visible), tostring(s.enabled))) end',
                 note = "Hide roomentities_ui via gui_settings + apply(); print state.",
             },
         },
