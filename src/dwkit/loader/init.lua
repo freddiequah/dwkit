@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-01-23C
+-- Version     : v2026-01-23D
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -238,6 +238,17 @@ function Loader.init()
             DWKit.services.scoreStoreService = nil
             DWKit._scoreStoreServiceLoadError = tostring(modOrErr4)
         end
+
+        -- WhoStore (SAFE). Canonical registry path for all consumers:
+        --   ctx.getService("whoStoreService") -> kit.services.whoStoreService
+        local okWho, whoOrErr = pcall(require, "dwkit.services.whostore_service")
+        if okWho and type(whoOrErr) == "table" then
+            DWKit.services.whoStoreService = whoOrErr
+            DWKit._whoStoreServiceLoadError = nil
+        else
+            DWKit.services.whoStoreService = nil
+            DWKit._whoStoreServiceLoadError = tostring(whoOrErr)
+        end
     end
 
     -- ---------------------------------------------------------------------
@@ -276,7 +287,13 @@ function Loader.init()
                 tsMs = _epochMsMonotonic(),
             }
 
-            local okCall, ok, delivered, errs = pcall(eb.emit, evName, payload)
+            -- IMPORTANT: event_bus.emit requires meta as 3rd arg.
+            local meta = {
+                source = "dwkit.loader.init",
+                ts = payload.ts,
+            }
+
+            local okCall, ok, delivered, errs = pcall(eb.emit, evName, payload, meta)
             if okCall and ok then
                 DWKit._bootReadyEmitted = true
                 DWKit._bootReadyEmitError = nil

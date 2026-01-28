@@ -2,12 +2,15 @@
 FULL ANCHOR PACK — MUDLET KIT GOVERNANCE (STORE IN PROJECT)
 UPDATED: + Mudlet Input Line Paste Safety (single-line lua do...end)
 UPDATED: + Command Surface Architecture Standard (Router + Handlers, Phase 2 triggers)
+UPDATED: + Automation Policy: Passive Capture vs Active Polling + Essential Default Automation (declared, visible, controllable)
+UPDATED: + Mudlet Verification Runner Standard: dwverify + verification.lua suites (scripted verification steps; Lua steps must be single-line)
+UPDATED: + Verification Plan Split: verification.lua (stable runner) + verification_plan.lua (per-change suites)
 
 GitHub PR Workflow via PowerShell (GitHub CLI “gh”)
 
 Repo Hygiene: UTF-8 (NO BOM) + Versioned Git Hooks + LF enforcement
 
-GitHub Branch Protection (solo repo) + GH CLI merge policy notes (Section N.1)
+GitHub Branch Protection (solo repo) + gh merge policy notes (Section N.1)
 
 AUTHORITATIVE INSTRUCTION — FOLLOW STRICTLY
 
@@ -49,6 +52,7 @@ testing requirements and self-test runner policy
 release/packaging discipline and deprecation policy
 
 verification gate / confidence policy (no blind progression)
+- includes Mudlet verification automation via dwverify (verification suites) as mandatory baseline
 
 command & alias registry policy (including gameplay wrappers)
 
@@ -98,7 +102,7 @@ The Anchor Pack MUST match docs/PACKAGE_IDENTITY.md.
 If identity values ever change, docs/PACKAGE_IDENTITY.md MUST be version-bumped and the decision recorded there.
 
 ==================================================
-MUDLET PACKAGE DEVELOPMENT STANDARD v1.10 (FINALIZED)
+MUDLET PACKAGE DEVELOPMENT STANDARD v1.12 (FINALIZED)
 
 Baseline additions included:
 
@@ -126,7 +130,17 @@ GitHub PR Workflow via PowerShell (GitHub CLI “gh”) (Section N.1)
 
 Repo Hygiene: UTF-8 NO BOM + versioned git hooks + LF enforcement (Section A.12)
 
-NEW: GitHub Branch Protection (solo repo) + gh merge policy notes (Section N.1)
+GitHub Branch Protection (solo repo) + gh merge policy notes (Section N.1)
+
+NEW: Automation Policy clarification:
+Passive Capture (default-on allowed) vs Active Polling (timer automation),
+and “Essential Default Automation” (declared, visible, controllable; small allowed list).
+
+NEW: Mudlet Verification Runner Standard:
+All changes MUST have Mudlet verification runnable via a single command: dwverify <suite>.
+Verification sequences are stored as suites in src/dwkit/verify/verification_plan.lua (preferred),
+with a stable runner in src/dwkit/verify/verification.lua.
+Lua steps inside verification suites MUST be single-line only.
 
 ==================================================
 ANCHOR PACK ALIGNMENT RECORD
@@ -171,13 +185,36 @@ Enforce LF for hooks and docs via .gitattributes.
 
 Pre-commit must block BOM regressions and direct commits to main.
 
-2026-01-14: Added Branch Protection + gh merge policy notes:
+2026-01-14: Added Branch Protection + gh merge policy notes.
 
-2026-01-18: Added Command Surface Architecture Standard (Router + Handlers) to prevent command_aliases.lua becoming a “god module”, and to provide a Phase 2 trigger checklist for registry migration.
+2026-01-18: Added Command Surface Architecture Standard (Router + Handlers) to prevent command_aliases.lua becoming a “god module”,
+and to provide a Phase 2 trigger checklist for registry migration.
 
 Solo-repo protection settings can block merges due to “review required” or “auto-merge disabled”.
 
 Anchor Pack now defines the exact branch protection settings + the gh CLI merge commands to avoid being forced into browser UI.
+
+2026-01-28: Clarified “Manual means manual” vs explicit automation:
+
+Manual commands remain one-shot only.
+Hidden automation is forbidden.
+
+2026-01-28: Added “Passive Capture vs Active Polling” and “Essential Default Automation”:
+
+Passive capture services (parsers/stores) may be enabled by default (SAFE: no command emission).
+Active polling (timers/interval command emission) is automation.
+A minimal, declared “Essential Default Automation” list may be enabled by default when required by core kit functionality (e.g., Presence/UI freshness),
+but it must be visible, controllable, auditable, and never hidden.
+
+2026-01-28: Added Mudlet Verification Runner Standard (dwverify + verification suites):
+
+For every delivered change, Mudlet verification MUST be runnable via a single command:
+dwverify <suite>.
+
+Verification sequences live as named suites (preferred in verification_plan.lua).
+The runner (verification.lua) remains stable; per-change suite edits should land in verification_plan.lua whenever possible.
+Lua steps in suites MUST be single-line (lua do ... end).
+PowerShell verification remains manual and is still provided in chat, but does not replace Mudlet verification gate.
 
 ==================================================
 SECTION A — BOOTSTRAP (ALWAYS APPLIES)
@@ -207,7 +244,7 @@ Cross-module interaction is allowed ONLY via documented APIs or events.
 
 No hardcoded profile names or absolute paths are permitted.
 
-Manual means manual — no hidden automation, timers, or login execution.
+Manual means manual — and no hidden automation.
 
 UI modules are consumers only; they own no logic or persistence.
 
@@ -216,6 +253,131 @@ No refactors, cleanups, or unrelated edits unless explicitly requested.
 Every change must include test commands and expected results.
 
 Stability and contract preservation take priority over new features.
+
+AUTOMATION POLICY (LOCKED) — MANUAL VS PASSIVE CAPTURE VS ACTIVE POLLING (NO HIDDEN AUTOMATION)
+
+Purpose:
+Support reliable data-driven UI (Presence_UI, future ActionPad, etc.) that needs fresh snapshots (who, score, etc.)
+without violating “Manual means manual”.
+
+A) Definitions (LOCKED)
+1) Manual action:
+- Runs only as a direct result of a user-invoked command (alias/button/menu).
+- Does NOT continue running after completion.
+- Does NOT create persistent timers/triggers/schedulers.
+
+1.1) Manual batch sequence (allowed):
+- A one-shot verification or convenience batch that runs multiple commands as a direct result of one user invocation (example: dwverify).
+- Any internal pacing timers used to sequence the batch MUST self-terminate and MUST NOT persist or re-schedule future actions.
+- The batch MUST be visible by virtue of user invocation and its printed output; it must not be hidden.
+
+2) Passive Capture (SAFE data processing):
+- The kit parses/captures output ONLY when that output appears (e.g., user manually types “who”, or some other explicit action triggers it).
+- Passive Capture MUST NOT issue MUD commands by itself.
+- Passive Capture may be enabled by default because it is not timer automation and does not emit gameplay commands.
+
+3) Active Polling (Automation):
+- Any recurring timer, scheduled action, or autonomous trigger that can run without the user typing each time,
+  including periodically issuing MUD commands (example: “who”, future “score”) and capturing/parsing outputs.
+
+4) Hidden automation (FORBIDDEN):
+Any Active Polling that:
+- is not explicitly declared by governance/config,
+- has no visible status,
+- has no immediate stop control,
+- or re-enables itself without the user’s instruction.
+
+B) Non-negotiable rules (LOCKED)
+1) Manual means manual:
+- Manual commands MUST NOT create persistent timers/triggers,
+  MUST NOT silently schedule future actions,
+  and MUST NOT implicitly enable automation.
+
+2) No hidden automation:
+- Active Polling MUST NEVER be “surprise behavior”.
+- If it runs, it MUST be discoverable, controllable, and auditable.
+
+C) Automation modes (LOCKED)
+DWKit classifies “automation mode” for any behavior that could run repeatedly:
+
+1) manual
+- No timers.
+- Only direct user invocation.
+
+2) opt-in
+- Timers allowed ONLY after explicit user enabling via command and/or explicit config toggle.
+
+3) essential-default
+- Timers may be enabled by default ONLY if the job is explicitly listed in the “Essential Default Automation List” (Section A.E).
+- Essential-default is allowed only for core kit functionality dependencies (e.g., Presence_UI requiring fresh WhoStore).
+- Essential-default MUST still satisfy visibility + control + auditability + safe pacing.
+
+Note:
+- “essential-default” is not “hidden”.
+- It is a declared baseline, with explicit startup declaration and a kill switch.
+
+D) Allowed Active Polling requirements (MUST satisfy ALL) (LOCKED)
+Active Polling (opt-in or essential-default) is allowed only if all are true:
+
+1) Explicit governance and config:
+- All polling jobs MUST be registered in a single automation manager (scheduler owner).
+- Jobs MUST NOT be created ad-hoc by services.
+- Default state MUST be driven by a visible config surface, not hardcoded surprises.
+- Essential-default is allowed only for jobs in Section A.E.
+
+2) Visibility:
+- A status command MUST exist (e.g., dwauto status or dwservices status) that shows:
+  job name, enabled state, interval, last-run, next-run (if available).
+- Enabling/disabling MUST produce a clear, user-visible confirmation line.
+
+3) Control / kill switch:
+- A single global kill switch MUST exist (e.g., dwauto off) that cancels all timers/triggers and prevents further autonomous commands.
+- Per-job stop MUST exist (e.g., dwauto off who).
+
+4) Auditability:
+- Each automated run MUST be traceable via logs at controlled verbosity (quiet by default),
+  including job name, interval, and last-run timestamp.
+- Audit logs MUST avoid spam; use summary style unless debug is explicitly enabled.
+
+5) Safe-by-default pacing:
+- Defaults MUST be conservative (no spam).
+- Rate limits MUST be respected.
+- If the MUD enforces flood limits, the kit must stay well below them.
+
+6) No self-revive:
+- Active Polling MUST NOT re-enable itself on reload/install unless enabled in visible config.
+- If autostart exists (opt-in remembered state or essential-default baseline), startup MUST print one clear line stating what is running.
+
+E) Essential Default Automation List (LOCKED)
+Rule:
+Only the following jobs are allowed to be “essential-default” ON.
+
+Essential Default Jobs (current agreed baseline):
+1) WhoPoll (purpose: keep WhoStore reasonably fresh for Presence/UI dependency)
+- Mode: essential-default
+- Default: ON
+- Notes:
+  - Must remain conservative and quiet.
+  - Must be visible + controllable (status + kill switch).
+  - Must be safe to disable (UI shows “stale” state rather than breaking).
+
+Non-essential jobs:
+- MUST be opt-in and default OFF unless this Anchor Pack is updated and version-bumped.
+
+Explicitly NOT essential-default (current agreement):
+- ScorePoll (future) default OFF until ActionPad actually requires it and the user explicitly enables it.
+- Any other polling jobs default OFF (opt-in).
+
+F) Service vs Scheduler separation (LOCKED)
+- Parsing/capture services (e.g., WhoStore, future ScoreStore) may passively process output when it appears (Passive Capture).
+- Active command emission on intervals MUST be owned by a dedicated scheduler/automation manager and MUST follow this Automation Policy.
+- Services MUST NOT silently create timers. Schedulers MUST be explicitly controlled.
+
+G) UI dependency rule (LOCKED)
+- UI modules MUST tolerate missing or stale data (show “stale/unknown” state) instead of forcing hidden automation.
+- If a UI feature requires Active Polling to be useful, that dependency MUST be documented in:
+  - the module contract sheet, and
+  - the relevant service/automation job contract.
 
 MUDLET INPUT LINE PASTE SAFETY (LOCKED)
 
@@ -283,7 +445,7 @@ BOM scan (docs):
 PowerShell BOM scan loop over docs/*.md (checks EF BB BF).
 
 Mojibake scan (docs):
-Select-String -Path .\docs*.md -Pattern 'â|Ã|�' -SimpleMatch
+Select-String -Path .\docs*.md -Pattern 'ÃƒÂ¢|ÃƒÆ’|Ã¯Â¿Â½' -SimpleMatch
 Expected: no matches
 
 .gitattributes check (BOM + newline):
@@ -340,6 +502,13 @@ src/dwkit/tests (tests and self-test runner helpers)
 
 src/dwkit/loader (thin bootstrap scripts / entrypoints)
 
+Verification runner path (locked):
+src/dwkit/verify (Mudlet verification runner modules; dwverify suites)
+
+Verification module split (preferred standard):
+- src/dwkit/verify/verification.lua (stable runner engine; rarely changes)
+- src/dwkit/verify/verification_plan.lua (per-change suites/steps; changes frequently)
+
 Repo hygiene files (canonical):
 
 .githooks/pre-commit
@@ -371,6 +540,8 @@ docs/Event_Registry_v1.0.md
 docs/Self_Test_Runner_v1.0.md
 
 docs/DOCS_SYNC_CHECKLIST.md
+
+docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.10.md (this file; versioned by content header)
 
 ==================================================
 SECTION D — CORE DEVELOPMENT STANDARD
@@ -427,7 +598,7 @@ Events Consumed
 
 Persistence (path rule + schema version)
 
-Automation Policy (manual / opt-in / auto)
+Automation Policy (manual / opt-in / essential-default) — must align with Section A Automation Policy
 If not applicable, state “None”.
 
 EVENTS & DATA CONTRACTS
@@ -474,6 +645,10 @@ Bump version identifiers with meaningful suffixes.
 
 TESTING REQUIREMENT
 Every change MUST include:
+
+Mudlet verification runnable via dwverify <suite> (Section R)
+- if verification_plan.lua suites must be updated/created, include it as part of the delivery
+- the runner (verification.lua) should NOT be churned unless new runner capability is required
 
 Manual test command(s)
 
@@ -531,6 +706,9 @@ No module assumes others unless earlier in order.
 UI tolerates events before being shown (cache then refresh).
 
 No gameplay commands during load unless explicitly opt-in.
+
+No Active Polling during load unless explicitly enabled by config (opt-in or essential-default),
+and if autostart is supported, it MUST be visible + declared at startup (Section A Automation Policy).
 
 ==================================================
 SECTION G — NO CYCLIC DEPENDENCY POLICY
@@ -613,7 +791,7 @@ No surprise windows by default (restore visible is opt-in).
 ==================================================
 SECTION M — TESTING ESCALATION (SELF-TEST RUNNER STANDARD)
 
-Provide a safe self-test runner command (no gameplay commands unless opt-in).
+Provide a safe self-test runner command (no gameplay commands unless explicitly opted in by config/policy).
 
 Reports PASS/FAIL for:
 core loaded, config loaded, event registry present, GUI settings loaded,
@@ -671,6 +849,13 @@ Self-test runner PASS:
 
 Compatibility baseline verified (Mudlet/Lua string outputs):
 
+Automation manager status (if present):
+- essential-default jobs declared at startup
+- status command shows expected enabled/disabled
+
+Mudlet dwverify suites executed (record which suites):
+- dwverify <suite> results (PASS/FAIL) captured
+
 Cross-profile (if applicable):
 
 Migration notes included (if any schema/contract changes):
@@ -697,7 +882,7 @@ Changes must land in main via PR (not direct push to main), unless explicitly ag
 
 Preferred workflow is gh CLI from PowerShell (Section N.1).
 
-SECTION N.1 — GITHUB PR WORKFLOW (POWERHELL + GH CLI) (LOCKED)
+SECTION N.1 — GITHUB PR WORKFLOW (POWERSHELL + GH CLI) (LOCKED)
 
 Goal:
 Do PR creation, review, and merge from PowerShell using GitHub CLI (“gh”),
@@ -787,7 +972,7 @@ git checkout -b <branch-name>
 
 Do work (edit files), then verify locally:
 
-run your Mudlet verification steps (Section R) as required
+run your Mudlet verification steps (Section R) as required (dwverify <suite>)
 
 keep scope minimal and objective single
 
@@ -948,6 +1133,10 @@ version bumped
 
 “not touched” list stated
 
+Mudlet verification gate satisfied:
+- dwverify <suite> executed
+- PASS confirmed by user (or logs provided for diagnosis)
+
 ==================================================
 SECTION Q — MODULE CONTRACT SHEET TEMPLATE
 
@@ -997,13 +1186,85 @@ Anything depending on Mudlet runtime, profile state, installed packages,
 triggers, load order, timers, or external systems is always “unverified”
 until the user runs validation steps and reports results.
 
-What the assistant MUST provide (every time):
+R.1 — Mandatory Mudlet Verification Runner (dwverify) (LOCKED)
+
+Goal:
+Make verification repeatable and one-command runnable inside Mudlet, instead of manual multi-step typing.
+
+Rule (Always-On):
+Every delivered change MUST include Mudlet verification runnable via:
+dwverify <suite>
+
+Implementation Standard (LOCKED):
+1) Repo must contain:
+src/dwkit/verify/verification.lua
+- stable verification runner engine that executes named suites.
+
+2) Repo should contain (preferred):
+src/dwkit/verify/verification_plan.lua
+- per-change suite definitions and steps (frequently updated).
+- The runner loads this plan module (best-effort) and merges/overrides suites.
+
+3) Mudlet must provide an alias/command:
+dwverify [suite]
+- typing dwverify triggers the runner and runs the suite steps.
+- dwverify MUST be installed from code (tempAlias created by DWKit install path), not stored manually in Mudlet UI.
+
+4) For every delivered change, the assistant MUST provide:
+- the suite name to run (example: dwverify whostore)
+- updated suite steps (prefer updating verification_plan.lua; update runner only if new runner capability is required)
+- expected observable output/behavior (PASS/FAIL criteria)
+
+5) PowerShell verification:
+- still provided in chat as manual steps
+- complements Mudlet verification but does not replace it
+
+Safety and Automation Policy alignment:
+- dwverify is a Manual batch sequence (Section A.1.1).
+- It may run multiple commands, but MUST be user-invoked, one-shot, and self-terminate.
+- It MUST NOT enable or create persistent polling jobs.
+- Any internal pacing timers used to sequence steps must self-cancel and must not schedule future runs.
+
+R.2 — Verification Steps Format (LOCKED)
+
+Verification steps MUST be explicit commands the user can run and observe.
+
+For Mudlet verification via dwverify:
+- steps are stored as a list under the suite inside verification_plan.lua (preferred) or verification.lua (fallback).
+
+Allowed step types:
+A) DWKit commands/aliases (example: dwwho, dwwho refresh, dwservices status)
+B) Raw MUD commands when needed (example: who)
+C) Mudlet Lua commands ONLY if single-line (see R.3)
+
+R.3 — Single-line Lua Rule in Verification (LOCKED)
+
+Because multi-line Lua pasted/typed can be accidentally sent to the MUD (Huh?!?) and violates paste safety:
+
+Any Lua command included in verification suites MUST be single-line only.
+
+Approved patterns (examples):
+lua do <...> end
+lua <single-line expression>
+
+Forbidden:
+- any multi-line Lua block in a verification step
+- any verification step that contains newline characters
+
+If multi-line Lua is required for a complex check:
+- implement it as a module function and call it via a single-line lua do ... end
+- OR run it in the Mudlet Lua Console (not as a step)
+
+R.4 — What the assistant MUST provide (every time)
 
 Confidence Statement: HIGH / MEDIUM / LOW + short reason
 
 Assumptions: list assumptions; if unknown, require user confirmation
 
-Verification Steps: exact commands/steps + expected output/behavior
+Verification Steps:
+- Mudlet: dwverify <suite> + expected behavior
+- (Optional) additional direct commands if needed
+- PowerShell: manual commands (as required) to verify repo hygiene or git state
 
 Success/Fail Criteria: PASS + FAIL conditions
 
@@ -1057,7 +1318,7 @@ verified working list
 
 known issues list
 
-last verified PASS test outputs
+last verified PASS test outputs (including dwverify suite results if applicable)
 
 required artifacts to paste (exact dump commands / files needed next)
 
@@ -1125,8 +1386,6 @@ Definition of Done (Command Surface):
 - command_aliases.lua MUST NOT grow with business logic.
 - Any new gameplay-sending command MUST still comply with Section S registry requirements.
 
-
-
 Problem:
 Large kits accumulate many aliases. Without a master list, usage becomes
 inconsistent and different chats create divergent commands.
@@ -1138,7 +1397,7 @@ including kit commands AND gameplay command wrappers.
 Two command types:
 A) Kit Commands:
 
-UI control, config, debug, diagnostics, tests
+UI control, config, debug, diagnostics, tests, verification
 
 Must not send gameplay actions unless explicitly a wrapper
 B) Gameplay Command Wrappers:
@@ -1148,6 +1407,11 @@ Aliases/commands which send text to the MUD (skills/spells/practice/score/look/e
 Must be clearly labeled to prevent accidental execution
 
 Must be manual by default unless explicitly opt-in
+
+Automation note (LOCKED):
+If any gameplay wrapper is ever executed on a timer/interval, it becomes Active Polling (Automation)
+and MUST comply with Section A Automation Policy (visibility, kill switch, auditability, safe pacing, no hidden behavior).
+Essential-default automation is only allowed if explicitly listed in Section A.E and version-bumped.
 
 Registry requirements (all commands):
 Each command MUST be recorded with:
@@ -1172,7 +1436,7 @@ NOT SAFE (sends to game and may have side effects or spam)
 
 mode:
 
-manual / opt-in / auto
+manual / opt-in / essential-default
 
 expected output/behavior
 
@@ -1229,7 +1493,7 @@ Docs and runtime output MUST derive from the same registry data structure.
 No command may be added unless it is added to the registry first.
 
 Note:
-Alternative command names (e.g. commands/help) may be added later ONLY as
+Alternative command names (e.g., commands/help) may be added later ONLY as
 compatibility aliases pointing to the same underlying registry/runtime surface.
 
 Deprecation integration:
@@ -1259,7 +1523,8 @@ Implement smallest safe change.
 
 Provide Confidence + Assumptions + Verification Steps (Section R).
 
-User runs tests and pastes output/logs.
+User runs tests and pastes output/logs:
+- includes dwverify <suite> results as the default Mudlet verification gate.
 
 Diagnose and patch until PASS.
 
@@ -1276,7 +1541,7 @@ current known issues
 
 current versions/tags of involved modules
 
-last known PASS tests (what has been confirmed working)
+last known PASS tests (what has been confirmed working; include dwverify suite results if applicable)
 
 any failing logs since last step
 
@@ -1415,7 +1680,8 @@ Tag (if any):
 
 Verification results:
 
-Tests executed:
+Mudlet suite executed:
+dwverify <suite>
 
 Outputs/logs (paste):
 
@@ -1486,6 +1752,8 @@ src/dwkit/tests
 
 src/dwkit/loader
 
+src/dwkit/verify
+
 LAYERS (NO CYCLES):
 
 Core
@@ -1511,9 +1779,11 @@ Game Output -> Services parse -> Services update -> Services emit -> UI refresh
 CONTROL FLOW:
 User -> LaunchPad -> UI show/hide/toggle
 User -> Service manual command -> Service update -> emit
+User -> dwverify -> scripted verification sequence -> observe output
 
 TESTING MODEL:
 Per-change manual tests + regression list.
+Mudlet dwverify suites for one-command verification gate.
 Kit-level self-test runner for PASS/FAIL.
 Release checklist required for packaging.
 

@@ -3,10 +3,11 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-27Q
+-- Version     : v2026-01-28A
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for DWKit commands.
 --   - AUTO-GENERATES SAFE aliases from the Command Registry (best-effort).
+--   - Installs manual verification alias: dwverify (one-shot) routed to dwkit.verify.verification
 --
 -- NOTE (Slimming Step 1):
 --   - Router fallbacks (routing glue, routered behavior) extracted to:
@@ -94,7 +95,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-27Q"
+M.VERSION = "v2026-01-28A"
 
 local AliasCtl = require("dwkit.services.alias_control")
 local CommandCtx = require("dwkit.services.command_ctx")
@@ -231,6 +232,51 @@ local function _mkAlias(pattern, fn)
 end
 
 -- ------------------------------------------------------------
+-- Manual verification alias (dwverify) - code-installed (NOT Mudlet UI stored)
+-- ------------------------------------------------------------
+local function _installDwverifyAliases(created)
+    -- dwverify stop
+    local idStop = _mkAlias([[^dwverify\s+stop$]], function()
+        local okV, V = _safeRequire("dwkit.verify.verification")
+        if not okV or type(V) ~= "table" or type(V.stop) ~= "function" then
+            _err("[DWKit Alias] dwverify: verification module not available")
+            return
+        end
+        V.stop()
+    end)
+
+    if not idStop then
+        return false, "Failed to create alias: dwverify stop"
+    end
+
+    -- dwverify [suite]
+    local idRun = _mkAlias([[^dwverify(?:\s+(\w+))?$]], function()
+        local suite = (matches and matches[2]) or nil
+        if type(suite) ~= "string" or suite == "" then suite = "default" end
+
+        local okV, V = _safeRequire("dwkit.verify.verification")
+        if not okV or type(V) ~= "table" or type(V.run) ~= "function" then
+            _err("[DWKit Alias] dwverify: verification module not available")
+            return
+        end
+
+        V.run(suite)
+    end)
+
+    if not idRun then
+        -- rollback stop alias we already created
+        if type(killAlias) == "function" then
+            pcall(killAlias, idStop)
+        end
+        return false, "Failed to create alias: dwverify"
+    end
+
+    created["dwverify_stop"] = idStop
+    created["dwverify"] = idRun
+    return true, nil
+end
+
+-- ------------------------------------------------------------
 -- Install (AUTO SAFE aliases via alias_factory) - REQUIRED
 -- ------------------------------------------------------------
 function M.install(opts)
@@ -337,6 +383,21 @@ function M.install(opts)
         end
         STATE.aliasIds = {}
         return false, STATE.lastError
+    end
+
+    -- Install dwverify aliases (manual verification runner)
+    do
+        local okV, vErr = _installDwverifyAliases(created)
+        if not okV then
+            STATE.lastError = tostring(vErr or "Failed to install dwverify aliases")
+            if type(killAlias) == "function" then
+                for _, xid in pairs(created) do
+                    if xid then pcall(killAlias, xid) end
+                end
+            end
+            STATE.aliasIds = {}
+            return false, STATE.lastError
+        end
     end
 
     STATE.aliasIds = created
