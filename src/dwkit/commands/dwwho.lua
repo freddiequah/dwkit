@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwwho
 -- Owner       : Commands
--- Version     : v2026-01-28D
+-- Version     : v2026-01-28E
 -- Purpose     :
 --   - Implements dwwho command handler (SAFE + GAME refresh capture).
 --   - Split out from dwkit.services.command_aliases (Phase 1 split).
@@ -12,7 +12,7 @@
 --       GAME:
 --         - refresh (sends 'who' to MUD and captures output)
 --
--- NEW (v2026-01-28D):
+-- NEW (v2026-01-28E):
 --   - Auto-capture watcher: when YOU type "who" manually and WHO output appears,
 --     DWKit captures the WHO block and ingests into WhoStoreService automatically.
 --   - refresh reuses watcher capture when watcher is enabled (avoids duplicate triggers).
@@ -23,11 +23,11 @@
 --
 -- Notes:
 --   - Auto-capture is PASSIVE: it does not send gameplay commands.
---   - Auto-capture is QUIET by default (no spam output), but updates service snapshot.
+--   - Auto-capture is QUIET by default (no spam output). Confirm via dwwho status/list.
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-01-28D"
+M.VERSION = "v2026-01-28E"
 
 -- Capture session state (shared by refresh + watcher)
 local CAP = {
@@ -227,7 +227,8 @@ local function _usage(C)
     C.out("  dwwho watch off")
     C.out("")
     C.out("Notes:")
-    C.out("  - AUTO: when you type 'who' manually, DWKit auto-captures and ingests silently (watcher)")
+    C.out(
+        "  - AUTO: when you type 'who' manually, watcher captures and ingests quietly (no output). Confirm via dwwho status/list.")
     C.out("  - ingestclip reads your clipboard and parses it as WHO output (optional)")
     C.out("  - SAFE: all except refresh (no gameplay sends)")
     C.out("  - GAME: refresh sends 'who' to the MUD and captures output")

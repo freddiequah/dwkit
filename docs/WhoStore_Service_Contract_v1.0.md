@@ -34,7 +34,7 @@ It MUST NOT send gameplay commands and MUST NOT automate actions.
 - A full WhoStore state update, including parsed entries, a by-name index, and raw lines.
 
 **Title text**
-- The portion of an Entry that represents the player’s visible title or descriptive text (derived).
+- The portion of an Entry that represents the player's visible title or descriptive text (derived).
 - Used for best-effort validation when correlating WHO with room lines.
 
 ---
@@ -249,7 +249,7 @@ WhoStore MUST expose snapshot data with the following structure.
 - Implementations MAY support an explicit merge mode, but replace remains the default.
 
 Title change rule (normative):
-- If a player’s `name` is present in both previous and new snapshot, and the newly derived `titleText` differs from the prior stored `titleText`, WhoStore MUST update the stored Entry for that player to the new value as part of the snapshot replace.
+- If a player's `name` is present in both previous and new snapshot, and the newly derived `titleText` differs from the prior stored `titleText`, WhoStore MUST update the stored Entry for that player to the new value as part of the snapshot replace.
 - Consumers MUST assume titles can change and MUST treat WhoStore as authoritative for the latest observed title.
 
 ---
