@@ -2,59 +2,34 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwwho
 -- Owner       : Commands
--- Version     : v2026-01-27A
+-- Version     : v2026-01-28D
 -- Purpose     :
 --   - Implements dwwho command handler (SAFE + GAME refresh capture).
 --   - Split out from dwkit.services.command_aliases (Phase 1 split).
 --   - Expanded command surface:
 --       SAFE:
---         - status / clear / ingestclip / fixture / set / add / remove / list
+--         - status / clear / ingestclip / fixture / set / add / remove / list / watch
 --       GAME:
 --         - refresh (sends 'who' to MUD and captures output)
 --
--- Phase 5A (v2026-01-20C):
---   - Add refresh guard:
---       * anti-overlap (skip if capture in-flight)
---       * cooldown (skip if called too soon)
---       * status shows refresh guard state/metadata
---
--- Phase 5B (v2026-01-21G):
---   - Dispatch supports optional separate arg string:
---       dispatch(ctx, svc, sub, arg)
---     to align with alias router (matches[] tokenization fixes).
---
--- Phase 5C (v2026-01-25A):
---   - Refresh capture start condition tightened:
---       REMOVE line:match("^%[") to avoid DWKit log lines starting capture.
---     Capture now starts only on WHO header lines:
---       "Players" or "Total players:"
---
--- Phase 5D (v2026-01-27A):
---   - Added router-compatible dispatch signature:
---       dispatch(ctx, kit, tokens)
---     so command_router.dispatchGenericCommand can call split modules directly.
---   - Ingest helpers are now internal (no longer require ctx.whoIngestTextBestEffort).
---
--- Public API  :
---   - dispatch(ctx, whoStoreSvc, sub, argOpt)
---   - dispatch(ctx, kit, tokens)  (router signature)
---   - reset()  (best-effort cancel pending capture session)
+-- NEW (v2026-01-28D):
+--   - Auto-capture watcher: when YOU type "who" manually and WHO output appears,
+--     DWKit captures the WHO block and ingests into WhoStoreService automatically.
+--   - refresh reuses watcher capture when watcher is enabled (avoids duplicate triggers).
+--   - Commands:
+--       dwwho watch status
+--       dwwho watch on
+--       dwwho watch off
 --
 -- Notes:
---   - ctx should provide:
---       * out(line), err(msg)
---       * callBestEffort(obj, fnName, ...) -> ok, a, b, c, err   (optional; improves compatibility)
---       * getClipboardText() -> string|nil                       (optional; for ingestclip)
---       * resolveSendFn() -> function|nil                        (required for refresh)
---       * killTrigger(id), killTimer(id)                         (optional; best-effort cleanup)
---       * tempRegexTrigger(pattern, fn) -> id                    (required for refresh)
---       * tempTimer(seconds, fn) -> id                           (required for refresh)
---       * getService(name) -> svc                                (optional; for router signature)
+--   - Auto-capture is PASSIVE: it does not send gameplay commands.
+--   - Auto-capture is QUIET by default (no spam output), but updates service snapshot.
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-01-27A"
+M.VERSION = "v2026-01-28D"
 
+-- Capture session state (shared by refresh + watcher)
 local CAP = {
     active = false,
     started = false,
@@ -62,6 +37,19 @@ local CAP = {
     trigAny = nil,
     timer = nil,
     startedAt = nil,
+
+    -- expectations set by refresh; watcher consumes these (if present)
+    expectSource = nil,     -- string|nil (e.g. "dwwho:refresh")
+    expectVerbose = false,  -- boolean (refresh prints status; watcher default quiet)
+    expectTimeoutSec = nil, -- number|nil
+}
+
+-- Auto watcher install state
+local WATCH = {
+    enabled = false,
+    trigPlayers = nil, -- header trigger: "Players"
+    trigTotal = nil,   -- header trigger: "Total players:"
+    lastErr = nil,
 }
 
 -- Phase 5A: refresh guard state (handler-local; does NOT persist)
@@ -93,6 +81,8 @@ end
 local function _fallbackErr(msg)
     _fallbackOut("[DWKit Who] ERROR: " .. tostring(msg))
 end
+
+local function _noop() end
 
 local function _getCtx(ctx)
     ctx = (type(ctx) == "table") and ctx or {}
@@ -160,6 +150,28 @@ local function _resolveSvcFromKitOrCtx(C, kit)
     return nil
 end
 
+local function _mudletKillTrigger(id)
+    if id and type(killTrigger) == "function" then pcall(killTrigger, id) end
+end
+
+local function _mudletKillTimer(id)
+    if id and type(killTimer) == "function" then pcall(killTimer, id) end
+end
+
+local function _mudletTempRegexTrigger(pat, fn)
+    if type(tempRegexTrigger) == "function" then
+        return tempRegexTrigger(pat, fn)
+    end
+    return nil
+end
+
+local function _mudletTempTimer(sec, fn)
+    if type(tempTimer) == "function" then
+        return tempTimer(sec, fn)
+    end
+    return nil
+end
+
 local function _reset(C)
     CAP.active = false
     CAP.started = false
@@ -179,6 +191,11 @@ local function _reset(C)
     else
         CAP.timer = nil
     end
+
+    -- consume expectations after any session ends
+    CAP.expectSource = nil
+    CAP.expectVerbose = false
+    CAP.expectTimeoutSec = nil
 end
 
 function M.reset()
@@ -188,6 +205,9 @@ function M.reset()
     CAP.startedAt = nil
     CAP.trigAny = nil
     CAP.timer = nil
+    CAP.expectSource = nil
+    CAP.expectVerbose = false
+    CAP.expectTimeoutSec = nil
 end
 
 local function _usage(C)
@@ -202,9 +222,13 @@ local function _usage(C)
     C.out("  dwwho add <name>")
     C.out("  dwwho remove <name>")
     C.out("  dwwho refresh")
+    C.out("  dwwho watch status")
+    C.out("  dwwho watch on")
+    C.out("  dwwho watch off")
     C.out("")
     C.out("Notes:")
-    C.out("  - ingestclip reads your clipboard and parses it as WHO output")
+    C.out("  - AUTO: when you type 'who' manually, DWKit auto-captures and ingests silently (watcher)")
+    C.out("  - ingestclip reads your clipboard and parses it as WHO output (optional)")
     C.out("  - SAFE: all except refresh (no gameplay sends)")
     C.out("  - GAME: refresh sends 'who' to the MUD and captures output")
 end
@@ -221,10 +245,18 @@ local function _printRefreshGuardStatus(C)
     C.out("  lastSkipReason=" .. tostring(GUARD.lastSkipReason or "nil"))
 end
 
+local function _printWatchStatus(C)
+    C.out("[DWKit Who] watcher")
+    C.out("  enabled=" .. tostring(WATCH.enabled))
+    C.out("  trigPlayers=" .. tostring(WATCH.trigPlayers or "nil"))
+    C.out("  trigTotal=" .. tostring(WATCH.trigTotal or "nil"))
+    C.out("  lastErr=" .. tostring(WATCH.lastErr or "nil"))
+end
+
 local function _printStatusBestEffort(C, svc)
-    -- fallback status printing (minimal)
     if type(svc) ~= "table" or type(svc.getState) ~= "function" then
         C.err("WhoStoreService not available (cannot print status)")
+        _printWatchStatus(C)
         _printRefreshGuardStatus(C)
         return
     end
@@ -232,6 +264,7 @@ local function _printStatusBestEffort(C, svc)
     local ok, st = pcall(svc.getState)
     if not ok or type(st) ~= "table" then
         C.err("WhoStoreService.getState failed")
+        _printWatchStatus(C)
         _printRefreshGuardStatus(C)
         return
     end
@@ -246,6 +279,7 @@ local function _printStatusBestEffort(C, svc)
     C.out("  lastUpdatedTs=" .. tostring(st.lastUpdatedTs or "nil"))
     C.out("  source=" .. tostring(st.source or "nil"))
 
+    _printWatchStatus(C)
     _printRefreshGuardStatus(C)
 end
 
@@ -281,52 +315,155 @@ local function _ingestTextBestEffort(C, svc, text, meta)
     return false, "WhoStoreService ingestWhoText/ingestWhoLines not available"
 end
 
-local function _finalize(C, ok, reason, svc)
+local function _getPlayersCountBestEffort(svc)
+    if type(svc) ~= "table" then return nil end
+    if type(svc.getAllPlayers) == "function" then
+        local ok, arr = pcall(svc.getAllPlayers)
+        if ok and type(arr) == "table" then
+            return #arr
+        end
+    end
+    if type(svc.getState) == "function" then
+        local ok, st = pcall(svc.getState)
+        if ok and type(st) == "table" and type(st.players) == "table" then
+            local n = 0
+            for _, v in pairs(st.players) do
+                if v == true then n = n + 1 end
+            end
+            return n
+        end
+    end
+    return nil
+end
+
+local function _looksLikeWhoFooter(line)
+    if type(line) ~= "string" then return false end
+    local t = _trim(line):lower()
+    return (t:match("^%d+%s+characters%s+displayed%.?$") ~= nil)
+end
+
+local function _extractWhoFromText(text)
+    text = tostring(text or "")
+    text = text:gsub("\r", "")
+
+    local rawLines = {}
+    for line in text:gmatch("([^\n]+)") do
+        rawLines[#rawLines + 1] = tostring(line or "")
+    end
+
+    local started = false
+    local captured = {}
+    local foundHeader = false
+    local foundFooter = false
+
+    for i = 1, #rawLines do
+        local line = rawLines[i]
+        local t = _trim(line)
+
+        if not started then
+            if t == "Players" or t:match("^Total players:") then
+                started = true
+                foundHeader = true
+                captured[#captured + 1] = t
+            end
+        else
+            captured[#captured + 1] = line
+            if _looksLikeWhoFooter(line) then
+                foundFooter = true
+                break
+            end
+        end
+    end
+
+    if foundHeader then
+        return table.concat(captured, "\n"), {
+            rawLineCount = #rawLines,
+            keptLineCount = #captured,
+            mode = foundFooter and "header+footer" or "headerOnly",
+        }
+    end
+
+    captured = {}
+    for i = 1, #rawLines do
+        local line = rawLines[i]
+        local t = _trim(line)
+        if t:sub(1, 1) == "[" then
+            captured[#captured + 1] = line
+        end
+        if _looksLikeWhoFooter(line) then
+            foundFooter = true
+            break
+        end
+    end
+
+    return table.concat(captured, "\n"), {
+        rawLineCount = #rawLines,
+        keptLineCount = #captured,
+        mode = foundFooter and "entries+footer" or "entriesOnly",
+    }
+end
+
+local function _finalize(C, ok, reason, svc, meta)
+    meta = (type(meta) == "table") and meta or {}
+    local verbose = (meta.verbose == true)
+    local source = tostring(meta.source or "dwwho:auto")
+
     local lines = CAP.lines or {}
     _reset(C)
 
     if not ok then
-        GUARD.lastOk = false
-        GUARD.lastErr = tostring(reason or "unknown")
-        C.out("[DWKit Who] refresh FAILED reason=" .. tostring(reason or "unknown"))
+        -- timeout/abort
+        if verbose then
+            GUARD.lastOk = false
+            GUARD.lastErr = tostring(reason or "unknown")
+            C.out("[DWKit Who] capture FAILED reason=" .. tostring(reason or "unknown"))
+        end
         return
     end
 
     if type(svc) ~= "table" then
-        GUARD.lastOk = false
-        GUARD.lastErr = "WhoStoreService not available"
-        C.out("[DWKit Who] refresh FAILED: WhoStoreService not available")
+        if verbose then
+            GUARD.lastOk = false
+            GUARD.lastErr = "WhoStoreService not available"
+            C.out("[DWKit Who] capture FAILED: WhoStoreService not available")
+        end
         return
     end
 
     local text = table.concat(lines, "\n")
+    local okIngest, err = _ingestTextBestEffort(C, svc, text, { source = source })
 
-    local okIngest, err = _ingestTextBestEffort(C, svc, text, { source = "dwwho:refresh" })
     if okIngest then
-        GUARD.lastOk = true
-        GUARD.lastOkTs = os.time()
-        GUARD.lastErr = nil
+        if verbose then
+            GUARD.lastOk = true
+            GUARD.lastOkTs = os.time()
+            GUARD.lastErr = nil
+            C.out("[DWKit Who] capture OK source=" .. source .. " lines=" .. tostring(#lines))
+            _printStatusBestEffort(C, svc)
+        end
+        -- watcher mode stays quiet on success
+        return
+    end
 
-        C.out("[DWKit Who] refresh OK lines=" .. tostring(#lines))
-        _printStatusBestEffort(C, svc)
-    else
+    if verbose then
         GUARD.lastOk = false
         GUARD.lastErr = tostring(err or "ingest failed")
-        C.out("[DWKit Who] refresh ingest FAILED err=" .. tostring(err))
+        C.out("[DWKit Who] capture ingest FAILED err=" .. tostring(err))
+    else
+        -- quiet mode: record error for watch status, but do not spam
+        WATCH.lastErr = tostring(err or "ingest failed")
     end
 end
 
 local function _shouldSkipRefresh(C)
-    -- Anti-overlap: never cancel old session automatically; SKIP instead.
     if CAP.active == true then
         GUARD.lastSkipReason = "inflight"
-        C.out("[DWKit Who] refresh skipped (already running)")
+        C.out("[DWKit Who] refresh skipped (capture already running)")
         return true
     end
 
     local now = os.time()
 
-    -- Cooldown: prevent spam / accidental double-enter.
     if GUARD.lastAttemptTs ~= nil then
         local delta = now - tonumber(GUARD.lastAttemptTs or 0)
         if delta >= 0 and delta < GUARD.cooldownSec then
@@ -338,6 +475,129 @@ local function _shouldSkipRefresh(C)
     end
 
     return false
+end
+
+-- Start capture session assuming HEADER line already seen and should be included.
+local function _beginCaptureWithHeaderLine(svc, headerLine, opts)
+    opts = (type(opts) == "table") and opts or {}
+    if CAP.active == true then
+        return false, "capture inflight"
+    end
+
+    local timeoutSec = tonumber(opts.timeoutSec or CAP.expectTimeoutSec or 5) or 5
+    if timeoutSec < 2 then timeoutSec = 2 end
+    if timeoutSec > 10 then timeoutSec = 10 end
+
+    local source = tostring(opts.source or CAP.expectSource or "dwwho:auto")
+    local verbose = (opts.verbose == true) or (CAP.expectVerbose == true)
+
+    -- Use a quiet ctx when verbose=false
+    local C = verbose and _getCtx({}) or
+        { out = _noop, err = _noop, killTrigger = _mudletKillTrigger, killTimer = _mudletKillTimer }
+
+    -- hard dependency: need Mudlet trigger/timer APIs
+    if type(tempRegexTrigger) ~= "function" or type(tempTimer) ~= "function" or type(killTrigger) ~= "function" or type(killTimer) ~= "function" then
+        WATCH.lastErr = "Mudlet trigger/timer APIs missing (cannot auto-capture)"
+        return false, WATCH.lastErr
+    end
+
+    CAP.active = true
+    CAP.started = true
+    CAP.lines = { tostring(headerLine or "") }
+    CAP.startedAt = os.time()
+
+    CAP.trigAny = tempRegexTrigger([[^(.*)$]], function()
+        if not CAP.active then return end
+        local line = (matches and matches[2]) and tostring(matches[2]) or ""
+
+        CAP.lines[#CAP.lines + 1] = line
+
+        if _looksLikeWhoFooter(line) then
+            _finalize(C, true, nil, svc, { source = source, verbose = verbose })
+        end
+    end)
+
+    CAP.timer = tempTimer(timeoutSec, function()
+        if not CAP.active then return end
+        _finalize(C, false, "timeout(" .. tostring(timeoutSec) .. "s)", svc, { source = source, verbose = verbose })
+    end)
+
+    -- consume expectations once capture begins
+    CAP.expectSource = nil
+    CAP.expectVerbose = false
+    CAP.expectTimeoutSec = nil
+
+    return true, nil
+end
+
+-- Install/Uninstall watcher triggers
+local function _watchEnable()
+    if WATCH.enabled == true then
+        return true, nil
+    end
+
+    if type(tempRegexTrigger) ~= "function" or type(killTrigger) ~= "function" or type(tempTimer) ~= "function" or type(killTimer) ~= "function" then
+        WATCH.lastErr = "Mudlet trigger/timer APIs missing (cannot enable watcher)"
+        return false, WATCH.lastErr
+    end
+
+    -- Resolve service now; if it fails later, we'll attempt again on header.
+    local okSvc, svc = _safeRequire("dwkit.services.whostore_service")
+    if not okSvc or type(svc) ~= "table" then
+        -- still enable watcher; it will try require() again on capture start
+        svc = nil
+    end
+
+    WATCH.enabled = true
+    WATCH.lastErr = nil
+
+    WATCH.trigPlayers = tempRegexTrigger([[^Players$]], function()
+        if CAP.active == true then return end
+        local ok2, svc2 = _safeRequire("dwkit.services.whostore_service")
+        svc2 = (ok2 and type(svc2) == "table") and svc2 or svc
+        if type(svc2) ~= "table" then
+            WATCH.lastErr = "WhoStoreService not available (auto-capture skipped)"
+            return
+        end
+        _beginCaptureWithHeaderLine(svc2, "Players", { source = "dwwho:auto", verbose = false })
+    end)
+
+    WATCH.trigTotal = tempRegexTrigger([[^Total players:.*$]], function()
+        if CAP.active == true then return end
+        local line = (matches and matches[1]) and tostring(matches[1]) or "Total players:"
+        local ok2, svc2 = _safeRequire("dwkit.services.whostore_service")
+        svc2 = (ok2 and type(svc2) == "table") and svc2 or svc
+        if type(svc2) ~= "table" then
+            WATCH.lastErr = "WhoStoreService not available (auto-capture skipped)"
+            return
+        end
+        _beginCaptureWithHeaderLine(svc2, line, { source = "dwwho:auto", verbose = false })
+    end)
+
+    if not WATCH.trigPlayers or not WATCH.trigTotal then
+        WATCH.lastErr = "failed to install watcher triggers"
+        return false, WATCH.lastErr
+    end
+
+    return true, nil
+end
+
+local function _watchDisable()
+    if WATCH.trigPlayers then _mudletKillTrigger(WATCH.trigPlayers) end
+    if WATCH.trigTotal then _mudletKillTrigger(WATCH.trigTotal) end
+    WATCH.trigPlayers = nil
+    WATCH.trigTotal = nil
+    WATCH.enabled = false
+    return true, nil
+end
+
+-- Auto-enable watcher when running inside Mudlet (best-effort, silent)
+local function _autoEnableWatcherBestEffort()
+    if WATCH.enabled == true then return end
+    if type(tempRegexTrigger) ~= "function" or type(tempTimer) ~= "function" then
+        return
+    end
+    _watchEnable()
 end
 
 local function _startCapture(C, svc, opts)
@@ -365,6 +625,22 @@ local function _startCapture(C, svc, opts)
         return
     end
 
+    -- If watcher is enabled, reuse it: set expectations and just send "who"
+    if WATCH.enabled == true then
+        GUARD.lastAttemptTs = os.time()
+        GUARD.lastSkipReason = nil
+        GUARD.lastErr = nil
+
+        CAP.expectSource = "dwwho:refresh"
+        CAP.expectVerbose = true
+        CAP.expectTimeoutSec = timeoutSec
+
+        C.out("[DWKit Who] refresh: sending 'who' (watcher will capture output)...")
+        pcall(sendFn, "who")
+        return
+    end
+
+    -- Fallback (legacy): install per-refresh capture triggers
     if type(C.tempRegexTrigger) ~= "function" or type(C.tempTimer) ~= "function" then
         GUARD.lastOk = false
         GUARD.lastErr = "tempRegexTrigger/tempTimer ctx helpers missing"
@@ -374,7 +650,6 @@ local function _startCapture(C, svc, opts)
 
     GUARD.lastAttemptTs = os.time()
     GUARD.lastSkipReason = nil
-    -- Clear previous error when we begin a new attempt (results will be set in finalize).
     GUARD.lastErr = nil
 
     CAP.active = true
@@ -387,7 +662,6 @@ local function _startCapture(C, svc, opts)
         local line = (matches and matches[2]) and tostring(matches[2]) or ""
 
         if not CAP.started then
-            -- Start capture ONLY when WHO output begins (avoid DWKit log lines).
             if line == "Players" or line:match("^Total players:") then
                 CAP.started = true
             else
@@ -397,14 +671,14 @@ local function _startCapture(C, svc, opts)
 
         CAP.lines[#CAP.lines + 1] = line
 
-        if line:match("^%s*%d+%s+characters displayed%.%s*$") then
-            _finalize(C, true, nil, svc)
+        if _looksLikeWhoFooter(line) then
+            _finalize(C, true, nil, svc, { source = "dwwho:refresh", verbose = true })
         end
     end)
 
     CAP.timer = C.tempTimer(timeoutSec, function()
         if not CAP.active then return end
-        _finalize(C, false, "timeout(" .. tostring(timeoutSec) .. "s)", svc)
+        _finalize(C, false, "timeout(" .. tostring(timeoutSec) .. "s)", svc, { source = "dwwho:refresh", verbose = true })
     end)
 
     C.out("[DWKit Who] refresh: sending 'who' + capturing output...")
@@ -412,10 +686,6 @@ local function _startCapture(C, svc, opts)
 end
 
 -- Parse "sub" into: verb + rest
--- Examples:
---   "add Bob" -> verb="add", rest="Bob"
---   "set Bob,Alice" -> verb="set", rest="Bob,Alice"
---   "" -> verb=""
 local function _parseVerb(sub)
     sub = _trim(tostring(sub or ""))
     if sub == "" then
@@ -435,12 +705,10 @@ local function _mergeRestWithArg(rest, arg)
         return rest
     end
 
-    -- If caller provided a separate arg, prefer it when rest is empty.
     if rest == "" then
         return arg
     end
 
-    -- If both exist, append (conservative, avoids dropping info).
     return rest .. " " .. arg
 end
 
@@ -448,12 +716,10 @@ local function _splitNamesCSV(rest)
     rest = _trim(tostring(rest or ""))
     if rest == "" then return {} end
 
-    -- allow "Bob Alice" as well as "Bob,Alice"
     rest = rest:gsub("%s+", " ")
 
     local names = {}
 
-    -- If commas exist, treat comma as primary delimiter
     if rest:find(",", 1, true) then
         for part in rest:gmatch("([^,]+)") do
             local n = _trim(part)
@@ -464,7 +730,6 @@ local function _splitNamesCSV(rest)
         return names
     end
 
-    -- otherwise split by spaces
     for part in rest:gmatch("([^%s]+)") do
         local n = _trim(part)
         if n ~= "" then
@@ -556,7 +821,6 @@ local function _svcList(C, svc)
         end
     end
 
-    -- fallback: use getState().players map
     if type(svc.getState) ~= "function" then
         C.err("WhoStoreService.getState not available")
         return
@@ -583,40 +847,38 @@ local function _svcList(C, svc)
     end
 end
 
+local function _buildFixtureWhoText(names)
+    names = (type(names) == "table") and names or {}
+    local lines = {}
+    lines[#lines + 1] = "Players"
+    lines[#lines + 1] = "-------"
+    for i = 1, #names do
+        local n = tostring(names[i] or "")
+        if n ~= "" then
+            lines[#lines + 1] = "[50 War] " .. n
+        end
+    end
+    lines[#lines + 1] = tostring(#names) .. " characters displayed."
+    return table.concat(lines, "\n")
+end
+
 local function _fixtureText(which)
     which = tostring(which or "basic"):lower()
 
     if which == "" or which == "basic" then
-        return table.concat({
-            "Zeq",
-            "Vzae",
-            "Xi",
-            "Scynox",
-        }, "\n"), "basic"
+        local txt = _buildFixtureWhoText({ "Zeq", "Vzae", "Xi", "Scynox" })
+        return txt, "basic"
     end
 
     if which == "party" then
-        return table.concat({
-            "Zeq",
-            "Vzae",
-            "Xi",
-            "Scynox",
-            "Borai",
-            "Merec",
-            "Kiyomi",
-            "Ragna",
-            "Eymel",
-            "Hnin", -- harmless extra
-        }, "\n"), "party"
+        local txt = _buildFixtureWhoText({
+            "Zeq", "Vzae", "Xi", "Scynox", "Borai", "Merec", "Kiyomi", "Ragna", "Eymel", "Hnin",
+        })
+        return txt, "party"
     end
 
-    -- unknown fixture name -> fallback basic
-    return table.concat({
-        "Zeq",
-        "Vzae",
-        "Xi",
-        "Scynox",
-    }, "\n"), "basic"
+    local txt = _buildFixtureWhoText({ "Zeq", "Vzae", "Xi", "Scynox" })
+    return txt, "basic"
 end
 
 local function _dispatchCore(ctx, svc, sub, arg)
@@ -629,7 +891,6 @@ local function _dispatchCore(ctx, svc, sub, arg)
     local verb, rest = _parseVerb(sub)
     rest = _mergeRestWithArg(rest, arg)
 
-    -- default: status
     if verb == "" or verb == "status" then
         _printStatusBestEffort(C, svc)
         return
@@ -645,6 +906,32 @@ local function _dispatchCore(ctx, svc, sub, arg)
         return
     end
 
+    if verb == "watch" then
+        local v2, r2 = _parseVerb(rest)
+        if v2 == "" or v2 == "status" then
+            _printWatchStatus(C)
+            return
+        end
+        if v2 == "on" or v2 == "enable" then
+            local ok, err = _watchEnable()
+            if ok then
+                C.out("[DWKit Who] watcher enabled (auto-captures manual 'who')")
+            else
+                C.err("watcher enable failed: " .. tostring(err))
+            end
+            _printWatchStatus(C)
+            return
+        end
+        if v2 == "off" or v2 == "disable" then
+            _watchDisable()
+            C.out("[DWKit Who] watcher disabled")
+            _printWatchStatus(C)
+            return
+        end
+        C.err("watch usage: dwwho watch [status|on|off]")
+        return
+    end
+
     if verb == "ingestclip" then
         local text = (type(C.getClipboardText) == "function") and C.getClipboardText() or nil
         if type(text) ~= "string" or text:gsub("%s+", "") == "" then
@@ -652,14 +939,42 @@ local function _dispatchCore(ctx, svc, sub, arg)
             return
         end
 
-        local okIngest, err = _ingestTextBestEffort(C, svc, text, { source = "dwwho:clipboard" })
-        if okIngest then
-            C.out("[DWKit Who] ingestclip OK")
+        local extracted, info = _extractWhoFromText(text)
+        extracted = tostring(extracted or "")
+        info = (type(info) == "table") and info or {}
+
+        if extracted:gsub("%s+", "") == "" then
+            C.err("clipboard does not appear to contain WHO lines (no entries found).")
+            C.out("[DWKit Who] ingestclip note: copy from 'Players' down to 'X characters displayed.'")
+            return
+        end
+
+        local beforeN = _getPlayersCountBestEffort(svc)
+        local okIngest, err = _ingestTextBestEffort(C, svc, extracted, { source = "dwwho:clipboard" })
+        if not okIngest then
+            C.err("ingestclip failed: " .. tostring(err))
+            return
+        end
+
+        local afterN = _getPlayersCountBestEffort(svc)
+
+        if afterN == 0 then
+            C.out("[DWKit Who] ingestclip WARNING: parsed 0 entries from clipboard")
+            C.out("  hint: clipboard likely includes prompt/noise before '['. Re-copy WHO block.")
+            C.out("  extractMode=" .. tostring(info.mode or "unknown")
+                .. " rawLines=" .. tostring(info.rawLineCount or "?")
+                .. " keptLines=" .. tostring(info.keptLineCount or "?"))
             _printStatusBestEffort(C, svc)
             return
         end
 
-        C.err("ingestclip failed: " .. tostring(err))
+        if beforeN ~= nil and afterN ~= nil and beforeN == afterN then
+            C.out("[DWKit Who] ingestclip OK (no change) players=" .. tostring(afterN))
+        else
+            C.out("[DWKit Who] ingestclip OK players=" .. tostring(afterN))
+        end
+
+        _printStatusBestEffort(C, svc)
         return
     end
 
@@ -668,13 +983,20 @@ local function _dispatchCore(ctx, svc, sub, arg)
         local fixture, which = _fixtureText(fixtureName)
 
         local okIngest, err = _ingestTextBestEffort(C, svc, fixture, { source = "dwwho:fixture:" .. tostring(which) })
-        if okIngest then
-            C.out("[DWKit Who] fixture OK name=" .. tostring(which))
+        if not okIngest then
+            C.err("fixture ingest failed: " .. tostring(err))
+            return
+        end
+
+        local afterN = _getPlayersCountBestEffort(svc)
+        if afterN == 0 then
+            C.out("[DWKit Who] fixture WARNING: parsed 0 entries name=" .. tostring(which))
             _printStatusBestEffort(C, svc)
             return
         end
 
-        C.err("fixture ingest failed: " .. tostring(err))
+        C.out("[DWKit Who] fixture OK name=" .. tostring(which))
+        _printStatusBestEffort(C, svc)
         return
     end
 
@@ -742,6 +1064,9 @@ function M.dispatch(ctx, a, b, c)
     -- Legacy signature: dispatch(ctx, svc, sub, arg)
     _dispatchCore(ctx, a, b, c)
 end
+
+-- Best-effort: enable watcher automatically when running in Mudlet
+_autoEnableWatcherBestEffort()
 
 return M
 

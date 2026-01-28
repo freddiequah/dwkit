@@ -1,6 +1,6 @@
-# DWKit WhoStore Service Contract (v1.0)
+# DWKit WhoStore Service Contract (v1.1)
 
-Version: **v1.0**
+Version: **v1.1**
 Status: **Authoritative Contract**
 Scope: **DWKit SAFE WhoStore snapshot + parsing rules**
 
@@ -28,9 +28,14 @@ It MUST NOT send gameplay commands and MUST NOT automate actions.
 
 **Entry**
 - A parsed representation of a WHO line (schema below).
+- Keyed by `name` for lookup, but retains raw line and derived fields for validation.
 
 **Snapshot**
-- A full WhoStore state update, including parsed entries and raw lines.
+- A full WhoStore state update, including parsed entries, a by-name index, and raw lines.
+
+**Title text**
+- The portion of an Entry that represents the player’s visible title or descriptive text (derived).
+- Used for best-effort validation when correlating WHO with room lines.
 
 ---
 
@@ -54,7 +59,7 @@ Not allowed:
 
 ## 2) Canonical Data Model
 
-WhoStore stores the following per WHO entry:
+WhoStore stores the following per WHO entry.
 
 ### 2.1 Entry schema (authoritative)
 
@@ -63,7 +68,7 @@ Fields stored:
 - `name`
   - Type: string
   - Rule: **first token after the closing bracket**
-  - Example: if line is `[48 War] Vzae AFK`, `name = "Vzae"`
+  - Example: if line is `[48 War] Vzae the adventurer`, `name = "Vzae"`
 
 - `rankTag`
   - Type: string
@@ -97,23 +102,43 @@ Fields stored:
   - Rule:
     - Detect known flags from text after the name
     - Store as a list (no duplicates)
-  - Known flags (v1.0):
+  - Known flags (v1.1):
     - `AFK`
     - `NH`
-    - `idle`
-    - `down`
+    - `idle` (including patterns like `(idle:19)`; details may vary)
+    - `down` (including patterns like `<-- down`)
 
 - `extraText`
   - Type: string
   - Rule:
     - Everything after `name`, cleaned and trimmed
-    - May contain title/notes and/or the raw flag words
+    - May contain title/notes and/or the raw flag tokens
     - MUST NOT remove meaning, only normalize spacing
+
+- `titleText`
+  - Type: string | nil
+  - Rule:
+    - Derived from `extraText` by removing only known flag tokens/markers and normalizing whitespace.
+    - If the derived title becomes empty after removal, set to nil.
+  - Purpose:
+    - Best-effort validation when matching a room line to a WHO entry.
+    - Example WHO line:
+      - `[50 Cle] Snorrin ZZZZZVo tezzzz of Snert Industries (AFK) (NH)`
+      - `name = "Snorrin"`
+      - `extraText = "ZZZZZVo tezzzz of Snert Industries (AFK) (NH)"`
+      - `titleText = "ZZZZZVo tezzzz of Snert Industries"`
+    - Example room line:
+      - `Snorrin ZZZZZVo tezzzz of Snert Industries (AFK) is standing here.`
+      - A consumer MAY compare the `name` and `titleText` to validate it is the same player.
 
 - `rawLine`
   - Type: string
   - Rule:
     - Original raw line stored for debug, replay, and future parsing improvements
+
+Notes:
+- WhoStore MUST treat `name` as the primary lookup key.
+- WhoStore MUST update stored fields when new WHO snapshots show changed values (including `titleText`).
 
 ### 2.2 rankTag meaning rules (authoritative)
 
@@ -121,17 +146,17 @@ Fields stored:
   - It represents a **player**
   - It encodes player `level` + `class`
 
-- If `rankTag` is something like `"IMPL"`, `"MGOD"`:
-  - It represents a **MUD admin staff**
+- If `rankTag` is something like `"IMPL"`, `"MGOD"`, `"HGOD"`:
+  - It represents **MUD admin staff**
   - `level = nil`, `class = nil` unless the MUD format changes in the future
 
-This rule is REQUIRED so future logic does not incorrectly assume IMPL/MGOD lines are normal player rank lines.
+This rule is REQUIRED so future logic does not incorrectly assume staff lines are normal player rank lines.
 
 ---
 
 ## 3) Parsing Rules
 
-### 3.1 Basic format assumption (v1.0)
+### 3.1 Basic format assumption (v1.1)
 
 Most lines follow:
 `[<rankTag>] <name> <optional extra text>`
@@ -146,6 +171,8 @@ If parsing fails:
 - A parse warning MAY be logged (SAFE logging only)
 
 ### 3.2 Field extraction
+
+Given a WHO line `line`:
 
 1) `rankTag`
 - Take first bracket group
@@ -163,60 +190,105 @@ If parsing fails:
 - First token after bracket
 
 5) `flags`
-- Search remaining text for any known flags (exact word match)
+- Search remaining text for any known flags (exact word match, best-effort)
 - Store list of flags present
+- Examples:
+  - `(AFK)` -> `AFK`
+  - `(NH)` -> `NH`
+  - `(idle:19)` -> `idle`
+  - `<-- down` -> `down`
 
 6) `extraText`
 - Remaining text after name (trim, normalize internal whitespace)
-- It is ok if it still contains the flag words
+- It is ok if it still contains the flag tokens
 - This is a presentation/debug field, not a strict structured type
 
-7) `rawLine`
+7) `titleText` (derived)
+- Start from `extraText`
+- Remove only known flag markers/tokens (best-effort), then normalize whitespace
+- If empty after removal, set nil
+- MUST NOT remove non-flag meaning content
+
+8) `rawLine`
 - Original raw input line
 
 ---
 
 ## 4) Snapshot Contract
 
-WhoStore MUST expose snapshot data with the following structure:
+WhoStore MUST expose snapshot data with the following structure.
 
 ### 4.1 Snapshot schema (authoritative)
 
 - `ts`
   - Type: number
   - Unix seconds or ms timestamp (project standard)
+
 - `source`
   - Type: string | nil
   - Example: `"capture"`, `"fixture"`, `"manual"`
+
 - `rawLines`
   - Type: table (array of strings)
+  - The raw WHO lines used for the snapshot (as captured)
+
 - `entries`
   - Type: table (array of Entry)
+  - Parsed entries for lines that successfully match the schema
 
-### 4.2 Update semantics
+- `byName`
+  - Type: table (map: string -> Entry)
+  - A lookup index for fast retrieval by player name
+  - MUST be consistent with `entries`
+  - If duplicate names occur in `entries`, the last parsed occurrence MAY win in `byName`
 
-- A WhoStore update SHOULD be treated as a full snapshot replace.
+### 4.2 Update semantics (authoritative)
+
+- A WhoStore update SHOULD be treated as a full snapshot replace by default.
 - The snapshot MUST be self-contained and valid on its own.
+- Implementations MAY support an explicit merge mode, but replace remains the default.
+
+Title change rule (normative):
+- If a player’s `name` is present in both previous and new snapshot, and the newly derived `titleText` differs from the prior stored `titleText`, WhoStore MUST update the stored Entry for that player to the new value as part of the snapshot replace.
+- Consumers MUST assume titles can change and MUST treat WhoStore as authoritative for the latest observed title.
 
 ---
 
-## 5) Event Contract (Docs-First)
+## 5) Public API Contract (Docs-First)
+
+WhoStore MUST provide read access without exposing internal mutable tables.
+
+Minimum required APIs (v1.1):
+- `getSnapshot() -> Snapshot copy`
+- `getEntry(name) -> Entry|nil` (copy)
+- `getAllNames() -> array of string` (sorted, stable order)
+
+Notes:
+- `getEntry(name)` MUST retrieve from the canonical by-name index, not by scanning entries each time.
+- Returned tables MUST be defensive copies (or immutable views), so callers cannot mutate internal state.
+
+---
+
+## 6) Event Contract (Docs-First)
 
 When WhoStore updates snapshot state, it MUST emit the registered event:
 
 `DWKit:Service:WhoStore:Updated`
 
-Payload schema:
+Payload schema (minimum):
 - `snapshot`: table (Snapshot schema above)
 - `source`: string (optional)
 - `ts`: number
+
+Optional payload fields (non-binding):
+- `delta`: summary table (added/removed/changed counts), if the implementation tracks it safely
 
 Event registry location:
 - docs/Event_Registry_v1.0.md (v1.9+)
 
 ---
 
-## 6) UI Consumption Rules
+## 7) UI Consumption Rules
 
 UI modules MUST NOT parse WHO raw lines directly.
 
@@ -228,13 +300,14 @@ This prevents duplicated parsing logic across UI modules and avoids drift.
 
 ---
 
-## 7) Future Extensions (Non-Binding)
+## 8) Future Extensions (Non-Binding)
 
 Future work may extend this contract to support:
-- role classification: player vs admin vs unknown
+- stronger role classification: player vs staff vs unknown
 - normalized name casing rules
-- correlation with room entities
+- correlation with room entities and room-line parsing
 - persistence and cross-profile propagation
+- structured idle minutes and other structured attributes
 
 Any extension MUST:
 - be docs-first

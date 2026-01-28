@@ -1,30 +1,45 @@
 -- #########################################################################
 -- Module Name : dwkit.services.whostore_service
 -- Owner       : Services
--- Version     : v2026-01-19C
+-- Version     : v2026-01-28A
 -- Purpose     :
---   - SAFE WhoStore service (manual-only) to cache authoritative player names
+--   - SAFE WhoStore service (manual-only) to cache an authoritative WHO snapshot
 --     derived from parsing WHO output (No-GMCP compatible).
---   - Provides a player set used by other services (e.g. RoomEntities) for
+--   - Stores:
+--       * rawLines (debug / replay)
+--       * entries (parsed Entry records)
+--       * byName index (name -> Entry)
+--   - Provides a known-player set used by other services (e.g. RoomEntities) for
 --     best-effort player classification.
---   - Emits Updated event on changes (SAFE; no gameplay commands; no timers).
+--   - Emits Updated event on snapshot changes (SAFE; no gameplay commands; no timers).
 --
--- Public API  :
+-- Docs-First Contract:
+--   - docs/WhoStore_Service_Contract_v1.0.md (v1.1)
+--   - Event: DWKit:Service:WhoStore:Updated
+--
+-- Public API (v2026-01-28A) :
 --   - getVersion() -> string
 --   - getUpdatedEventName() -> string
 --   - onUpdated(handlerFn) -> boolean ok, any tokenOrNil, string|nil err
---   - getState() -> table copy
+--
+--   -- Docs-first APIs (v1.1)
+--   - getSnapshot() -> Snapshot copy
+--   - getEntry(name) -> Entry|nil (copy)
+--   - getAllNames() -> array (sorted)
+--
+--   -- Legacy compatibility (kept for now)
+--   - getState() -> table copy (includes players map)
 --   - setState(newState, opts?) -> boolean ok, string|nil err
 --   - update(delta, opts?) -> boolean ok, string|nil err
 --   - clear(opts?) -> boolean ok, string|nil err
 --   - ingestWhoLines(lines, opts?) -> boolean ok, string|nil err
 --   - ingestWhoText(text, opts?) -> boolean ok, string|nil err
 --   - hasPlayer(name) -> boolean
---   - getAllPlayers() -> array (sorted)
+--   - getAllPlayers() -> array (sorted)   -- alias of getAllNames()
 --
 -- ingestWho* behavior:
 --   - Default: REPLACE mode (authoritative snapshot) to match real WHO output.
---   - Opt-in MERGE mode: pass opts.merge=true to add without removing existing.
+--   - Opt-in MERGE mode: pass opts.merge=true to add/update entries without removing existing.
 --
 -- SAFE Constraints:
 --   - No gameplay commands
@@ -42,27 +57,45 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-19C"
+M.VERSION = "v2026-01-28A"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
 
 M.EV_UPDATED = tostring(ID.eventPrefix or "DWKit:") .. "Service:WhoStore:Updated"
 
+-- ############################################################
+-- Internal state
+-- ############################################################
+
 local _state = {
-    players = {},        -- map: name -> true
+    snapshot = {
+        ts = nil,      -- os.time()
+        source = nil,  -- string|nil
+        rawLines = {}, -- array of strings
+        entries = {},  -- array of Entry
+        byName = {},   -- map: name -> Entry
+    },
+
+    -- Legacy compatibility cache (name -> true). Derived from snapshot.byName
+    players = {},
+
     lastUpdatedTs = nil, -- os.time()
     source = nil,        -- string
-    rawCount = 0,        -- count of names parsed from last ingest snapshot
+    rawCount = 0,        -- count of names parsed from last ingest snapshot (raw parsed names)
     stats = {
         ingests = 0,
         updates = 0,
-        emits = 0, -- counts successful emits only (v2026-01-18C)
+        emits = 0, -- counts successful emits only
         lastEmitTs = nil,
         lastEmitSource = nil,
         lastEmitErr = nil,
     },
 }
+
+-- ############################################################
+-- Helpers (copy / collections)
+-- ############################################################
 
 local function _copyTable(t)
     local out = {}
@@ -70,6 +103,55 @@ local function _copyTable(t)
     for k, v in pairs(t) do
         out[k] = v
     end
+    return out
+end
+
+local function _copyArray(a)
+    local out = {}
+    if type(a) ~= "table" then return out end
+    for i = 1, #a do
+        out[i] = a[i]
+    end
+    return out
+end
+
+local function _copyEntry(e)
+    if type(e) ~= "table" then return nil end
+    local out = {}
+    for k, v in pairs(e) do
+        if k == "flags" and type(v) == "table" then
+            out.flags = _copyArray(v)
+        else
+            out[k] = v
+        end
+    end
+    return out
+end
+
+local function _copySnapshot(snap)
+    snap = (type(snap) == "table") and snap or {}
+    local out = {
+        ts = snap.ts,
+        source = snap.source,
+        rawLines = _copyArray(snap.rawLines),
+        entries = {},
+        byName = {},
+    }
+
+    if type(snap.entries) == "table" then
+        for i = 1, #snap.entries do
+            local e = _copyEntry(snap.entries[i])
+            if e then out.entries[#out.entries + 1] = e end
+        end
+    end
+
+    if type(snap.byName) == "table" then
+        for k, v in pairs(snap.byName) do
+            local e = _copyEntry(v)
+            if e then out.byName[k] = e end
+        end
+    end
+
     return out
 end
 
@@ -89,6 +171,19 @@ local function _sortedKeys(t)
     table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
     return keys
 end
+
+local function _normWs(s)
+    if type(s) ~= "string" then return "" end
+    s = s:gsub("\r", "")
+    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+    -- collapse internal whitespace
+    s = s:gsub("%s+", " ")
+    return s
+end
+
+-- ############################################################
+-- Guards (blocked tokens)
+-- ############################################################
 
 -- Guard: prevent common DWKit commands / headers from being treated as player names
 local _BLOCKED_TOKENS = {
@@ -137,22 +232,205 @@ local function _isBlockedToken(name)
     return false
 end
 
-local function _stripLeadingBracketTags(s)
+-- ############################################################
+-- WHO parsing (v1.1)
+-- ############################################################
+
+local function _stripMudColorCodes(s)
     if type(s) ~= "string" then return s end
-    -- WHO lines often start with tags like:
-    -- [48 War] Name ...
-    -- [ IMPL ] Name ...
-    -- [ MGOD ] Name ...
-    -- Strip one or more leading [ ... ] blocks safely.
-    for _ = 1, 4 do
-        local t = s:match("^%s*(%b[])%s*")
-        if not t then break end
-        s = s:gsub("^%s*%b[]%s*", "")
+    return s:gsub("\27%[[%d;]*m", "")
+end
+
+local function _looksLikeDivider(s)
+    if type(s) ~= "string" then return false end
+    local t = _normWs(s)
+    if t == "" then return true end
+    return (t:match("^[-=_%*]+$") ~= nil)
+end
+
+local function _looksLikeWhoFooter(s)
+    if type(s) ~= "string" then return false end
+    local lower = _normWs(s):lower()
+    -- e.g. "12 characters displayed."
+    if lower:match("^%d+%s+characters%s+displayed%.?$") then
+        return true
+    end
+    return false
+end
+
+local function _parseRankTagAndRest(line)
+    if type(line) ~= "string" then return nil end
+    local s = _stripMudColorCodes(line)
+    s = s:gsub("\r", "")
+
+    if _looksLikeDivider(s) or _looksLikeWhoFooter(s) then
+        return nil
+    end
+
+    local bracket = s:match("^%s*(%b[])")
+    if not bracket then
+        return nil
+    end
+
+    local rankTag = bracket:sub(2, -2)
+    rankTag = _normWs(rankTag)
+    if rankTag == "" then
+        rankTag = nil
+    end
+
+    local rest = s:gsub("^%s*%b[]%s*", "")
+    rest = _normWs(rest)
+    if rest == "" then
+        return nil
+    end
+
+    return {
+        rankTag = rankTag,
+        rest = rest,
+        rawLine = tostring(line),
+    }
+end
+
+local function _parseLevelClass(rankTag)
+    if type(rankTag) ~= "string" or rankTag == "" then
+        return nil, nil
+    end
+
+    -- Examples:
+    -- "48 War" -> level=48 class="War"
+    -- "50 Cle" -> level=50 class="Cle"
+    -- "IMPL"   -> level=nil class=nil
+    local n, cls = rankTag:match("^(%d+)%s+(%S+)")
+    if n then
+        local level = tonumber(n)
+        local class = (type(cls) == "string" and cls ~= "") and cls or nil
+        return level, class
+    end
+
+    local nOnly = rankTag:match("^(%d+)$")
+    if nOnly then
+        return tonumber(nOnly), nil
+    end
+
+    return nil, nil
+end
+
+local function _parseNameAndExtra(rest)
+    if type(rest) ~= "string" then return nil end
+    local s = _normWs(rest)
+    if s == "" then return nil end
+
+    -- Name token rules: first token after bracket, leading letter, allow digits/' thereafter
+    local name = s:match("^([A-Za-z][A-Za-z0-9']*)")
+    if not name or name == "" then
+        return nil
+    end
+    if _isBlockedToken(name) then
+        return nil
+    end
+
+    local extra = s:sub(#name + 1)
+    extra = _normWs(extra)
+    if extra == "" then extra = "" end
+
+    return name, extra
+end
+
+local function _pushFlag(flags, key)
+    if type(flags) ~= "table" then return end
+    if type(key) ~= "string" or key == "" then return end
+    for i = 1, #flags do
+        if flags[i] == key then return end
+    end
+    flags[#flags + 1] = key
+end
+
+local function _detectFlags(extraText)
+    local flags = {}
+    if type(extraText) ~= "string" or extraText == "" then
+        return flags
+    end
+
+    local s = extraText
+    local upper = s:upper()
+
+    -- AFK / NH best-effort
+    if upper:match("%(AFK%)") or upper:match("%f[%a]AFK%f[%A]") then
+        _pushFlag(flags, "AFK")
+    end
+    if upper:match("%(NH%)") or upper:match("%f[%a]NH%f[%A]") then
+        _pushFlag(flags, "NH")
+    end
+
+    -- idle patterns: "(idle:19)" or "idle:19"
+    local lower = s:lower()
+    if lower:match("%(idle:%d+%)") or lower:match("%f[%a]idle:%d+%f[%A]") then
+        _pushFlag(flags, "idle")
+    end
+
+    -- down marker: "<-- down" (canonical)
+    if lower:find("<-- down", 1, true) ~= nil then
+        _pushFlag(flags, "down")
+    end
+
+    return flags
+end
+
+local function _deriveTitleText(extraText)
+    if type(extraText) ~= "string" then return nil end
+    local s = _normWs(extraText)
+    if s == "" then return nil end
+
+    -- Remove only known flag markers/tokens (best-effort). Preserve other meaning.
+    -- Order matters.
+    s = s:gsub("<%-%-%s*down", "")
+    s = s:gsub("%(AFK%)", "")
+    s = s:gsub("%(NH%)", "")
+    s = s:gsub("%(idle:%d+%)", "")
+    s = _normWs(s)
+
+    if s == "" then
+        return nil
     end
     return s
 end
 
-local function _normalizeName(s)
+local function _parseWhoLineToEntry(line)
+    local pre = _parseRankTagAndRest(line)
+    if not pre then
+        return nil
+    end
+
+    local name, extraText = _parseNameAndExtra(pre.rest)
+    if not name then
+        return nil
+    end
+
+    local level, class = _parseLevelClass(pre.rankTag or "")
+
+    local flags = _detectFlags(extraText)
+    local titleText = _deriveTitleText(extraText)
+
+    -- Entry schema (v1.1)
+    local entry = {
+        name = name,
+        rankTag = pre.rankTag or "",
+        level = level,
+        class = class,
+        flags = flags,
+        extraText = extraText or "",
+        titleText = titleText,
+        rawLine = tostring(pre.rawLine or line or ""),
+    }
+
+    return entry
+end
+
+-- ############################################################
+-- Legacy helpers (players map input)
+-- ############################################################
+
+local function _normalizeNameForLegacy(s)
     if type(s) ~= "string" then return nil end
 
     -- normalize whitespace
@@ -163,7 +441,7 @@ local function _normalizeName(s)
     -- remove common mudlet/mud color codes (best-effort)
     s = s:gsub("\27%[[%d;]*m", "")
 
-    -- ignore divider-ish lines (e.g. "-----", "=====")
+    -- ignore divider-ish lines
     if s:match("^[-=_%*]+$") then
         return nil
     end
@@ -171,26 +449,16 @@ local function _normalizeName(s)
     local lower = s:lower()
 
     -- ignore WHO footer lines
-    -- e.g. "12 characters displayed."
     if lower:match("^%d+%s+characters%s+displayed%.?$") then
         return nil
     end
 
-    -- Strip [..] class/level tags first so we don't capture "War/Cle/etc"
-    s = _stripLeadingBracketTags(s)
-
-    -- trim again after stripping
-    s = s:gsub("^%s+", ""):gsub("%s+$", "")
-    if s == "" then return nil end
-
     -- Capture first plausible name token.
-    -- Accept letters/numbers/' with leading letter.
     local name = s:match("([A-Za-z][A-Za-z0-9']*)")
     if not name or name == "" then
         return nil
     end
 
-    -- prevent command/header tokens from polluting the player set
     if _isBlockedToken(name) then
         return nil
     end
@@ -209,7 +477,7 @@ local function _asPlayersMap(players)
     -- array-like
     if #players > 0 then
         for i = 1, #players do
-            local n = _normalizeName(tostring(players[i] or ""))
+            local n = _normalizeNameForLegacy(tostring(players[i] or ""))
             if n then out[n] = true end
         end
         return out
@@ -218,13 +486,85 @@ local function _asPlayersMap(players)
     -- map-like
     for k, v in pairs(players) do
         if v == true then
-            local n = _normalizeName(tostring(k or ""))
+            local n = _normalizeNameForLegacy(tostring(k or ""))
             if n then out[n] = true end
         end
     end
 
     return out
 end
+
+-- ############################################################
+-- Snapshot builders / delta
+-- ############################################################
+
+local function _rebuildLegacyPlayersFromSnapshot(snap)
+    local out = {}
+    if type(snap) ~= "table" or type(snap.byName) ~= "table" then
+        return out
+    end
+    for name, _ in pairs(snap.byName) do
+        if type(name) == "string" and name ~= "" then
+            out[name] = true
+        end
+    end
+    return out
+end
+
+local function _buildSnapshotFromEntries(ts, source, rawLines, entries, byName)
+    return {
+        ts = ts,
+        source = source,
+        rawLines = rawLines or {},
+        entries = entries or {},
+        byName = byName or {},
+    }
+end
+
+local function _rebuildEntriesArrayFromByName(byName)
+    local arr = {}
+    if type(byName) ~= "table" then return arr end
+    local names = _sortedKeys(byName)
+    for i = 1, #names do
+        local e = byName[names[i]]
+        local c = _copyEntry(e)
+        if c then arr[#arr + 1] = c end
+    end
+    return arr
+end
+
+local function _computeDeltaByName(beforeByName, afterByName)
+    beforeByName = (type(beforeByName) == "table") and beforeByName or {}
+    afterByName = (type(afterByName) == "table") and afterByName or {}
+
+    local added, removed, changed = 0, 0, 0
+
+    for name, afterE in pairs(afterByName) do
+        local beforeE = beforeByName[name]
+        if beforeE == nil then
+            added = added + 1
+        else
+            -- title change is normative; treat as "changed" when titleText differs.
+            local bt = (type(beforeE) == "table") and beforeE.titleText or nil
+            local at = (type(afterE) == "table") and afterE.titleText or nil
+            if tostring(bt or "") ~= tostring(at or "") then
+                changed = changed + 1
+            end
+        end
+    end
+
+    for name, _ in pairs(beforeByName) do
+        if afterByName[name] == nil then
+            removed = removed + 1
+        end
+    end
+
+    return { added = added, removed = removed, changed = changed, total = _countMap(afterByName) }
+end
+
+-- ############################################################
+-- Event emission
+-- ############################################################
 
 local function _emitUpdated(payload)
     payload = (type(payload) == "table") and payload or {}
@@ -239,10 +579,6 @@ local function _emitUpdated(payload)
         return false
     end
 
-    -- IMPORTANT:
-    -- In this DWKit environment, event_bus.emit requires:
-    --   emit(eventName, payload, meta)
-    -- If meta is missing, emit will not deliver (verified live).
     local meta = {
         source = tostring(payload.source or _state.source or "WhoStoreService"),
         service = "dwkit.services.whostore_service",
@@ -274,6 +610,10 @@ local function _emitUpdated(payload)
     return false
 end
 
+-- ############################################################
+-- Public API
+-- ############################################################
+
 function M.getVersion()
     return M.VERSION
 end
@@ -301,91 +641,190 @@ function M.onUpdated(handlerFn)
     return false, nil, maybeErr or tokenOrErr or "subscribe failed"
 end
 
+-- Docs-first snapshot API
+function M.getSnapshot()
+    return _copySnapshot(_state.snapshot)
+end
+
+function M.getEntry(name)
+    if type(name) ~= "string" or name == "" then return nil end
+    local e = (type(_state.snapshot.byName) == "table") and _state.snapshot.byName[name] or nil
+    if not e then return nil end
+    return _copyEntry(e)
+end
+
+function M.getAllNames()
+    return _sortedKeys(_state.snapshot.byName or {})
+end
+
+-- Legacy compatibility (kept)
 function M.getState()
     return {
         version = M.VERSION,
         updatedEventName = M.EV_UPDATED,
+
+        -- legacy player set view
         players = _copyTable(_state.players),
+
+        -- legacy bookkeeping
         lastUpdatedTs = _state.lastUpdatedTs,
         source = _state.source,
         rawCount = _state.rawCount,
         stats = _copyTable(_state.stats),
+
+        -- docs-first snapshot (exposed read-only)
+        snapshot = _copySnapshot(_state.snapshot),
     }
 end
 
 function M.hasPlayer(name)
-    local n = _normalizeName(tostring(name or ""))
+    local n = _normalizeNameForLegacy(tostring(name or ""))
     if not n then return false end
     return (_state.players[n] == true)
 end
 
 function M.getAllPlayers()
-    return _sortedKeys(_state.players)
+    return M.getAllNames()
+end
+
+-- ############################################################
+-- Mutations (legacy + docs-first updates)
+-- ############################################################
+
+local function _applyNewSnapshot(newSnap, opts, delta)
+    opts = (type(opts) == "table") and opts or {}
+    newSnap = (type(newSnap) == "table") and newSnap or
+        _buildSnapshotFromEntries(os.time(), "applyNewSnapshot", {}, {}, {})
+
+    _state.snapshot = newSnap
+    _state.players = _rebuildLegacyPlayersFromSnapshot(newSnap)
+
+    _state.lastUpdatedTs = os.time()
+    _state.source = tostring(opts.source or newSnap.source or "snapshot")
+    _state.rawCount = tonumber(opts.rawCount or _state.rawCount or 0) or 0
+    _state.stats.updates = _state.stats.updates + 1
+
+    local payload = {
+        ts = newSnap.ts or _state.lastUpdatedTs,
+        source = _state.source,
+
+        -- docs-first payload (authoritative)
+        snapshot = _copySnapshot(newSnap),
+    }
+
+    if type(delta) == "table" then
+        payload.delta = _copyTable(delta)
+    end
+
+    -- Legacy payload field (non-contract): some tools may still look at state
+    payload.state = M.getState()
+
+    _emitUpdated(payload)
+
+    return true, nil
 end
 
 function M.setState(newState, opts)
     newState = (type(newState) == "table") and newState or {}
     opts = (type(opts) == "table") and opts or {}
 
+    -- Legacy setState uses players list/map; we convert it into a minimal snapshot.
     local players = _asPlayersMap(newState.players)
 
-    _state.players = players
-    _state.lastUpdatedTs = os.time()
-    _state.source = tostring(opts.source or newState.source or "setState")
-    _state.rawCount = _countMap(players)
-    _state.stats.updates = _state.stats.updates + 1
+    local ts = os.time()
+    local src = tostring(opts.source or newState.source or "setState")
 
-    _emitUpdated({
-        ts = _state.lastUpdatedTs,
-        state = M.getState(),
-        source = _state.source,
-        delta = { added = _state.rawCount, removed = 0, total = _state.rawCount, mode = "setState" },
-    })
+    local byName = {}
+    local rawLines = {}
+    local rawCount = 0
 
-    return true, nil
+    for name, v in pairs(players) do
+        if v == true and type(name) == "string" and name ~= "" then
+            rawCount = rawCount + 1
+            rawLines[#rawLines + 1] = name
+            byName[name] = {
+                name = name,
+                rankTag = "",
+                level = nil,
+                class = nil,
+                flags = {},
+                extraText = "",
+                titleText = nil,
+                rawLine = name,
+            }
+        end
+    end
+
+    local entries = _rebuildEntriesArrayFromByName(byName)
+    local snap = _buildSnapshotFromEntries(ts, src, rawLines, entries, byName)
+
+    local delta = { added = rawCount, removed = 0, changed = 0, total = rawCount, mode = "setState" }
+
+    _state.rawCount = rawCount
+    return _applyNewSnapshot(snap, { source = src, rawCount = rawCount }, delta)
 end
 
 function M.update(delta, opts)
     delta = (type(delta) == "table") and delta or {}
     opts = (type(opts) == "table") and opts or {}
 
-    local before = _countMap(_state.players)
+    local beforeByName = _state.snapshot.byName or {}
+    local nextByName = _copyTable(beforeByName)
 
     -- delta.players can be map or array
     if delta.players ~= nil then
         local addMap = _asPlayersMap(delta.players)
         for n, _ in pairs(addMap) do
-            _state.players[n] = true
+            -- create minimal entry if missing
+            if nextByName[n] == nil then
+                nextByName[n] = {
+                    name = n,
+                    rankTag = "",
+                    level = nil,
+                    class = nil,
+                    flags = {},
+                    extraText = "",
+                    titleText = nil,
+                    rawLine = n,
+                }
+            end
         end
     end
 
     -- Optional explicit remove list: delta.remove = {"Name", ...}
     if type(delta.remove) == "table" then
         for _, v in ipairs(delta.remove) do
-            local n = _normalizeName(tostring(v or ""))
-            if n then _state.players[n] = nil end
+            local n = _normalizeNameForLegacy(tostring(v or ""))
+            if n then
+                nextByName[n] = nil
+            end
         end
     end
 
-    local after = _countMap(_state.players)
+    local ts = os.time()
+    local src = tostring(opts.source or "update")
 
-    _state.lastUpdatedTs = os.time()
-    _state.source = tostring(opts.source or "update")
-    _state.rawCount = after
-    _state.stats.updates = _state.stats.updates + 1
+    local entries = _rebuildEntriesArrayFromByName(nextByName)
+    local rawLines = _copyArray((_state.snapshot and _state.snapshot.rawLines) or {})
+    local snap = _buildSnapshotFromEntries(ts, src, rawLines, entries, nextByName)
 
-    local changed = (after ~= before)
+    local d = _computeDeltaByName(beforeByName, nextByName)
+    d.mode = "update"
 
-    if changed then
-        local added = (after > before) and (after - before) or 0
-        local removed = (before > after) and (before - after) or (0)
-        _emitUpdated({
-            ts = _state.lastUpdatedTs,
-            state = M.getState(),
-            source = _state.source,
-            delta = { added = added, removed = removed, total = after, mode = "update" },
-        })
+    -- Derive a legacy-ish rawCount
+    _state.rawCount = d.total
+
+    -- Only emit when state changed
+    if d.added > 0 or d.removed > 0 or d.changed > 0 then
+        return _applyNewSnapshot(snap, { source = src, rawCount = d.total }, d)
     end
+
+    -- Still update bookkeeping (SAFE), but no emit
+    _state.snapshot = snap
+    _state.players = _rebuildLegacyPlayersFromSnapshot(snap)
+    _state.lastUpdatedTs = os.time()
+    _state.source = src
+    _state.stats.updates = _state.stats.updates + 1
 
     return true, nil
 end
@@ -393,25 +832,31 @@ end
 function M.clear(opts)
     opts = (type(opts) == "table") and opts or {}
 
-    local before = _countMap(_state.players)
+    local beforeTotal = _countMap(_state.snapshot.byName or {})
 
-    _state.players = {}
-    _state.lastUpdatedTs = os.time()
-    _state.source = tostring(opts.source or "clear")
+    local ts = os.time()
+    local src = tostring(opts.source or "clear")
+
+    local snap = _buildSnapshotFromEntries(ts, src, {}, {}, {})
     _state.rawCount = 0
-    _state.stats.updates = _state.stats.updates + 1
 
-    if before > 0 then
-        _emitUpdated({
-            ts = _state.lastUpdatedTs,
-            state = M.getState(),
-            source = _state.source,
-            delta = { added = 0, removed = before, total = 0, mode = "clear" },
-        })
+    if beforeTotal > 0 then
+        local delta = { added = 0, removed = beforeTotal, changed = 0, total = 0, mode = "clear" }
+        return _applyNewSnapshot(snap, { source = src, rawCount = 0 }, delta)
     end
 
+    -- No emit if already empty
+    _state.snapshot = snap
+    _state.players = {}
+    _state.lastUpdatedTs = os.time()
+    _state.source = src
+    _state.stats.updates = _state.stats.updates + 1
     return true, nil
 end
+
+-- ############################################################
+-- Ingestion (WHO text/lines) -> Snapshot (v1.1)
+-- ############################################################
 
 function M.ingestWhoLines(lines, opts)
     opts = (type(opts) == "table") and opts or {}
@@ -419,76 +864,73 @@ function M.ingestWhoLines(lines, opts)
         return false, "lines must be table"
     end
 
-    local names = {}
-
-    for _, line in ipairs(lines) do
-        local s = tostring(line or "")
-        local n = _normalizeName(s)
-        if n then
-            names[n] = true
-        end
-    end
-
     _state.stats.ingests = _state.stats.ingests + 1
 
     local mode = (opts.merge == true) and "merge" or "replace"
+    local src = tostring(opts.source or "ingestWhoLines")
+    local ts = os.time()
 
-    local beforeMap = _state.players
-    local beforeCount = _countMap(beforeMap)
-
-    local afterMap = {}
-    if mode == "merge" then
-        -- merge = add-only
-        afterMap = _copyTable(beforeMap)
-        for n, _ in pairs(names) do
-            afterMap[n] = true
-        end
-    else
-        -- replace = authoritative snapshot
-        afterMap = names
+    local rawLines = {}
+    for i = 1, #lines do
+        rawLines[#rawLines + 1] = tostring(lines[i] or "")
     end
 
-    local afterCount = _countMap(afterMap)
+    local parsedEntries = {}
+    local byNameNew = {}
+    local parsedCount = 0
 
-    local added = 0
-    local removed = 0
-
-    if mode == "merge" then
-        for n, _ in pairs(afterMap) do
-            if beforeMap[n] ~= true then
-                added = added + 1
-            end
-        end
-        removed = 0
-    else
-        for n, _ in pairs(afterMap) do
-            if beforeMap[n] ~= true then
-                added = added + 1
-            end
-        end
-        for n, _ in pairs(beforeMap) do
-            if afterMap[n] ~= true then
-                removed = removed + 1
-            end
+    for i = 1, #rawLines do
+        local line = rawLines[i]
+        local e = _parseWhoLineToEntry(line)
+        if e and type(e.name) == "string" and e.name ~= "" then
+            parsedCount = parsedCount + 1
+            parsedEntries[#parsedEntries + 1] = e
+            byNameNew[e.name] = e -- last wins
         end
     end
 
-    _state.players = afterMap
+    local beforeByName = (type(_state.snapshot.byName) == "table") and _state.snapshot.byName or {}
+    local nextByName = {}
+
+    if mode == "merge" then
+        nextByName = _copyTable(beforeByName)
+        for name, e in pairs(byNameNew) do
+            nextByName[name] = e
+        end
+    else
+        nextByName = byNameNew
+    end
+
+    local entries = _rebuildEntriesArrayFromByName(nextByName)
+
+    local nextRawLines = rawLines
+    if mode == "merge" then
+        -- best-effort: keep history by concatenating previous rawLines
+        local prev = (type(_state.snapshot.rawLines) == "table") and _state.snapshot.rawLines or {}
+        nextRawLines = _copyArray(prev)
+        for i = 1, #rawLines do
+            nextRawLines[#nextRawLines + 1] = rawLines[i]
+        end
+    end
+
+    local snap = _buildSnapshotFromEntries(ts, src, nextRawLines, entries, nextByName)
+
+    local d = _computeDeltaByName(beforeByName, nextByName)
+    d.mode = mode
+    d.rawCount = parsedCount
+
+    _state.rawCount = parsedCount
+
+    if d.added > 0 or d.removed > 0 or d.changed > 0 then
+        return _applyNewSnapshot(snap, { source = src, rawCount = parsedCount }, d)
+    end
+
+    -- No changes: still update snapshot bookkeeping (SAFE), but do not emit.
+    _state.snapshot = snap
+    _state.players = _rebuildLegacyPlayersFromSnapshot(snap)
     _state.lastUpdatedTs = os.time()
-    _state.source = tostring(opts.source or "ingestWhoLines")
-    _state.rawCount = _countMap(names)
+    _state.source = src
     _state.stats.updates = _state.stats.updates + 1
-
-    local changed = (added > 0) or (removed > 0)
-
-    if changed then
-        _emitUpdated({
-            ts = _state.lastUpdatedTs,
-            state = M.getState(),
-            source = _state.source,
-            delta = { added = added, removed = removed, total = afterCount, mode = mode, rawCount = _state.rawCount },
-        })
-    end
 
     return true, nil
 end
