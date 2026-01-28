@@ -29,10 +29,12 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-15C"
+M.VERSION = "v2026-01-28A"
 M.UI_ID = "sample_ui"
 
 local U = require("dwkit.ui.ui_base")
+local W = require("dwkit.ui.ui_window")
+local ListKit = require("dwkit.ui.ui_list_kit")
 
 local _state = {
     inited = false,
@@ -51,45 +53,55 @@ local function _out(line)
 end
 
 local function _ensureWidgets()
-    local ok, widgets, err = U.ensureWidgets(M.UI_ID, { "container", "label" }, function()
+    local ok, widgets, err = U.ensureWidgets(M.UI_ID, { "container", "label", "content", "panel" }, function()
         local G = U.getGeyser()
         if not G then
             return nil
         end
 
-        -- Create a simple container + label
-        local cname = "__DWKit_sample_ui_container"
-        local lname = "__DWKit_sample_ui_label"
-
-        local container = G.Container:new({
-            name = cname,
-            x = 30,
-            y = 80,
-            width = 280,
-            height = 60,
+        local bundle = W.create({
+            uiId = M.UI_ID,
+            title = "Sample UI",
+            x = 420,
+            y = 220,
+            width = 360,
+            height = 240,
+            padding = 6,
+            onClose = function(b)
+                if type(b) == "table" and type(b.frame) == "table" then
+                    U.safeHide(b.frame)
+                end
+            end,
         })
 
-        local label = G.Label:new({
-            name = lname,
+        if type(bundle) ~= "table" or type(bundle.frame) ~= "table" or type(bundle.content) ~= "table" then
+            return nil
+        end
+
+        local container = bundle.frame
+        local contentParent = bundle.content
+
+        local panel = G.Container:new({
+            name = "__DWKit_sample_ui_panel",
             x = 0,
             y = 0,
             width = "100%",
             height = "100%",
-        }, container)
+        }, contentParent)
 
-        -- Style (readable, obvious)
-        pcall(function()
-            label:setStyleSheet([[
-                background-color: rgba(0,0,0,180);
-                color: white;
-                border: 1px solid #888888;
-                padding-left: 8px;
-                padding-top: 8px;
-                font-size: 10pt;
-            ]])
-        end)
+        ListKit.applyPanelStyle(panel)
 
-        return { container = container, label = label }
+        local label = G.Label:new({
+            name = "__DWKit_sample_ui_label",
+            x = 0,
+            y = 0,
+            width = "100%",
+            height = "100%",
+        }, panel)
+
+        ListKit.applyTextLabelStyle(label)
+
+        return { container = container, content = contentParent, panel = panel, label = label }
     end)
 
     if not ok or type(widgets) ~= "table" then
@@ -97,6 +109,8 @@ local function _ensureWidgets()
     end
 
     _state.widgets.container = widgets.container
+    _state.widgets.content = widgets.content
+    _state.widgets.panel = widgets.panel
     _state.widgets.label = widgets.label
     return true, nil
 end
