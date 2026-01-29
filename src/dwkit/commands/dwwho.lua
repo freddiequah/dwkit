@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwwho
 -- Owner       : Commands
--- Version     : v2026-01-29C
+-- Version     : v2026-01-29D
 -- Purpose     :
 --   - Implements dwwho command handler (SAFE + GAME refresh capture).
 --   - Split out from dwkit.services.command_aliases (Phase 1 split).
@@ -42,10 +42,14 @@
 -- FIX (v2026-01-29C):
 --   - Watcher ON/OFF now toggles WhoStoreService auto-capture gate, so orphaned
 --     triggers cannot update snapshot when watcher is OFF.
+--
+-- FIX (v2026-01-29D):
+--   - When watcher header triggers fire, force-open auto-capture gate after resolving svc2,
+--     before starting capture (covers cases where require failed during watchEnable).
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-01-29C"
+M.VERSION = "v2026-01-29D"
 
 -- GLOBAL singleton key for watcher trigger IDs (survives reloads)
 local WATCH_SINGLETON_KEY = "DWKit_WHO_WATCH_SINGLETON"
@@ -710,6 +714,14 @@ local function _watchEnable()
             WATCH.lastErr = "WhoStoreService not available (auto-capture skipped)"
             return
         end
+
+        -- ensure gate is open even if require failed during watchEnable
+        pcall(function()
+            if type(svc2.setAutoCaptureEnabled) == "function" then
+                svc2.setAutoCaptureEnabled(true, { source = "dwwho:auto:watcher" })
+            end
+        end)
+
         -- IMPORTANT: do NOT override CAP.expectSource / CAP.expectVerbose (refresh sets these)
         _beginCaptureWithHeaderLine(svc2, "Players", {})
     end)
@@ -723,6 +735,14 @@ local function _watchEnable()
             WATCH.lastErr = "WhoStoreService not available (auto-capture skipped)"
             return
         end
+
+        -- ensure gate is open even if require failed during watchEnable
+        pcall(function()
+            if type(svc2.setAutoCaptureEnabled) == "function" then
+                svc2.setAutoCaptureEnabled(true, { source = "dwwho:auto:watcher" })
+            end
+        end)
+
         -- IMPORTANT: do NOT override CAP.expectSource / CAP.expectVerbose (refresh sets these)
         _beginCaptureWithHeaderLine(svc2, line, {})
     end)
