@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.whostore_service
 -- Owner       : Services
--- Version     : v2026-01-28A
+-- Version     : v2026-01-29C
 -- Purpose     :
 --   - SAFE WhoStore service (manual-only) to cache an authoritative WHO snapshot
 --     derived from parsing WHO output (No-GMCP compatible).
@@ -17,7 +17,7 @@
 --   - docs/WhoStore_Service_Contract_v1.0.md (v1.1)
 --   - Event: DWKit:Service:WhoStore:Updated
 --
--- Public API (v2026-01-28A) :
+-- Public API (v2026-01-29C) :
 --   - getVersion() -> string
 --   - getUpdatedEventName() -> string
 --   - onUpdated(handlerFn) -> boolean ok, any tokenOrNil, string|nil err
@@ -26,6 +26,10 @@
 --   - getSnapshot() -> Snapshot copy
 --   - getEntry(name) -> Entry|nil (copy)
 --   - getAllNames() -> array (sorted)
+--
+--   -- Auto capture gate (v2026-01-29C)
+--   - getAutoCaptureEnabled() -> boolean
+--   - setAutoCaptureEnabled(flag, opts?) -> boolean ok, string|nil err
 --
 --   -- Legacy compatibility (kept for now)
 --   - getState() -> table copy (includes players map)
@@ -53,11 +57,15 @@
 -- Fix (v2026-01-19C):
 --   - event_bus.emit() requires 3-arg signature: emit(eventName, payload, meta)
 --     Without meta, emit does not deliver (seen in live verification).
+--
+-- Fix (v2026-01-29C):
+--   - Auto-capture gate blocks dwwho:auto ingests when watcher is OFF, preventing
+--     orphaned triggers from updating snapshot.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-28A"
+M.VERSION = "v2026-01-29C"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -79,6 +87,9 @@ local _state = {
 
     -- Legacy compatibility cache (name -> true). Derived from snapshot.byName
     players = {},
+
+    -- Auto-capture gate: blocks dwwho:auto ingests when watcher is OFF
+    autoCaptureEnabled = true,
 
     lastUpdatedTs = nil, -- os.time()
     source = nil,        -- string
@@ -641,6 +652,17 @@ function M.onUpdated(handlerFn)
     return false, nil, maybeErr or tokenOrErr or "subscribe failed"
 end
 
+-- Auto capture gate (robust against orphan triggers)
+function M.getAutoCaptureEnabled()
+    return (_state.autoCaptureEnabled == true)
+end
+
+function M.setAutoCaptureEnabled(flag, opts)
+    opts = (type(opts) == "table") and opts or {}
+    _state.autoCaptureEnabled = (flag == true)
+    return true, nil
+end
+
 -- Docs-first snapshot API
 function M.getSnapshot()
     return _copySnapshot(_state.snapshot)
@@ -665,6 +687,9 @@ function M.getState()
 
         -- legacy player set view
         players = _copyTable(_state.players),
+
+        -- auto capture gate (debug)
+        autoCaptureEnabled = (_state.autoCaptureEnabled == true),
 
         -- legacy bookkeeping
         lastUpdatedTs = _state.lastUpdatedTs,
@@ -862,6 +887,11 @@ function M.ingestWhoLines(lines, opts)
     opts = (type(opts) == "table") and opts or {}
     if type(lines) ~= "table" then
         return false, "lines must be table"
+    end
+
+    -- Gate: if watcher OFF, ignore auto-capture ingests (orphan triggers safe)
+    if (_state.autoCaptureEnabled ~= true) and tostring(opts.source or "") == "dwwho:auto" then
+        return true, nil
     end
 
     _state.stats.ingests = _state.stats.ingests + 1
