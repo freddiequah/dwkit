@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-01-29A
+-- Version     : v2026-01-29C
 -- Purpose     :
 --   - SAFE RoomEntities UI (consumer-only) that renders a per-entity ROW LIST with
 --     sections: Players / Mobs / Items-Objects / Unknown.
@@ -19,11 +19,21 @@
 --   - RECOMMENDED TEST PIPELINE SUPPORT (NEW v2026-01-29A):
 --       * seedServiceFixture(opts) helper: seeds RoomEntitiesService via ingestFixture()
 --         (instead of calling UI._renderNow directly), so UI stays a pure consumer.
+--
+--   - FIX (v2026-01-29B):
+--       * WhoStore boost now supports case-insensitive byName lookup.
+--       * WhoStore boost now supports prefix phrases ("Scynox the adventurer" -> "Scynox")
+--         without refactoring service logic (best-effort, UI-only).
+--       * Prune orphaned overrides on each compute pass (keeps overrides in sync with data).
+--
+--   - FIX (v2026-01-29C):
+--       * Case-insensitive WhoStore boost now supports mixed-case byName keys (fallback scan).
+--       * Increase row/header heights + spacing to reduce overlap/glitch under ListKit styles.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-29A"
+M.VERSION = "v2026-01-29C"
 M.UI_ID = "roomentities_ui"
 M.id = M.UI_ID -- convenience alias (some tooling/debug expects ui.id)
 
@@ -147,6 +157,24 @@ local function _bucketKeyForMode(mode)
     if mode == "item" then return "items" end
     if mode == "unknown" then return "unknown" end
     return nil
+end
+
+local function _trim(s)
+    if type(s) ~= "string" then return "" end
+    return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function _normName(s)
+    s = _trim(s or "")
+    if s == "" then return "" end
+    return s:lower()
+end
+
+local function _firstWord(s)
+    s = _trim(s or "")
+    if s == "" then return "" end
+    local w = s:match("^([^%s]+)")
+    return tostring(w or "")
 end
 
 local function _getRoomEntitiesStateBestEffort()
@@ -450,6 +478,50 @@ local function _baseTypeForName(name, buckets)
     return "unknown"
 end
 
+local function _whoHasName(whoByName, name)
+    if type(whoByName) ~= "table" or type(name) ~= "string" or name == "" then
+        return false
+    end
+
+    -- Prefer exact, then direct lowercase key.
+    if whoByName[name] ~= nil then
+        return true
+    end
+
+    local lower = _normName(name)
+    if lower ~= "" and whoByName[lower] ~= nil then
+        return true
+    end
+
+    -- FIX (v2026-01-29C): mixed-case byName keys support (fallback scan).
+    -- WhoStore may store keys as "Gaidin" (not "gaidin"), so scan keys once.
+    if lower ~= "" then
+        for k, _ in pairs(whoByName) do
+            if type(k) == "string" and _normName(k) == lower then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+local function _whoHasPrefix(whoByName, phrase)
+    if type(whoByName) ~= "table" or type(phrase) ~= "string" or phrase == "" then
+        return false
+    end
+
+    -- Best-effort: treat "Scynox the adventurer" as known if "Scynox" is known.
+    local w = _firstWord(phrase)
+    if w ~= "" then
+        if _whoHasName(whoByName, w) then
+            return true
+        end
+    end
+
+    return false
+end
+
 local function _effectiveTypeForName(name, buckets, whoByName)
     local overrideMode = _state.overrides[name]
     if overrideMode and overrideMode ~= "auto" then
@@ -458,7 +530,10 @@ local function _effectiveTypeForName(name, buckets, whoByName)
     end
 
     if type(whoByName) == "table" and type(name) == "string" and name ~= "" then
-        if whoByName[name] ~= nil then
+        if _whoHasName(whoByName, name) then
+            return "players", true
+        end
+        if _whoHasPrefix(whoByName, name) then
             return "players", true
         end
     end
@@ -466,11 +541,30 @@ local function _effectiveTypeForName(name, buckets, whoByName)
     return _baseTypeForName(name, buckets), false
 end
 
+local function _pruneOrphanedOverrides(allNamesSet)
+    if type(_state.overrides) ~= "table" then
+        _state.overrides = {}
+        return
+    end
+    allNamesSet = (type(allNamesSet) == "table") and allNamesSet or {}
+
+    for name, mode in pairs(_state.overrides) do
+        if allNamesSet[name] ~= true then
+            _state.overrides[name] = nil
+        elseif mode == "auto" then
+            _state.overrides[name] = nil
+        end
+    end
+end
+
 local function _computeEffectiveLists(state)
     local buckets = _normalizeStateBuckets(state)
     local whoByName = _getWhoStoreByNameBestEffort()
 
     local all = _collectAllNamesFromBuckets(buckets)
+
+    -- Keep overrides aligned with the current dataset (prevents orphaned overrides after canonicalization).
+    _pruneOrphanedOverrides(all)
 
     local outLists = {
         players = {},
@@ -629,15 +723,15 @@ local function _renderRowsIntoRoot(root, effectiveLists)
 
     -- Layout robustness: prevent "bottom-cut" by giving labels enough height
     -- for padding, and by starting with a small top pad.
-    local TOP_PAD = 2
+    local TOP_PAD = 3
     local BOTTOM_PAD = 2
 
     local yCursor = TOP_PAD
-    local GAP = 2
+    local GAP = 3
 
-    -- Increased heights to accommodate ListKit styling padding (prevents clipping).
-    local HEADER_H = 26
-    local ROW_H = 24
+    -- Increased heights to accommodate ListKit styling padding (prevents clipping/overlap).
+    local HEADER_H = 30
+    local ROW_H = 28
 
     -- Best-effort clamp: if we can read root height, avoid placing beyond bottom.
     local availH = _getHeightBestEffort(root)
