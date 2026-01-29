@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-01-29D
+-- Version     : v2026-01-29E
 -- Purpose     :
 --   - SAFE RoomEntities UI (consumer-only) that renders a per-entity ROW LIST with
 --     sections: Players / Mobs / Items-Objects / Unknown.
@@ -29,11 +29,15 @@
 --   - FIX (v2026-01-29D):
 --       * WhoStore boost now uses WhoStoreService.getEntry(name) (case-insensitive),
 --         and no longer reads snapshot.byName directly (consumer hardening).
+--
+--   - FIX (v2026-01-29E):
+--       * When falling back to text view (or row render fails), hide listRoot to avoid
+--         overlapping/ghost UI elements.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-29D"
+M.VERSION = "v2026-01-29E"
 M.UI_ID = "roomentities_ui"
 M.id = M.UI_ID -- convenience alias (some tooling/debug expects ui.id)
 
@@ -912,12 +916,20 @@ function M._renderNow(state)
         if not okRows then
             usedRowUi = false
             lastErr = tostring(errRows or "row render failed")
+
+            -- Minimal safe fix: ensure listRoot is hidden when we fall back.
+            U.safeHide(_state.widgets.listRoot)
         else
             U.safeShow(_state.widgets.listRoot)
         end
     end
 
     if not usedRowUi then
+        -- Minimal safe fix: ensure listRoot is hidden in fallback path (prevents overlap/ghost UI).
+        if type(_state.widgets.listRoot) == "table" then
+            U.safeHide(_state.widgets.listRoot)
+        end
+
         U.safeShow(_state.widgets.label)
         local txt = _formatFallbackText(state, effectiveLists, overrideCount)
         _setLabelText(_state.widgets.label, txt)
