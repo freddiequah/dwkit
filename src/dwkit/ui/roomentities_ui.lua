@@ -1,14 +1,14 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-01-29C
+-- Version     : v2026-01-29D
 -- Purpose     :
 --   - SAFE RoomEntities UI (consumer-only) that renders a per-entity ROW LIST with
 --     sections: Players / Mobs / Items-Objects / Unknown.
 --   - Supports per-entity manual override cycle:
 --       auto -> player -> mob -> item -> unknown -> auto
 --   - Uses WhoStore as an authority signal (auto-mode boost): if a name exists in
---     WhoStore.byName, treat as player unless overridden.
+--     WhoStore (via getEntry()), treat as player unless overridden.
 --   - Creates a shared-frame window (ui_window + ui_theme) + list-style content.
 --   - Subscribes to RoomEntitiesService Updated (and WhoStore Updated best-effort)
 --     to re-render while visible.
@@ -21,19 +21,19 @@
 --         (instead of calling UI._renderNow directly), so UI stays a pure consumer.
 --
 --   - FIX (v2026-01-29B):
---       * WhoStore boost now supports case-insensitive byName lookup.
+--       * WhoStore boost now supports case-insensitive lookup.
 --       * WhoStore boost now supports prefix phrases ("Scynox the adventurer" -> "Scynox")
 --         without refactoring service logic (best-effort, UI-only).
 --       * Prune orphaned overrides on each compute pass (keeps overrides in sync with data).
 --
---   - FIX (v2026-01-29C):
---       * Case-insensitive WhoStore boost now supports mixed-case byName keys (fallback scan).
---       * Increase row/header heights + spacing to reduce overlap/glitch under ListKit styles.
+--   - FIX (v2026-01-29D):
+--       * WhoStore boost now uses WhoStoreService.getEntry(name) (case-insensitive),
+--         and no longer reads snapshot.byName directly (consumer hardening).
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-29C"
+M.VERSION = "v2026-01-29D"
 M.UI_ID = "roomentities_ui"
 M.id = M.UI_ID -- convenience alias (some tooling/debug expects ui.id)
 
@@ -164,12 +164,6 @@ local function _trim(s)
     return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
-local function _normName(s)
-    s = _trim(s or "")
-    if s == "" then return "" end
-    return s:lower()
-end
-
 local function _firstWord(s)
     s = _trim(s or "")
     if s == "" then return "" end
@@ -193,33 +187,12 @@ local function _getRoomEntitiesStateBestEffort()
     return {}
 end
 
-local function _getWhoStoreByNameBestEffort()
+local function _getWhoStoreServiceBestEffort()
     local okW, WS = _safeRequire("dwkit.services.whostore_service")
     if not okW or type(WS) ~= "table" then
         return nil
     end
-
-    local snap = nil
-    if type(WS.getSnapshot) == "function" then
-        local ok, v = pcall(WS.getSnapshot)
-        if ok and type(v) == "table" then snap = v end
-    end
-    if not snap and type(WS.getState) == "function" then
-        local ok, v = pcall(WS.getState)
-        if ok and type(v) == "table" then snap = v end
-    end
-
-    if type(snap) ~= "table" then return nil end
-
-    local byName = snap.byName
-    if type(byName) ~= "table" and type(snap.snapshot) == "table" then
-        byName = snap.snapshot.byName
-    end
-
-    if type(byName) == "table" then
-        return byName
-    end
-    return nil
+    return WS
 end
 
 local function _setLabelTextHtml(label, html)
@@ -478,43 +451,15 @@ local function _baseTypeForName(name, buckets)
     return "unknown"
 end
 
-local function _whoHasName(whoByName, name)
-    if type(whoByName) ~= "table" or type(name) ~= "string" or name == "" then
+local function _whoHasName(whoService, name)
+    if type(whoService) ~= "table" or type(name) ~= "string" or name == "" then
         return false
     end
 
-    -- Prefer exact, then direct lowercase key.
-    if whoByName[name] ~= nil then
-        return true
-    end
-
-    local lower = _normName(name)
-    if lower ~= "" and whoByName[lower] ~= nil then
-        return true
-    end
-
-    -- FIX (v2026-01-29C): mixed-case byName keys support (fallback scan).
-    -- WhoStore may store keys as "Gaidin" (not "gaidin"), so scan keys once.
-    if lower ~= "" then
-        for k, _ in pairs(whoByName) do
-            if type(k) == "string" and _normName(k) == lower then
-                return true
-            end
-        end
-    end
-
-    return false
-end
-
-local function _whoHasPrefix(whoByName, phrase)
-    if type(whoByName) ~= "table" or type(phrase) ~= "string" or phrase == "" then
-        return false
-    end
-
-    -- Best-effort: treat "Scynox the adventurer" as known if "Scynox" is known.
-    local w = _firstWord(phrase)
-    if w ~= "" then
-        if _whoHasName(whoByName, w) then
+    -- Consumer hardening: use WhoStoreService.getEntry (case-insensitive) rather than reading snapshot.byName.
+    if type(whoService.getEntry) == "function" then
+        local ok, e = pcall(whoService.getEntry, name)
+        if ok and e ~= nil then
             return true
         end
     end
@@ -522,18 +467,34 @@ local function _whoHasPrefix(whoByName, phrase)
     return false
 end
 
-local function _effectiveTypeForName(name, buckets, whoByName)
+local function _whoHasPrefix(whoService, phrase)
+    if type(whoService) ~= "table" or type(phrase) ~= "string" or phrase == "" then
+        return false
+    end
+
+    -- Best-effort: treat "Scynox the adventurer" as known if "Scynox" is known.
+    local w = _firstWord(phrase)
+    if w ~= "" then
+        if _whoHasName(whoService, w) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function _effectiveTypeForName(name, buckets, whoService)
     local overrideMode = _state.overrides[name]
     if overrideMode and overrideMode ~= "auto" then
         local forced = _bucketKeyForMode(overrideMode)
         if forced then return forced, false end
     end
 
-    if type(whoByName) == "table" and type(name) == "string" and name ~= "" then
-        if _whoHasName(whoByName, name) then
+    if type(whoService) == "table" and type(name) == "string" and name ~= "" then
+        if _whoHasName(whoService, name) then
             return "players", true
         end
-        if _whoHasPrefix(whoByName, name) then
+        if _whoHasPrefix(whoService, name) then
             return "players", true
         end
     end
@@ -559,7 +520,7 @@ end
 
 local function _computeEffectiveLists(state)
     local buckets = _normalizeStateBuckets(state)
-    local whoByName = _getWhoStoreByNameBestEffort()
+    local whoService = _getWhoStoreServiceBestEffort()
 
     local all = _collectAllNamesFromBuckets(buckets)
 
@@ -576,7 +537,7 @@ local function _computeEffectiveLists(state)
     local usedWhoBoost = false
 
     for name, _ in pairs(all) do
-        local effType, didBoost = _effectiveTypeForName(name, buckets, whoByName)
+        local effType, didBoost = _effectiveTypeForName(name, buckets, whoService)
         usedWhoBoost = usedWhoBoost or (didBoost == true)
 
         if effType == "players" then
