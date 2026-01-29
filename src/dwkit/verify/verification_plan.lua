@@ -3,7 +3,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-01-29E
+-- Version     : v2026-01-29F
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -17,7 +17,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-29E"
+M.VERSION = "v2026-01-29F"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -58,6 +58,42 @@ local SUITES = {
             "dwwho fixture basic",
             "dwwho list",
             "dwwho status",
+        },
+    },
+
+    -- NEW: Gate force-open on watcher header trigger (regression guard)
+    whostore_gate_force_open_on_header = {
+        title = "whostore_gate_force_open_on_header",
+        description = "Regression: if autoCaptureEnabled is forced false, manual WHO header trigger must force-open gate before capture/ingest (expect autoCaptureEnabled=true after).",
+        delay = 0.45,
+        steps = {
+            { cmd = "dwwho watch on", note = "Ensure watcher is ON so header triggers fire." },
+
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.whostore_service"); if type(S)=="table" and type(S.setAutoCaptureEnabled)=="function" then S.setAutoCaptureEnabled(false,{source="dwverify:force-close"}) end; print("[dwverify-whostore] forced autoCaptureEnabled=false") end',
+                note = "Force-close auto-capture gate (this is the precondition for regression guard).",
+            },
+
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.whostore_service"); if type(S)~="table" or type(S.getState)~="function" then error("WhoStoreService.getState missing") end; local st=S.getState(); _G.DWVERIFY_GATE_BASE_TS=st.lastUpdatedTs; print(string.format("[dwverify-whostore] baseline lastUpdatedTs=%s source=%s autoCaptureEnabled=%s", tostring(st.lastUpdatedTs), tostring(st.source), tostring(st.autoCaptureEnabled))) end',
+                note = "Record baseline lastUpdatedTs into _G (used for change assertion).",
+            },
+
+            {
+                cmd = "who",
+                delay = 0.90,
+                note = "Manual WHO: watcher header trigger must force-open gate and capture/ingest as dwwho:auto.",
+            },
+
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.whostore_service"); if type(S)~="table" or type(S.getState)~="function" then error("WhoStoreService.getState missing") end; local st=S.getState(); if st.autoCaptureEnabled~=true then error("Expected autoCaptureEnabled=true after manual who; got "..tostring(st.autoCaptureEnabled)) end; if tostring(st.source)~="dwwho:auto" then error("Expected source dwwho:auto after manual who; got "..tostring(st.source)) end; if st.lastUpdatedTs==nil then error("Expected lastUpdatedTs non-nil after manual who") end; local base=_G.DWVERIFY_GATE_BASE_TS; if base~=nil and tostring(st.lastUpdatedTs)==tostring(base) then error("Expected lastUpdatedTs to change after manual who; before="..tostring(base).." after="..tostring(st.lastUpdatedTs)) end; print(string.format("[dwverify-whostore] PASS gate-force-open autoCaptureEnabled=%s source=%s lastUpdatedTs=%s", tostring(st.autoCaptureEnabled), tostring(st.source), tostring(st.lastUpdatedTs))) end',
+                note = "ASSERT: gate was forced open + ingest happened (PASS/FAIL).",
+            },
+
+            { cmd = "dwwho status", note = "Human confirmation: should show autoCaptureEnabled=true and updated timestamp/source." },
         },
     },
 
