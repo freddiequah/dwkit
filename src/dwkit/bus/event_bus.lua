@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.event_bus
 -- Owner       : Bus
--- Version     : v2026-01-19B
+-- Version     : v2026-01-29D
 -- Purpose     :
 --   - SAFE internal event bus (in-process publish/subscribe).
 --   - Enforces: events MUST be registered in dwkit.bus.event_registry first.
@@ -23,10 +23,17 @@
 --         BUS:emit(eventName, payload)
 --         BUS:emit(payload, eventName)
 --
+--   - META FORWARDING (v2026-01-29D):
+--       emit(eventName, payload, meta?) forwards meta as 4th arg to handlers:
+--         handler(payload, eventName, token, meta)
+--       Backward compatible: existing handlers that accept 1-3 args still work.
+--       Tap handlers also receive meta as 4th arg:
+--         tap(payload, eventName, token, meta)
+--
 -- Public API  :
 --   - on(eventName, handlerFn) -> boolean ok, number|nil token, string|nil err
 --   - off(token) -> boolean ok, string|nil err
---   - emit(eventName, payload) -> boolean ok, number deliveredCount, table errors
+--   - emit(eventName, payload, meta?) -> boolean ok, number deliveredCount, table errors
 --   - tapOn(handlerFn) -> boolean ok, number|nil token, string|nil err
 --   - tapOff(token) -> boolean ok, string|nil err
 --   - getStats() -> table
@@ -40,7 +47,7 @@
 
 local M   = {}
 
-M.VERSION = "v2026-01-19B"
+M.VERSION = "v2026-01-29D"
 
 local ID  = require("dwkit.core.identity")
 local REG = require("dwkit.bus.event_registry")
@@ -65,7 +72,7 @@ local STATE = {
   subsByEvent   = {}, -- eventName -> { [token]=fn, ... }
 
   -- Tap subscriptions (observe every emitted registered event)
-  tapByToken    = {}, -- token -> fn(payload, eventName, token)
+  tapByToken    = {}, -- token -> fn(payload, eventName, token, meta)
   tapErrors     = 0,
 
   -- Stats
@@ -144,34 +151,36 @@ local function _norm_tapOff(a, b)
   return a
 end
 
-local function _norm_emit(a, b, c)
-  -- returns: eventName, payload
+local function _norm_emit(a, b, c, d)
+  -- returns: eventName, payload, meta
   -- Support:
-  --   emit(eventName, payload)
-  --   emit(payload, eventName)
-  --   :emit(eventName, payload)
-  --   :emit(payload, eventName)
+  --   emit(eventName, payload, meta?)
+  --   emit(payload, eventName, meta?)
+  --   :emit(eventName, payload, meta?)
+  --   :emit(payload, eventName, meta?)
+  --
+  -- NOTE: "meta" is optional and is forwarded to handlers as 4th arg.
   if _isSelfCall(a) then
     -- colon call
     if type(b) == "string" then
-      return b, c
+      return b, c, d
     end
     if type(b) == "table" and type(c) == "string" then
-      return c, b
+      return c, b, d
     end
     -- fall back (let validation error be meaningful)
-    return b, c
+    return b, c, d
   end
 
   -- dot call
   if type(a) == "string" then
-    return a, b
+    return a, b, c
   end
   if type(a) == "table" and type(b) == "string" then
-    return b, a
+    return b, a, c
   end
 
-  return a, b
+  return a, b, c
 end
 
 function M.on(a, b, c)
@@ -274,8 +283,8 @@ local function _snapshotBucket(bucket)
   return snap
 end
 
-function M.emit(a, b, c)
-  local eventName, payload = _norm_emit(a, b, c)
+function M.emit(a, b, c, d)
+  local eventName, payload, meta = _norm_emit(a, b, c, d)
 
   local ok, err = _validateEventName(eventName)
   if not ok then
@@ -293,7 +302,7 @@ function M.emit(a, b, c)
     local token    = rec.token
     local fn       = rec.fn
 
-    local okTap, _ = pcall(fn, payload, eventName, token)
+    local okTap, _ = pcall(fn, payload, eventName, token, meta)
     if not okTap then
       STATE.tapErrors = STATE.tapErrors + 1
       -- Tap is diagnostics-only; keep tap errors out of main emit() errors list.
@@ -314,7 +323,7 @@ function M.emit(a, b, c)
     local token           = rec.token
     local fn              = rec.fn
 
-    local okCall, callErr = pcall(fn, payload, eventName, token)
+    local okCall, callErr = pcall(fn, payload, eventName, token, meta)
     if okCall then
       delivered = delivered + 1
       STATE.delivered = STATE.delivered + 1

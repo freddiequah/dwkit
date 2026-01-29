@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwwho
 -- Owner       : Commands
--- Version     : v2026-01-28E
+-- Version     : v2026-01-29C
 -- Purpose     :
 --   - Implements dwwho command handler (SAFE + GAME refresh capture).
 --   - Split out from dwkit.services.command_aliases (Phase 1 split).
@@ -21,13 +21,34 @@
 --       dwwho watch on
 --       dwwho watch off
 --
--- Notes:
---   - Auto-capture is PASSIVE: it does not send gameplay commands.
---   - Auto-capture is QUIET by default (no spam output). Confirm via dwwho status/list.
+-- FIX (v2026-01-28G):
+--   - Capture filtering to avoid ingesting prompt / DWKit output / blank noise.
+--   - Footer detection now tolerates trailing text so capture finalizes reliably.
+--
+-- FIX (v2026-01-28H):
+--   - Refresh expectations now EXPIRE quickly, so manual "who" typed later does NOT
+--     get mislabeled as dwwho:refresh / verbose output.
+--
+-- FIX (v2026-01-29A):
+--   - Watcher is now a SINGLETON across reloads:
+--       * kills orphaned triggers from older module instances
+--       * prevents duplicate captures and wrong refresh source tagging
+--
+-- FIX (v2026-01-29B):
+--   - Capture cleanup leak patched:
+--       * ensure finalize/reset ALWAYS kills CAP triggers/timer even when verbose
+--         capture context lacks killTrigger/killTimer (watcher + refresh expectations path)
+--
+-- FIX (v2026-01-29C):
+--   - Watcher ON/OFF now toggles WhoStoreService auto-capture gate, so orphaned
+--     triggers cannot update snapshot when watcher is OFF.
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-01-28E"
+M.VERSION = "v2026-01-29C"
+
+-- GLOBAL singleton key for watcher trigger IDs (survives reloads)
+local WATCH_SINGLETON_KEY = "DWKit_WHO_WATCH_SINGLETON"
 
 -- Capture session state (shared by refresh + watcher)
 local CAP = {
@@ -42,6 +63,8 @@ local CAP = {
     expectSource = nil,     -- string|nil (e.g. "dwwho:refresh")
     expectVerbose = false,  -- boolean (refresh prints status; watcher default quiet)
     expectTimeoutSec = nil, -- number|nil
+    expectSetTs = nil,      -- os.time() when expectations were set (for expiry)
+    expectTtlSec = 2,       -- how long refresh expectations are valid (seconds)
 }
 
 -- Auto watcher install state
@@ -172,30 +195,62 @@ local function _mudletTempTimer(sec, fn)
     return nil
 end
 
+local function _clearExpectations()
+    CAP.expectSource = nil
+    CAP.expectVerbose = false
+    CAP.expectTimeoutSec = nil
+    CAP.expectSetTs = nil
+end
+
+local function _expireExpectationsIfStale()
+    if CAP.expectSource == nil and CAP.expectTimeoutSec == nil and CAP.expectVerbose ~= true then
+        return
+    end
+    local ttl = tonumber(CAP.expectTtlSec or 2) or 2
+    if ttl < 1 then ttl = 1 end
+    if ttl > 10 then ttl = 10 end
+
+    local now = os.time()
+    local setTs = tonumber(CAP.expectSetTs or 0) or 0
+    if setTs <= 0 then
+        -- if somehow set without timestamp, treat as stale and clear
+        _clearExpectations()
+        return
+    end
+
+    if (now - setTs) > ttl then
+        _clearExpectations()
+    end
+end
+
 local function _reset(C)
+    C = (type(C) == "table") and C or {}
+
     CAP.active = false
     CAP.started = false
     CAP.lines = nil
     CAP.startedAt = nil
 
-    if CAP.trigAny and type(C.killTrigger) == "function" then
-        pcall(C.killTrigger, CAP.trigAny)
+    -- FIX (v2026-01-29B): always have a killer path, even if ctx lacks killTrigger/killTimer
+    local killTrig = (type(C.killTrigger) == "function") and C.killTrigger or _mudletKillTrigger
+    local killTim = (type(C.killTimer) == "function") and C.killTimer or _mudletKillTimer
+
+    if CAP.trigAny then
+        pcall(killTrig, CAP.trigAny)
         CAP.trigAny = nil
     else
         CAP.trigAny = nil
     end
 
-    if CAP.timer and type(C.killTimer) == "function" then
-        pcall(C.killTimer, CAP.timer)
+    if CAP.timer then
+        pcall(killTim, CAP.timer)
         CAP.timer = nil
     else
         CAP.timer = nil
     end
 
     -- consume expectations after any session ends
-    CAP.expectSource = nil
-    CAP.expectVerbose = false
-    CAP.expectTimeoutSec = nil
+    _clearExpectations()
 end
 
 function M.reset()
@@ -203,11 +258,13 @@ function M.reset()
     CAP.started = false
     CAP.lines = nil
     CAP.startedAt = nil
+
+    if CAP.trigAny then _mudletKillTrigger(CAP.trigAny) end
+    if CAP.timer then _mudletKillTimer(CAP.timer) end
+
     CAP.trigAny = nil
     CAP.timer = nil
-    CAP.expectSource = nil
-    CAP.expectVerbose = false
-    CAP.expectTimeoutSec = nil
+    _clearExpectations()
 end
 
 local function _usage(C)
@@ -252,6 +309,17 @@ local function _printWatchStatus(C)
     C.out("  trigPlayers=" .. tostring(WATCH.trigPlayers or "nil"))
     C.out("  trigTotal=" .. tostring(WATCH.trigTotal or "nil"))
     C.out("  lastErr=" .. tostring(WATCH.lastErr or "nil"))
+
+    -- show singleton info (debugging duplicates)
+    local g = _G and _G[WATCH_SINGLETON_KEY] or nil
+    if type(g) == "table" then
+        C.out("[DWKit Who] watcher singleton")
+        C.out("  key=" .. tostring(WATCH_SINGLETON_KEY))
+        C.out("  installedBy=" .. tostring(g.installedBy or "nil"))
+        C.out("  trigPlayers=" .. tostring(g.trigPlayers or "nil"))
+        C.out("  trigTotal=" .. tostring(g.trigTotal or "nil"))
+        C.out("  installedAtTs=" .. tostring(g.installedAtTs or "nil"))
+    end
 end
 
 local function _printStatusBestEffort(C, svc)
@@ -279,6 +347,7 @@ local function _printStatusBestEffort(C, svc)
     C.out("  players=" .. tostring(n))
     C.out("  lastUpdatedTs=" .. tostring(st.lastUpdatedTs or "nil"))
     C.out("  source=" .. tostring(st.source or "nil"))
+    C.out("  autoCaptureEnabled=" .. tostring(st.autoCaptureEnabled))
 
     _printWatchStatus(C)
     _printRefreshGuardStatus(C)
@@ -340,7 +409,44 @@ end
 local function _looksLikeWhoFooter(line)
     if type(line) ~= "string" then return false end
     local t = _trim(line):lower()
-    return (t:match("^%d+%s+characters%s+displayed%.?$") ~= nil)
+    -- tolerate trailing text after the footer (e.g. if console prints append same line)
+    return (t:match("^%d+%s+characters%s+displayed%.?") ~= nil)
+end
+
+local function _isLikelyPromptLine(t)
+    -- Common Mudlet prompt shapes:
+    --   (i54) <812hp 100mp 83mv>
+    --   <812hp 100mp 83mv>
+    if type(t) ~= "string" then return false end
+    if t:match("^%(%w+%d*%)%s*<%d+hp") then return true end
+    if t:match("^<%d+hp") then return true end
+    return false
+end
+
+local function _isNoiseLine(line)
+    line = tostring(line or "")
+    local t = _trim(line)
+    if t == "" then return true end
+    if t:lower() == "who" then return true end
+    if _isLikelyPromptLine(t) then return true end
+    if t:match("^%[DWKit") then return true end
+    if t:match("^%[dwverify") then return true end
+    return false
+end
+
+local function _normalizeCapturedLine(line)
+    line = tostring(line or ""):gsub("\r", "")
+    local t = _trim(line)
+
+    -- If footer line has trailing text, keep only the canonical footer sentence.
+    if t:lower():match("^%d+%s+characters%s+displayed") then
+        local foot = t:match("^(%d+%s+characters%s+displayed%.?)")
+        if foot and foot ~= "" then
+            return foot
+        end
+    end
+
+    return line
 end
 
 local function _extractWhoFromText(text)
@@ -485,6 +591,9 @@ local function _beginCaptureWithHeaderLine(svc, headerLine, opts)
         return false, "capture inflight"
     end
 
+    -- If refresh expectations are stale, clear them so manual WHO stays quiet.
+    _expireExpectationsIfStale()
+
     local timeoutSec = tonumber(opts.timeoutSec or CAP.expectTimeoutSec or 5) or 5
     if timeoutSec < 2 then timeoutSec = 2 end
     if timeoutSec > 10 then timeoutSec = 10 end
@@ -492,9 +601,14 @@ local function _beginCaptureWithHeaderLine(svc, headerLine, opts)
     local source = tostring(opts.source or CAP.expectSource or "dwwho:auto")
     local verbose = (opts.verbose == true) or (CAP.expectVerbose == true)
 
-    -- Use a quiet ctx when verbose=false
-    local C = verbose and _getCtx({}) or
-        { out = _noop, err = _noop, killTrigger = _mudletKillTrigger, killTimer = _mudletKillTimer }
+    -- Build ctx that ALWAYS has killer functions (prevents orphan trigger/timer leak)
+    local C = _getCtx({})
+    C.killTrigger = _mudletKillTrigger
+    C.killTimer = _mudletKillTimer
+    if not verbose then
+        C.out = _noop
+        C.err = _noop
+    end
 
     -- hard dependency: need Mudlet trigger/timer APIs
     if type(tempRegexTrigger) ~= "function" or type(tempTimer) ~= "function" or type(killTrigger) ~= "function" or type(killTimer) ~= "function" then
@@ -504,12 +618,17 @@ local function _beginCaptureWithHeaderLine(svc, headerLine, opts)
 
     CAP.active = true
     CAP.started = true
-    CAP.lines = { tostring(headerLine or "") }
+    CAP.lines = { _trim(tostring(headerLine or "")) }
     CAP.startedAt = os.time()
 
     CAP.trigAny = tempRegexTrigger([[^(.*)$]], function()
         if not CAP.active then return end
         local line = (matches and matches[2]) and tostring(matches[2]) or ""
+        line = _normalizeCapturedLine(line)
+
+        if _isNoiseLine(line) then
+            return
+        end
 
         CAP.lines[#CAP.lines + 1] = line
 
@@ -524,11 +643,34 @@ local function _beginCaptureWithHeaderLine(svc, headerLine, opts)
     end)
 
     -- consume expectations once capture begins
-    CAP.expectSource = nil
-    CAP.expectVerbose = false
-    CAP.expectTimeoutSec = nil
+    _clearExpectations()
 
     return true, nil
+end
+
+-- Kill orphaned watcher triggers from older module instances (singleton enforcement)
+local function _singletonKillOrphans()
+    if type(_G) ~= "table" then return end
+    local g = _G[WATCH_SINGLETON_KEY]
+    if type(g) ~= "table" then return end
+
+    local tp = g.trigPlayers
+    local tt = g.trigTotal
+
+    if tp then _mudletKillTrigger(tp) end
+    if tt then _mudletKillTrigger(tt) end
+
+    _G[WATCH_SINGLETON_KEY] = nil
+end
+
+local function _singletonRecord(trigPlayers, trigTotal)
+    if type(_G) ~= "table" then return end
+    _G[WATCH_SINGLETON_KEY] = {
+        installedBy = tostring(M.VERSION or "?"),
+        installedAtTs = os.time(),
+        trigPlayers = trigPlayers,
+        trigTotal = trigTotal,
+    }
 end
 
 -- Install/Uninstall watcher triggers
@@ -542,11 +684,19 @@ local function _watchEnable()
         return false, WATCH.lastErr
     end
 
+    -- SINGLETON: kill any orphan triggers left behind by older module instances
+    _singletonKillOrphans()
+
     -- Resolve service now; if it fails later, we'll attempt again on header.
     local okSvc, svc = _safeRequire("dwkit.services.whostore_service")
     if not okSvc or type(svc) ~= "table" then
         -- still enable watcher; it will try require() again on capture start
         svc = nil
+    end
+
+    -- Open the service gate for dwwho:auto ingests
+    if type(svc) == "table" then
+        _callBestEffort(_getCtx({}), svc, "setAutoCaptureEnabled", true, { source = "cmd:dwwho:watch:on" })
     end
 
     WATCH.enabled = true
@@ -560,7 +710,8 @@ local function _watchEnable()
             WATCH.lastErr = "WhoStoreService not available (auto-capture skipped)"
             return
         end
-        _beginCaptureWithHeaderLine(svc2, "Players", { source = "dwwho:auto", verbose = false })
+        -- IMPORTANT: do NOT override CAP.expectSource / CAP.expectVerbose (refresh sets these)
+        _beginCaptureWithHeaderLine(svc2, "Players", {})
     end)
 
     WATCH.trigTotal = tempRegexTrigger([[^Total players:.*$]], function()
@@ -572,7 +723,8 @@ local function _watchEnable()
             WATCH.lastErr = "WhoStoreService not available (auto-capture skipped)"
             return
         end
-        _beginCaptureWithHeaderLine(svc2, line, { source = "dwwho:auto", verbose = false })
+        -- IMPORTANT: do NOT override CAP.expectSource / CAP.expectVerbose (refresh sets these)
+        _beginCaptureWithHeaderLine(svc2, line, {})
     end)
 
     if not WATCH.trigPlayers or not WATCH.trigTotal then
@@ -580,15 +732,30 @@ local function _watchEnable()
         return false, WATCH.lastErr
     end
 
+    -- Record singleton ownership so future reloads can kill these triggers
+    _singletonRecord(WATCH.trigPlayers, WATCH.trigTotal)
+
     return true, nil
 end
 
 local function _watchDisable()
+    -- Close the service gate so orphan triggers can't update snapshot
+    local okSvc, svc = _safeRequire("dwkit.services.whostore_service")
+    if okSvc and type(svc) == "table" then
+        _callBestEffort(_getCtx({}), svc, "setAutoCaptureEnabled", false, { source = "cmd:dwwho:watch:off" })
+    end
+
     if WATCH.trigPlayers then _mudletKillTrigger(WATCH.trigPlayers) end
     if WATCH.trigTotal then _mudletKillTrigger(WATCH.trigTotal) end
     WATCH.trigPlayers = nil
     WATCH.trigTotal = nil
     WATCH.enabled = false
+
+    -- clear global singleton record (if it points at our triggers or any record exists)
+    if type(_G) == "table" and type(_G[WATCH_SINGLETON_KEY]) == "table" then
+        _G[WATCH_SINGLETON_KEY] = nil
+    end
+
     return true, nil
 end
 
@@ -635,6 +802,7 @@ local function _startCapture(C, svc, opts)
         CAP.expectSource = "dwwho:refresh"
         CAP.expectVerbose = true
         CAP.expectTimeoutSec = timeoutSec
+        CAP.expectSetTs = os.time()
 
         C.out("[DWKit Who] refresh: sending 'who' (watcher will capture output)...")
         pcall(sendFn, "who")
@@ -661,9 +829,15 @@ local function _startCapture(C, svc, opts)
     CAP.trigAny = C.tempRegexTrigger([[^(.*)$]], function()
         if not CAP.active then return end
         local line = (matches and matches[2]) and tostring(matches[2]) or ""
+        line = _normalizeCapturedLine(line)
+
+        if _isNoiseLine(line) then
+            return
+        end
 
         if not CAP.started then
-            if line == "Players" or line:match("^Total players:") then
+            local t = _trim(line)
+            if t == "Players" or t:match("^Total players:") then
                 CAP.started = true
             else
                 return
@@ -1066,7 +1240,7 @@ function M.dispatch(ctx, a, b, c)
     _dispatchCore(ctx, a, b, c)
 end
 
--- Best-effort: enable watcher automatically when running in Mudlet
+-- Best-effort: enable watcher automatically when running inside Mudlet
 _autoEnableWatcherBestEffort()
 
 return M

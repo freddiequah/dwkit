@@ -3,7 +3,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-01-28F
+-- Version     : v2026-01-29A
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -17,7 +17,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-28F"
+M.VERSION = "v2026-01-29A"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -83,27 +83,97 @@ local SUITES = {
     whostore_live_refresh_capture = {
         title = "whostore_live_refresh_capture",
         description =
-        "E2E live: watcher ON + guarded refresh + single WHO send + verify capture + list/status (controlled)",
+        "E2E live: watcher ON + guarded refresh (refresh sends WHO) + verify capture + list/status (controlled)",
         delay = 0.45,
         steps = {
             { cmd = "dwwho watch status", note = "Ensure watcher is enabled before doing any live capture." },
 
             {
                 cmd = "dwwho refresh",
-                note = "Trigger a guarded refresh (may skip if cooldown is active).",
+                note =
+                "Trigger a guarded refresh (may skip if cooldown is active). Refresh sends WHO; watcher should capture.",
                 expect = "refresh guard should show lastRefreshAttemptTs updated OR lastSkipReason set (cooldown).",
             },
-
-            { cmd = "who",                note = "Single WHO send to feed watcher triggers and update WhoStore snapshot." },
 
             {
                 cmd = "dwwho",
                 note = "Expect WhoStore summary to reflect latest capture (players count may be 0 if nobody online).",
             },
 
-            { cmd = "dwwho list",   note = "If players exist, expect parsed entries listed (names/classes/etc per contract)." },
+            { cmd = "dwwho list",         note = "If players exist, expect parsed entries listed (names/classes/etc per contract)." },
 
-            { cmd = "dwwho status", note = "Human confirmation: refresh guard + watcher lastErr=nil; source should reflect latest update." },
+            { cmd = "dwwho status",       note = "Human confirmation: refresh guard + watcher lastErr=nil; source should reflect latest update." },
+        },
+    },
+
+    -- NEW: Expectations expiry check (refresh expectations MUST NOT tag later manual 'who')
+    whostore_manual_who_after_refresh = {
+        title = "whostore_manual_who_after_refresh",
+        description =
+        "Expiry check: do refresh, wait >2s (expectations TTL), then manual 'who' must be captured as dwwho:auto (NOT refresh).",
+        delay = 0.45,
+        steps = {
+            { cmd = "dwwho watch status", note = "Ensure watcher is enabled (auto-capture active)." },
+
+            {
+                cmd = "dwwho refresh",
+                delay = 2.60, -- wait after refresh so CAP.expectTtlSec (2s) expires before the manual who
+                note = "Do refresh (source should be dwwho:refresh). Then wait >2s so refresh expectations expire.",
+            },
+
+            {
+                cmd = "who",
+                delay = 0.80, -- allow watcher capture + ingest to complete
+                note = "Manual WHO after TTL expiry: should be captured/ingested as dwwho:auto (quiet).",
+            },
+
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.whostore_service"); if type(S)~="table" or type(S.getState)~="function" then error("WhoStoreService.getState missing") end; local st=S.getState(); local src=st.source; if tostring(src)~="dwwho:auto" then error("Expected source dwwho:auto after manual who; got "..tostring(src)) end end',
+                note = "Assert: WhoStore source is dwwho:auto after manual who (FAIL if still dwwho:refresh).",
+            },
+
+            { cmd = "dwwho status",       note = "Human confirmation: source should show dwwho:auto now." },
+        },
+    },
+
+    -- NEW: Watch OFF must stop ingesting manual WHO (no snapshot change)
+    whostore_watch_off_no_ingest = {
+        title = "whostore_watch_off_no_ingest",
+        description =
+        "Watcher off: record lastUpdatedTs, disable watcher, manual 'who' should NOT update WhoStore; then re-enable watcher.",
+        delay = 0.45,
+        steps = {
+            { cmd = "dwwho watch on",  note = "Ensure watcher is ON before setting baseline." },
+
+            {
+                cmd = "dwwho refresh",
+                delay = 0.80, -- let refresh capture + ingest settle
+                note = "Create a known baseline snapshot via refresh (source=dwwho:refresh).",
+            },
+
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.whostore_service"); if type(S)~="table" or type(S.getState)~="function" then error("WhoStoreService.getState missing") end; local st=S.getState(); _G.DWVERIFY_WHO_TS=st.lastUpdatedTs; _G.DWVERIFY_WHO_SRC=st.source; print(string.format("[dwverify-whostore] baseline lastUpdatedTs=%s source=%s", tostring(_G.DWVERIFY_WHO_TS), tostring(_G.DWVERIFY_WHO_SRC))) end',
+                note = "Record baseline lastUpdatedTs + source into _G (used for later assert).",
+            },
+
+            { cmd = "dwwho watch off", note = "Disable watcher. Manual 'who' should no longer ingest." },
+
+            {
+                cmd = "who",
+                delay = 0.80, -- allow any accidental ingest to happen (should NOT)
+                note = "Manual WHO while watcher OFF: should NOT update WhoStore.",
+            },
+
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.whostore_service"); if type(S)~="table" or type(S.getState)~="function" then error("WhoStoreService.getState missing") end; local st=S.getState(); if tostring(st.lastUpdatedTs)~=tostring(_G.DWVERIFY_WHO_TS) then error("Expected lastUpdatedTs unchanged while watcher OFF; before="..tostring(_G.DWVERIFY_WHO_TS).." after="..tostring(st.lastUpdatedTs)) end; if tostring(st.source)~=tostring(_G.DWVERIFY_WHO_SRC) then error("Expected source unchanged while watcher OFF; before="..tostring(_G.DWVERIFY_WHO_SRC).." after="..tostring(st.source)) end end',
+                note = "Assert: lastUpdatedTs + source unchanged while watcher OFF (FAIL if changed).",
+            },
+
+            { cmd = "dwwho watch on", note = "Re-enable watcher for normal operation." },
+            { cmd = "dwwho status",   note = "Human confirmation: watcher enabled; state stable." },
         },
     },
 
@@ -127,20 +197,24 @@ local SUITES = {
         delay = 0.25,
         steps = {
             {
-                cmd = 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("presence_ui", true, {noSave=true}); gs.setVisible("presence_ui", true, {noSave=true}); local UI=require("dwkit.ui.presence_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] presence_ui visible=%s enabled=%s hasContainer=%s hasLabel=%s", tostring(s.visible), tostring(s.enabled), tostring(s.widgets and s.widgets.hasContainer), tostring(s.widgets and s.widgets.hasLabel))) end',
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("presence_ui", true, {noSave=true}); gs.setVisible("presence_ui", true, {noSave=true}); local UI=require("dwkit.ui.presence_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] presence_ui visible=%s enabled=%s hasContainer=%s hasLabel=%s", tostring(s.visible), tostring(s.enabled), tostring(s.widgets and s.widgets.hasContainer), tostring(s.widgets and s.widgets.hasLabel))) end',
                 note = "Show presence_ui via gui_settings + apply(); print state.",
             },
             {
-                cmd = 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("presence_ui", true, {noSave=true}); gs.setVisible("presence_ui", false, {noSave=true}); local UI=require("dwkit.ui.presence_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] presence_ui visible=%s enabled=%s", tostring(s.visible), tostring(s.enabled))) end',
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("presence_ui", true, {noSave=true}); gs.setVisible("presence_ui", false, {noSave=true}); local UI=require("dwkit.ui.presence_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] presence_ui visible=%s enabled=%s", tostring(s.visible), tostring(s.enabled))) end',
                 note = "Hide presence_ui via gui_settings + apply(); print state.",
             },
 
             {
-                cmd = 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", true, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] roomentities_ui visible=%s enabled=%s hasContainer=%s hasLabel=%s", tostring(s.visible), tostring(s.enabled), tostring(s.widgets and s.widgets.hasContainer), tostring(s.widgets and s.widgets.hasLabel))) end',
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", true, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] roomentities_ui visible=%s enabled=%s hasContainer=%s hasLabel=%s", tostring(s.visible), tostring(s.enabled), tostring(s.widgets and s.widgets.hasContainer), tostring(s.widgets and s.widgets.hasLabel))) end',
                 note = "Show roomentities_ui via gui_settings + apply(); print state.",
             },
             {
-                cmd = 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", false, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] roomentities_ui visible=%s enabled=%s", tostring(s.visible), tostring(s.enabled))) end',
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", false, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] roomentities_ui visible=%s enabled=%s", tostring(s.visible), tostring(s.enabled))) end',
                 note = "Hide roomentities_ui via gui_settings + apply(); print state.",
             },
         },
@@ -153,11 +227,13 @@ local SUITES = {
         delay = 0.25,
         steps = {
             {
-                cmd = 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", true, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); local lr=s.lastRender or {}; local c=lr.counts or {}; print(string.format("[dwverify-roomentities] visible=%s enabled=%s rowUi=%s whoBoost=%s overrides=%s players=%s mobs=%s items=%s unknown=%s err=%s", tostring(s.visible), tostring(s.enabled), tostring(lr.usedRowUi), tostring(lr.usedWhoStoreBoost), tostring((s.overrides and s.overrides.activeOverrideCount) or 0), tostring(c.players), tostring(c.mobs), tostring(c.items), tostring(c.unknown), tostring(lr.lastError))) end',
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", true, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); local lr=s.lastRender or {}; local c=lr.counts or {}; print(string.format("[dwverify-roomentities] visible=%s enabled=%s rowUi=%s whoBoost=%s overrides=%s players=%s mobs=%s items=%s unknown=%s err=%s", tostring(s.visible), tostring(s.enabled), tostring(lr.usedRowUi), tostring(lr.usedWhoStoreBoost), tostring((s.overrides and s.overrides.activeOverrideCount) or 0), tostring(c.players), tostring(c.mobs), tostring(c.items), tostring(c.unknown), tostring(lr.lastError))) end',
                 note = "Show roomentities_ui, render, and print lastRender counters.",
             },
             {
-                cmd = 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", false, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-roomentities] hide visible=%s enabled=%s", tostring(s.visible), tostring(s.enabled))) end',
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", false, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-roomentities] hide visible=%s enabled=%s", tostring(s.visible), tostring(s.enabled))) end',
                 note = "Hide roomentities_ui via gui_settings + apply(); print state.",
             },
         },

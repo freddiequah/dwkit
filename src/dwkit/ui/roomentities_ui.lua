@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-01-28H
+-- Version     : v2026-01-29A
 -- Purpose     :
 --   - SAFE RoomEntities UI (consumer-only) that renders a per-entity ROW LIST with
 --     sections: Players / Mobs / Items-Objects / Unknown.
@@ -13,11 +13,17 @@
 --   - Subscribes to RoomEntitiesService Updated (and WhoStore Updated best-effort)
 --     to re-render while visible.
 --   - No timers, no send(), no hidden automation.
+--   - IMPORTANT: caches the last rendered data state so override clicks re-render
+--     the same dataset (prevents clearing when RoomEntitiesService state is empty).
+--
+--   - RECOMMENDED TEST PIPELINE SUPPORT (NEW v2026-01-29A):
+--       * seedServiceFixture(opts) helper: seeds RoomEntitiesService via ingestFixture()
+--         (instead of calling UI._renderNow directly), so UI stays a pure consumer.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-28H"
+M.VERSION = "v2026-01-29A"
 M.UI_ID = "roomentities_ui"
 M.id = M.UI_ID -- convenience alias (some tooling/debug expects ui.id)
 
@@ -217,6 +223,10 @@ local _state = {
 
     overrides = {},
 
+    -- Cache last data state rendered (service or injected) so override clicks can re-render
+    -- without depending on RoomEntitiesService being populated.
+    lastDataState = nil,
+
     lastRender = {
         counts = { players = 0, mobs = 0, items = 0, unknown = 0 },
         overrideCount = 0,
@@ -288,83 +298,84 @@ local function _tryCreateRowUiRoot(parent)
 end
 
 local function _ensureWidgets()
-    local ok, widgets, err = U.ensureWidgets(M.UI_ID, { "container", "label", "content", "panel", "listRoot" }, function()
-        local G = U.getGeyser()
-        if not G then
-            return nil
-        end
+    local ok, widgets, err = U.ensureWidgets(M.UI_ID, { "container", "label", "content", "panel", "listRoot" },
+        function()
+            local G = U.getGeyser()
+            if not G then
+                return nil
+            end
 
-        local bundle = W.create({
-            uiId = M.UI_ID,
-            title = "Room Entities",
-            x = 30,
-            y = 310,
-            width = 360,
-            height = 260,
-            padding = 6,
-            onClose = function(b)
-                if type(b) == "table" and type(b.frame) == "table" then
-                    U.safeHide(b.frame)
-                end
-            end,
-        })
+            local bundle = W.create({
+                uiId = M.UI_ID,
+                title = "Room Entities",
+                x = 30,
+                y = 310,
+                width = 360,
+                height = 260,
+                padding = 6,
+                onClose = function(b)
+                    if type(b) == "table" and type(b.frame) == "table" then
+                        U.safeHide(b.frame)
+                    end
+                end,
+            })
 
-        if type(bundle) ~= "table" or type(bundle.frame) ~= "table" or type(bundle.content) ~= "table" then
-            return nil
-        end
+            if type(bundle) ~= "table" or type(bundle.frame) ~= "table" or type(bundle.content) ~= "table" then
+                return nil
+            end
 
-        local container = bundle.frame
-        local contentParent = bundle.content
+            local container = bundle.frame
+            local contentParent = bundle.content
 
-        local TITLE_INSET = 12
+            local TITLE_INSET = 12
 
-        local panel = nil
-        local okPanel = pcall(function()
-            panel = G.Container:new({
-                name = "__DWKit_roomentities_ui_panel",
+            local panel = nil
+            local okPanel = pcall(function()
+                panel = G.Container:new({
+                    name = "__DWKit_roomentities_ui_panel",
+                    x = 0,
+                    y = TITLE_INSET,
+                    width = "100%",
+                    height = "100%-" .. tostring(TITLE_INSET),
+                }, contentParent)
+            end)
+
+            if not okPanel or type(panel) ~= "table" then
+                panel = G.Container:new({
+                    name = "__DWKit_roomentities_ui_panel",
+                    x = 0,
+                    y = TITLE_INSET,
+                    width = "100%",
+                    height = "100%",
+                }, contentParent)
+            end
+
+            ListKit.applyPanelStyle(panel)
+
+            local label = G.Label:new({
+                name = "__DWKit_roomentities_ui_label",
                 x = 0,
-                y = TITLE_INSET,
-                width = "100%",
-                height = "100%-" .. tostring(TITLE_INSET),
-            }, contentParent)
-        end)
-
-        if not okPanel or type(panel) ~= "table" then
-            panel = G.Container:new({
-                name = "__DWKit_roomentities_ui_panel",
-                x = 0,
-                y = TITLE_INSET,
+                y = 0,
                 width = "100%",
                 height = "100%",
-            }, contentParent)
-        end
+            }, panel)
 
-        ListKit.applyPanelStyle(panel)
+            ListKit.applyTextLabelStyle(label)
 
-        local label = G.Label:new({
-            name = "__DWKit_roomentities_ui_label",
-            x = 0,
-            y = 0,
-            width = "100%",
-            height = "100%",
-        }, panel)
+            local okRoot, listRootOrErr = _tryCreateRowUiRoot(panel)
+            local listRoot = nil
+            if okRoot then
+                listRoot = listRootOrErr
+            end
 
-        ListKit.applyTextLabelStyle(label)
-
-        local okRoot, listRootOrErr = _tryCreateRowUiRoot(panel)
-        local listRoot = nil
-        if okRoot then
-            listRoot = listRootOrErr
-        end
-
-        return {
-            container = container,
-            content = contentParent,
-            panel = panel,
-            label = label,
-            listRoot = listRoot,
-        }
-    end)
+            return {
+                container = container,
+                content = contentParent,
+                panel = panel,
+                label = label,
+                listRoot = listRoot,
+            }
+        end)
 
     if not ok or type(widgets) ~= "table" then
         return false, err or "Failed to create widgets"
@@ -592,6 +603,22 @@ local function _wireLabelClickBestEffort(labelName, fn)
     end
 end
 
+local function _getHeightBestEffort(widget)
+    if type(widget) ~= "table" then return nil end
+
+    local candidates = { "get_height", "getHeight", "height" }
+    for _, fn in ipairs(candidates) do
+        if type(widget[fn]) == "function" then
+            local ok, v = pcall(widget[fn], widget)
+            if ok and tonumber(v) ~= nil then
+                return tonumber(v)
+            end
+        end
+    end
+
+    return nil
+end
+
 local function _renderRowsIntoRoot(root, effectiveLists)
     local G = U.getGeyser()
     if not G or type(root) ~= "table" then
@@ -600,16 +627,38 @@ local function _renderRowsIntoRoot(root, effectiveLists)
 
     _clearRenderedWidgets()
 
-    local yCursor = 0
-    local GAP = 1
-    local HEADER_H = 22
-    local ROW_H = 22
+    -- Layout robustness: prevent "bottom-cut" by giving labels enough height
+    -- for padding, and by starting with a small top pad.
+    local TOP_PAD = 2
+    local BOTTOM_PAD = 2
+
+    local yCursor = TOP_PAD
+    local GAP = 2
+
+    -- Increased heights to accommodate ListKit styling padding (prevents clipping).
+    local HEADER_H = 26
+    local ROW_H = 24
+
+    -- Best-effort clamp: if we can read root height, avoid placing beyond bottom.
+    local availH = _getHeightBestEffort(root)
+
+    local function canPlace(h)
+        h = tonumber(h) or 0
+        if type(availH) ~= "number" then
+            return true
+        end
+        return (yCursor + h + BOTTOM_PAD) <= availH
+    end
 
     local function placeNext(h)
         yCursor = yCursor + (tonumber(h) or 0) + GAP
     end
 
     local function addHeader(text)
+        if not canPlace(HEADER_H) then
+            return nil, "insufficient height (header)"
+        end
+
         local h = G.Label:new({
             name = "__DWKit_roomentities_ui_hdr_" .. tostring(os.time()) .. "_" .. tostring(math.random(1000, 9999)),
             x = 0,
@@ -622,17 +671,22 @@ local function _renderRowsIntoRoot(root, effectiveLists)
         _setLabelText(h, tostring(text))
         _state.widgets.rendered[#_state.widgets.rendered + 1] = h
         placeNext(HEADER_H)
-        return h
+        return h, nil
     end
 
     local function addRow(name)
+        if not canPlace(ROW_H) then
+            return false, "insufficient height (row)"
+        end
+
         name = tostring(name or "")
         local row = nil
 
         pcall(function()
             if type(G.HBox) == "table" and type(G.HBox.new) == "function" then
                 row = G.HBox:new({
-                    name = "__DWKit_roomentities_ui_row_" .. tostring(os.time()) .. "_" .. tostring(math.random(1000, 9999)),
+                    name = "__DWKit_roomentities_ui_row_" ..
+                        tostring(os.time()) .. "_" .. tostring(math.random(1000, 9999)),
                     x = 0,
                     y = yCursor,
                     width = "100%",
@@ -691,12 +745,19 @@ local function _renderRowsIntoRoot(root, effectiveLists)
                 _state.overrides[name] = nil
             end
 
-            _out(string.format("[DWKit UI] roomentities_ui override name=%s mode=%s", tostring(name), tostring(_state.overrides[name] or "auto")))
-            M._renderFromService()
+            _out(string.format("[DWKit UI] roomentities_ui override name=%s mode=%s", tostring(name),
+                tostring(_state.overrides[name] or "auto")))
+
+            local st = _state.lastDataState
+            if type(st) == "table" then
+                M._renderNow(st)
+            else
+                M._renderFromService()
+            end
         end)
 
         placeNext(ROW_H)
-        return true
+        return true, nil
     end
 
     local function addSection(title, list)
@@ -707,26 +768,43 @@ local function _renderRowsIntoRoot(root, effectiveLists)
         if n == 0 then
             hdr = hdr .. " (empty)"
         end
-        addHeader(hdr)
+
+        local okHdr, errHdr = addHeader(hdr)
+        if not okHdr then
+            return false, errHdr or "header failed"
+        end
 
         if n == 0 then
-            return
+            return true, nil
         end
 
         for i = 1, n do
-            addRow(list[i])
+            local okRow, errRow = addRow(list[i])
+            if not okRow then
+                -- Stop rendering further rows if we run out of space; do not overlap.
+                return true, nil
+            end
         end
+
+        return true, nil
     end
 
-    addSection("Players", effectiveLists.players)
-    addSection("Mobs", effectiveLists.mobs)
-    addSection("Items-Objects", effectiveLists.items)
-    addSection("Unknown", effectiveLists.unknown)
+    local okA = addSection("Players", effectiveLists.players)
+    local okB = addSection("Mobs", effectiveLists.mobs)
+    local okC = addSection("Items-Objects", effectiveLists.items)
+    local okD = addSection("Unknown", effectiveLists.unknown)
+
+    if not okA or not okB or not okC or not okD then
+        -- Best-effort: we still consider render "ok" because a partial render is safer
+        -- than overlapping/clipping. The fallback text view covers deeper inspection.
+        return true, nil
+    end
 
     return true, nil
 end
 
 function M.getModuleVersion() return M.VERSION end
+
 function M.getUiId() return M.UI_ID end
 
 function M.init(opts)
@@ -761,6 +839,9 @@ end
 
 function M._renderNow(state)
     state = (type(state) == "table") and state or {}
+
+    -- Cache last rendered data state so override clicks can re-render the same dataset.
+    _state.lastDataState = state
 
     local effectiveLists, overrideCount, usedWhoBoost = _computeEffectiveLists(state)
 
@@ -802,6 +883,38 @@ end
 function M._renderFromService()
     local state = _getRoomEntitiesStateBestEffort()
     return M._renderNow(state)
+end
+
+-- NEW: Recommended test pipeline helper (seed the SERVICE, UI remains consumer-only).
+-- Use this instead of calling UI._renderNow directly in ad-hoc tests.
+function M.seedServiceFixture(opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    local okS, S = _safeRequire("dwkit.services.roomentities_service")
+    if not okS or type(S) ~= "table" then
+        return false, "RoomEntitiesService not available"
+    end
+
+    if type(S.ingestFixture) ~= "function" then
+        return false, "RoomEntitiesService.ingestFixture not available"
+    end
+
+    -- ensure deterministic default source if caller didn't provide
+    if type(opts.source) ~= "string" or opts.source == "" then
+        opts.source = "fixture:roomentities_ui"
+    end
+
+    local ok, err = S.ingestFixture(opts)
+    if not ok then
+        return false, tostring(err)
+    end
+
+    -- If UI is currently shown, re-render from service (subscribers should also fire).
+    if _state.enabled == true and _state.visible == true then
+        M._renderFromService()
+    end
+
+    return true, nil
 end
 
 local function _ensureRoomEntitiesSubscription()
