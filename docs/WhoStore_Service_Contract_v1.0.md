@@ -1,6 +1,6 @@
-# DWKit WhoStore Service Contract (v1.1)
+# DWKit WhoStore Service Contract (v1.2)
 
-Version: **v1.1**
+Version: **v1.2**
 Status: **Authoritative Contract**
 Scope: **DWKit SAFE WhoStore snapshot + parsing rules**
 
@@ -36,6 +36,10 @@ It MUST NOT send gameplay commands and MUST NOT automate actions.
 **Title text**
 - The portion of an Entry that represents the player's visible title or descriptive text (derived).
 - Used for best-effort validation when correlating WHO with room lines.
+
+**Canonical byName key**
+- The lowercase form of `Entry.name` after whitespace normalization.
+- Used as the only key form inside `Snapshot.byName`.
 
 ---
 
@@ -102,7 +106,7 @@ Fields stored:
   - Rule:
     - Detect known flags from text after the name
     - Store as a list (no duplicates)
-  - Known flags (v1.1):
+  - Known flags (v1.2):
     - `AFK`
     - `NH`
     - `idle` (including patterns like `(idle:19)`; details may vary)
@@ -122,14 +126,11 @@ Fields stored:
     - If the derived title becomes empty after removal, set to nil.
   - Purpose:
     - Best-effort validation when matching a room line to a WHO entry.
-    - Example WHO line:
-      - `[50 Cle] Snorrin ZZZZZVo tezzzz of Snert Industries (AFK) (NH)`
-      - `name = "Snorrin"`
-      - `extraText = "ZZZZZVo tezzzz of Snert Industries (AFK) (NH)"`
-      - `titleText = "ZZZZZVo tezzzz of Snert Industries"`
-    - Example room line:
-      - `Snorrin ZZZZZVo tezzzz of Snert Industries (AFK) is standing here.`
-      - A consumer MAY compare the `name` and `titleText` to validate it is the same player.
+  - Example WHO line:
+    - `[50 Cle] Snorrin ZZZZZVo tezzzz of Snert Industries (AFK) (NH)`
+    - `name = "Snorrin"`
+    - `extraText = "ZZZZZVo tezzzz of Snert Industries (AFK) (NH)"`
+    - `titleText = "ZZZZZVo tezzzz of Snert Industries"`
 
 - `rawLine`
   - Type: string
@@ -137,7 +138,7 @@ Fields stored:
     - Original raw line stored for debug, replay, and future parsing improvements
 
 Notes:
-- WhoStore MUST treat `name` as the primary lookup key.
+- WhoStore MUST treat `name` as the primary lookup identity.
 - WhoStore MUST update stored fields when new WHO snapshots show changed values (including `titleText`).
 
 ### 2.2 rankTag meaning rules (authoritative)
@@ -156,7 +157,7 @@ This rule is REQUIRED so future logic does not incorrectly assume staff lines ar
 
 ## 3) Parsing Rules
 
-### 3.1 Basic format assumption (v1.1)
+### 3.1 Basic format assumption (v1.2)
 
 Most lines follow:
 `[<rankTag>] <name> <optional extra text>`
@@ -242,6 +243,22 @@ WhoStore MUST expose snapshot data with the following structure.
   - MUST be consistent with `entries`
   - If duplicate names occur in `entries`, the last parsed occurrence MAY win in `byName`
 
+#### 4.1.1 byName key policy (NEW v1.2, NORMATIVE)
+
+- `Snapshot.byName` keys MUST be **canonical lowercase keys only**.
+- Canonical key definition:
+  - normalize whitespace in `Entry.name`
+  - then lowercase it
+- `Entry.name` MUST preserve the original/display case as parsed from WHO.
+- Consumers MUST treat `Snapshot.byName` keys as lowercase canonical and MUST NOT assume original case keys exist.
+
+Consumer guidance (recommended):
+- Preferred: use `getEntry(name)` (case-insensitive) rather than reading `Snapshot.byName` directly.
+- If a consumer is operating on a Snapshot copy and must index directly, it MUST use:
+  - `snapshot.byName[name:lower()]` (or equivalent canonicalization)
+
+---
+
 ### 4.2 Update semantics (authoritative)
 
 - A WhoStore update SHOULD be treated as a full snapshot replace by default.
@@ -258,13 +275,14 @@ Title change rule (normative):
 
 WhoStore MUST provide read access without exposing internal mutable tables.
 
-Minimum required APIs (v1.1):
+Minimum required APIs (v1.2):
 - `getSnapshot() -> Snapshot copy`
 - `getEntry(name) -> Entry|nil` (copy)
 - `getAllNames() -> array of string` (sorted, stable order)
 
-Notes:
-- `getEntry(name)` MUST retrieve from the canonical by-name index, not by scanning entries each time.
+Notes (NORMATIVE):
+- `getEntry(name)` MUST retrieve from the canonical by-name index (Snapshot.byName).
+- `getEntry(name)` MUST be **case-insensitive** (it MUST work for `"Gaidin"` and `"gaidin"` equally).
 - Returned tables MUST be defensive copies (or immutable views), so callers cannot mutate internal state.
 
 ---

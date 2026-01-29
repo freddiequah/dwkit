@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.whostore_service
 -- Owner       : Services
--- Version     : v2026-01-29C
+-- Version     : v2026-01-29D
 -- Purpose     :
 --   - SAFE WhoStore service (manual-only) to cache an authoritative WHO snapshot
 --     derived from parsing WHO output (No-GMCP compatible).
@@ -17,15 +17,15 @@
 --   - docs/WhoStore_Service_Contract_v1.0.md (v1.1)
 --   - Event: DWKit:Service:WhoStore:Updated
 --
--- Public API (v2026-01-29C) :
+-- Public API (v2026-01-29D) :
 --   - getVersion() -> string
 --   - getUpdatedEventName() -> string
 --   - onUpdated(handlerFn) -> boolean ok, any tokenOrNil, string|nil err
 --
 --   -- Docs-first APIs (v1.1)
 --   - getSnapshot() -> Snapshot copy
---   - getEntry(name) -> Entry|nil (copy)
---   - getAllNames() -> array (sorted)
+--   - getEntry(name) -> Entry|nil (copy)   -- COMPAT: case-insensitive lookup
+--   - getAllNames() -> array (sorted display names)
 --
 --   -- Auto capture gate (v2026-01-29C)
 --   - getAutoCaptureEnabled() -> boolean
@@ -38,7 +38,7 @@
 --   - clear(opts?) -> boolean ok, string|nil err
 --   - ingestWhoLines(lines, opts?) -> boolean ok, string|nil err
 --   - ingestWhoText(text, opts?) -> boolean ok, string|nil err
---   - hasPlayer(name) -> boolean
+--   - hasPlayer(name) -> boolean   -- COMPAT: case-insensitive
 --   - getAllPlayers() -> array (sorted)   -- alias of getAllNames()
 --
 -- ingestWho* behavior:
@@ -61,11 +61,16 @@
 -- Fix (v2026-01-29C):
 --   - Auto-capture gate blocks dwwho:auto ingests when watcher is OFF, preventing
 --     orphaned triggers from updating snapshot.
+--
+-- NEW (v2026-01-29D):
+--   - Option A: snapshot.byName keys are CANONICAL LOWERCASE ONLY.
+--   - Entry.name preserves original/display case.
+--   - getEntry(name) remains compatible via case-insensitive lookup.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-29C"
+M.VERSION = "v2026-01-29D"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -81,11 +86,11 @@ local _state = {
         ts = nil,      -- os.time()
         source = nil,  -- string|nil
         rawLines = {}, -- array of strings
-        entries = {},  -- array of Entry
-        byName = {},   -- map: name -> Entry
+        entries = {},  -- array of Entry (display name preserved)
+        byName = {},   -- map: lower(name) -> Entry
     },
 
-    -- Legacy compatibility cache (name -> true). Derived from snapshot.byName
+    -- Legacy compatibility cache (lower(name) -> true). Derived from snapshot.byName
     players = {},
 
     -- Auto-capture gate: blocks dwwho:auto ingests when watcher is OFF
@@ -183,6 +188,19 @@ local function _sortedKeys(t)
     return keys
 end
 
+local function _sortedStringsCaseInsensitive(arr)
+    arr = (type(arr) == "table") and arr or {}
+    table.sort(arr, function(a, b)
+        local la = tostring(a or ""):lower()
+        local lb = tostring(b or ""):lower()
+        if la == lb then
+            return tostring(a or "") < tostring(b or "")
+        end
+        return la < lb
+    end)
+    return arr
+end
+
 local function _normWs(s)
     if type(s) ~= "string" then return "" end
     s = s:gsub("\r", "")
@@ -190,6 +208,13 @@ local function _normWs(s)
     -- collapse internal whitespace
     s = s:gsub("%s+", " ")
     return s
+end
+
+local function _canonKey(name)
+    if type(name) ~= "string" then return nil end
+    local s = _normWs(name)
+    if s == "" then return nil end
+    return s:lower()
 end
 
 -- ############################################################
@@ -424,7 +449,7 @@ local function _parseWhoLineToEntry(line)
 
     -- Entry schema (v1.1)
     local entry = {
-        name = name,
+        name = name, -- display/original
         rankTag = pre.rankTag or "",
         level = level,
         class = class,
@@ -514,9 +539,10 @@ local function _rebuildLegacyPlayersFromSnapshot(snap)
     if type(snap) ~= "table" or type(snap.byName) ~= "table" then
         return out
     end
-    for name, _ in pairs(snap.byName) do
-        if type(name) == "string" and name ~= "" then
-            out[name] = true
+    for key, _ in pairs(snap.byName) do
+        local k = _canonKey(tostring(key or ""))
+        if k then
+            out[k] = true
         end
     end
     return out
@@ -535,9 +561,9 @@ end
 local function _rebuildEntriesArrayFromByName(byName)
     local arr = {}
     if type(byName) ~= "table" then return arr end
-    local names = _sortedKeys(byName)
-    for i = 1, #names do
-        local e = byName[names[i]]
+    local keys = _sortedKeys(byName)
+    for i = 1, #keys do
+        local e = byName[keys[i]]
         local c = _copyEntry(e)
         if c then arr[#arr + 1] = c end
     end
@@ -550,8 +576,8 @@ local function _computeDeltaByName(beforeByName, afterByName)
 
     local added, removed, changed = 0, 0, 0
 
-    for name, afterE in pairs(afterByName) do
-        local beforeE = beforeByName[name]
+    for key, afterE in pairs(afterByName) do
+        local beforeE = beforeByName[key]
         if beforeE == nil then
             added = added + 1
         else
@@ -564,8 +590,8 @@ local function _computeDeltaByName(beforeByName, afterByName)
         end
     end
 
-    for name, _ in pairs(beforeByName) do
-        if afterByName[name] == nil then
+    for key, _ in pairs(beforeByName) do
+        if afterByName[key] == nil then
             removed = removed + 1
         end
     end
@@ -670,13 +696,36 @@ end
 
 function M.getEntry(name)
     if type(name) ~= "string" or name == "" then return nil end
-    local e = (type(_state.snapshot.byName) == "table") and _state.snapshot.byName[name] or nil
+
+    local by = (type(_state.snapshot.byName) == "table") and _state.snapshot.byName or nil
+    if type(by) ~= "table" then return nil end
+
+    -- Compatibility behavior:
+    -- - First try exact key (legacy callers that already pass lowercase will work)
+    -- - Then try canonical lowercase key (authoritative)
+    local e = by[name]
+    if not e then
+        local k = _canonKey(name)
+        if k then
+            e = by[k]
+        end
+    end
+
     if not e then return nil end
     return _copyEntry(e)
 end
 
 function M.getAllNames()
-    return _sortedKeys(_state.snapshot.byName or {})
+    -- Return display names (Entry.name), not byName keys.
+    local out = {}
+    local by = _state.snapshot.byName
+    if type(by) ~= "table" then return out end
+    for _, e in pairs(by) do
+        if type(e) == "table" and type(e.name) == "string" and e.name ~= "" then
+            out[#out + 1] = e.name
+        end
+    end
+    return _sortedStringsCaseInsensitive(out)
 end
 
 -- Legacy compatibility (kept)
@@ -685,7 +734,7 @@ function M.getState()
         version = M.VERSION,
         updatedEventName = M.EV_UPDATED,
 
-        -- legacy player set view
+        -- legacy player set view (lowercase keys)
         players = _copyTable(_state.players),
 
         -- auto capture gate (debug)
@@ -705,7 +754,9 @@ end
 function M.hasPlayer(name)
     local n = _normalizeNameForLegacy(tostring(name or ""))
     if not n then return false end
-    return (_state.players[n] == true)
+    local k = _canonKey(n)
+    if not k then return false end
+    return (_state.players[k] == true)
 end
 
 function M.getAllPlayers()
@@ -765,18 +816,21 @@ function M.setState(newState, opts)
 
     for name, v in pairs(players) do
         if v == true and type(name) == "string" and name ~= "" then
-            rawCount = rawCount + 1
-            rawLines[#rawLines + 1] = name
-            byName[name] = {
-                name = name,
-                rankTag = "",
-                level = nil,
-                class = nil,
-                flags = {},
-                extraText = "",
-                titleText = nil,
-                rawLine = name,
-            }
+            local key = _canonKey(name)
+            if key then
+                rawCount = rawCount + 1
+                rawLines[#rawLines + 1] = name
+                byName[key] = {
+                    name = name, -- preserve display/original
+                    rankTag = "",
+                    level = nil,
+                    class = nil,
+                    flags = {},
+                    extraText = "",
+                    titleText = nil,
+                    rawLine = name,
+                }
+            end
         end
     end
 
@@ -800,18 +854,21 @@ function M.update(delta, opts)
     if delta.players ~= nil then
         local addMap = _asPlayersMap(delta.players)
         for n, _ in pairs(addMap) do
-            -- create minimal entry if missing
-            if nextByName[n] == nil then
-                nextByName[n] = {
-                    name = n,
-                    rankTag = "",
-                    level = nil,
-                    class = nil,
-                    flags = {},
-                    extraText = "",
-                    titleText = nil,
-                    rawLine = n,
-                }
+            local key = _canonKey(n)
+            if key then
+                -- create minimal entry if missing
+                if nextByName[key] == nil then
+                    nextByName[key] = {
+                        name = n, -- preserve display/original passed in
+                        rankTag = "",
+                        level = nil,
+                        class = nil,
+                        flags = {},
+                        extraText = "",
+                        titleText = nil,
+                        rawLine = n,
+                    }
+                end
             end
         end
     end
@@ -820,8 +877,9 @@ function M.update(delta, opts)
     if type(delta.remove) == "table" then
         for _, v in ipairs(delta.remove) do
             local n = _normalizeNameForLegacy(tostring(v or ""))
-            if n then
-                nextByName[n] = nil
+            local key = _canonKey(n or "")
+            if key then
+                nextByName[key] = nil
             end
         end
     end
@@ -913,9 +971,12 @@ function M.ingestWhoLines(lines, opts)
         local line = rawLines[i]
         local e = _parseWhoLineToEntry(line)
         if e and type(e.name) == "string" and e.name ~= "" then
-            parsedCount = parsedCount + 1
-            parsedEntries[#parsedEntries + 1] = e
-            byNameNew[e.name] = e -- last wins
+            local key = _canonKey(e.name)
+            if key then
+                parsedCount = parsedCount + 1
+                parsedEntries[#parsedEntries + 1] = e
+                byNameNew[key] = e -- last wins (case-insensitive via canonical key)
+            end
         end
     end
 
@@ -924,8 +985,8 @@ function M.ingestWhoLines(lines, opts)
 
     if mode == "merge" then
         nextByName = _copyTable(beforeByName)
-        for name, e in pairs(byNameNew) do
-            nextByName[name] = e
+        for key, e in pairs(byNameNew) do
+            nextByName[key] = e
         end
     else
         nextByName = byNameNew
