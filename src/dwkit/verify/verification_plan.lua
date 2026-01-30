@@ -3,7 +3,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-01-29F
+-- Version     : v2026-01-30D
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -17,7 +17,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-29F"
+M.VERSION = "v2026-01-30D"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -64,7 +64,8 @@ local SUITES = {
     -- NEW: Gate force-open on watcher header trigger (regression guard)
     whostore_gate_force_open_on_header = {
         title = "whostore_gate_force_open_on_header",
-        description = "Regression: if autoCaptureEnabled is forced false, manual WHO header trigger must force-open gate before capture/ingest (expect autoCaptureEnabled=true after).",
+        description =
+        "Regression: if autoCaptureEnabled is forced false, manual WHO header trigger must force-open gate before capture/ingest (expect autoCaptureEnabled=true after).",
         delay = 0.45,
         steps = {
             { cmd = "dwwho watch on", note = "Ensure watcher is ON so header triggers fire." },
@@ -93,7 +94,7 @@ local SUITES = {
                 note = "ASSERT: gate was forced open + ingest happened (PASS/FAIL).",
             },
 
-            { cmd = "dwwho status", note = "Human confirmation: should show autoCaptureEnabled=true and updated timestamp/source." },
+            { cmd = "dwwho status",   note = "Human confirmation: should show autoCaptureEnabled=true and updated timestamp/source." },
         },
     },
 
@@ -185,6 +186,55 @@ local SUITES = {
             },
 
             { cmd = "dwwho status",       note = "Human confirmation: source should show dwwho:auto now." },
+        },
+    },
+
+    -- NEW: Watch OFF must stop ingesting manual WHO (B4 lock-in; PASS/FAIL)
+    whostore_watch_off_manual_who_no_ingest = {
+        title = "whostore_watch_off_manual_who_no_ingest",
+        description =
+        "B4 regression lock-in: establish baseline via refresh, disable watcher, record OFF-baseline, then manual 'who' must NOT update WhoStore after OFF-baseline (lastUpdatedTs/source unchanged). Restores watcher ON at end.",
+        delay = 0.45,
+        steps = {
+            { cmd = "dwwho watch on",     note = "Precondition: ensure watcher ON so baseline refresh definitely captures/ingests." },
+
+            {
+                cmd = "dwwho refresh",
+                delay = 0.90,
+                note = "Establish a known baseline snapshot (refresh sends WHO; watcher should capture/ingest).",
+            },
+
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.whostore_service"); if type(S)~="table" or type(S.getState)~="function" then error("WhoStoreService.getState missing") end; local st=S.getState(); if st.lastUpdatedTs==nil then error("Baseline requires lastUpdatedTs non-nil; run again if refresh skipped due to cooldown") end; _G.DWVERIFY_WOFF_PRE_TS=st.lastUpdatedTs; _G.DWVERIFY_WOFF_PRE_SRC=st.source; print(string.format("[dwverify-whostore] pre-off baseline lastUpdatedTs=%s source=%s", tostring(_G.DWVERIFY_WOFF_PRE_TS), tostring(_G.DWVERIFY_WOFF_PRE_SRC))) end',
+                note = "Record pre-off baseline (informational).",
+            },
+
+            { cmd = "dwwho watch off",    note = "Disable watcher (manual 'who' should no longer be ingested)." },
+            { cmd = "dwwho watch status", note = "Human confirmation: enabled=false trigPlayers=nil trigTotal=nil lastErr=nil." },
+
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.whostore_service"); if type(S)~="table" or type(S.getState)~="function" then error("WhoStoreService.getState missing") end; local st=S.getState(); _G.DWVERIFY_WOFF_TS=st.lastUpdatedTs; _G.DWVERIFY_WOFF_SRC=st.source; print(string.format("[dwverify-whostore] OFF-baseline lastUpdatedTs=%s source=%s", tostring(_G.DWVERIFY_WOFF_TS), tostring(_G.DWVERIFY_WOFF_SRC))) end',
+                note = "Record OFF-baseline AFTER watcher OFF (this is what must remain unchanged by manual who).",
+            },
+
+            {
+                cmd = "who",
+                delay = 0.80,
+                note =
+                "Manual WHO while watcher OFF: should NOT ingest/update WhoStore (no state change after OFF-baseline).",
+            },
+
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.whostore_service"); if type(S)~="table" or type(S.getState)~="function" then error("WhoStoreService.getState missing") end; local st=S.getState(); if tostring(st.lastUpdatedTs)~=tostring(_G.DWVERIFY_WOFF_TS) then error("Expected lastUpdatedTs unchanged after manual who while watcher OFF; before="..tostring(_G.DWVERIFY_WOFF_TS).." after="..tostring(st.lastUpdatedTs)) end; if tostring(st.source)~=tostring(_G.DWVERIFY_WOFF_SRC) then error("Expected source unchanged after manual who while watcher OFF; before="..tostring(_G.DWVERIFY_WOFF_SRC).." after="..tostring(st.source)) end; print(string.format("[dwverify-whostore] PASS watch-off no-ingest source=%s lastUpdatedTs=%s", tostring(st.source), tostring(st.lastUpdatedTs))) end',
+                note = "ASSERT: manual who caused NO WhoStore update after OFF-baseline (PASS/FAIL).",
+            },
+
+            { cmd = "dwwho status",       note = "Human confirmation: watcher disabled; source/ts unchanged from OFF-baseline." },
+            { cmd = "dwwho watch on",     note = "Restore watcher ON for normal operation." },
+            { cmd = "dwwho watch status", note = "Human confirmation: watcher enabled; singleton installed; lastErr=nil." },
         },
     },
 

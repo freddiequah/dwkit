@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.whostore_service
 -- Owner       : Services
--- Version     : v2026-01-29D
+-- Version     : v2026-01-30E
 -- Purpose     :
 --   - SAFE WhoStore service (manual-only) to cache an authoritative WHO snapshot
 --     derived from parsing WHO output (No-GMCP compatible).
@@ -17,7 +17,7 @@
 --   - docs/WhoStore_Service_Contract_v1.0.md (v1.1)
 --   - Event: DWKit:Service:WhoStore:Updated
 --
--- Public API (v2026-01-29D) :
+-- Public API (v2026-01-30E) :
 --   - getVersion() -> string
 --   - getUpdatedEventName() -> string
 --   - onUpdated(handlerFn) -> boolean ok, any tokenOrNil, string|nil err
@@ -66,52 +66,46 @@
 --   - Option A: snapshot.byName keys are CANONICAL LOWERCASE ONLY.
 --   - Entry.name preserves original/display case.
 --   - getEntry(name) remains compatible via case-insensitive lookup.
+--
+-- FIX (v2026-01-30E):
+--   - Gate now blocks any source that begins with "dwwho:auto" (future-proof),
+--     while leaving refresh ("dwwho:refresh") unaffected.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-29D"
+M.VERSION = "v2026-01-30E"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
 
 M.EV_UPDATED = tostring(ID.eventPrefix or "DWKit:") .. "Service:WhoStore:Updated"
 
--- ############################################################
--- Internal state
--- ############################################################
-
 local _state = {
     snapshot = {
-        ts = nil,      -- os.time()
-        source = nil,  -- string|nil
-        rawLines = {}, -- array of strings
-        entries = {},  -- array of Entry (display name preserved)
-        byName = {},   -- map: lower(name) -> Entry
+        ts = nil,
+        source = nil,
+        rawLines = {},
+        entries = {},
+        byName = {},
     },
 
-    -- Legacy compatibility cache (lower(name) -> true). Derived from snapshot.byName
     players = {},
 
-    -- Auto-capture gate: blocks dwwho:auto ingests when watcher is OFF
     autoCaptureEnabled = true,
 
-    lastUpdatedTs = nil, -- os.time()
-    source = nil,        -- string
-    rawCount = 0,        -- count of names parsed from last ingest snapshot (raw parsed names)
+    lastUpdatedTs = nil,
+    source = nil,
+    rawCount = 0,
     stats = {
         ingests = 0,
         updates = 0,
-        emits = 0, -- counts successful emits only
+        emits = 0,
         lastEmitTs = nil,
         lastEmitSource = nil,
         lastEmitErr = nil,
     },
 }
-
--- ############################################################
--- Helpers (copy / collections)
--- ############################################################
 
 local function _copyTable(t)
     local out = {}
@@ -205,7 +199,6 @@ local function _normWs(s)
     if type(s) ~= "string" then return "" end
     s = s:gsub("\r", "")
     s = s:gsub("^%s+", ""):gsub("%s+$", "")
-    -- collapse internal whitespace
     s = s:gsub("%s+", " ")
     return s
 end
@@ -217,13 +210,7 @@ local function _canonKey(name)
     return s:lower()
 end
 
--- ############################################################
--- Guards (blocked tokens)
--- ############################################################
-
--- Guard: prevent common DWKit commands / headers from being treated as player names
 local _BLOCKED_TOKENS = {
-    -- commands / aliases (common)
     ["dwwho"] = true,
     ["dw"] = true,
     ["dwcommands"] = true,
@@ -249,7 +236,6 @@ local _BLOCKED_TOKENS = {
     ["dweventlog"] = true,
     ["dwrelease"] = true,
 
-    -- common WHO noise / headers
     ["name"] = true,
     ["names"] = true,
     ["player"] = true,
@@ -268,10 +254,6 @@ local function _isBlockedToken(name)
     return false
 end
 
--- ############################################################
--- WHO parsing (v1.1)
--- ############################################################
-
 local function _stripMudColorCodes(s)
     if type(s) ~= "string" then return s end
     return s:gsub("\27%[[%d;]*m", "")
@@ -287,7 +269,6 @@ end
 local function _looksLikeWhoFooter(s)
     if type(s) ~= "string" then return false end
     local lower = _normWs(s):lower()
-    -- e.g. "12 characters displayed."
     if lower:match("^%d+%s+characters%s+displayed%.?$") then
         return true
     end
@@ -332,10 +313,6 @@ local function _parseLevelClass(rankTag)
         return nil, nil
     end
 
-    -- Examples:
-    -- "48 War" -> level=48 class="War"
-    -- "50 Cle" -> level=50 class="Cle"
-    -- "IMPL"   -> level=nil class=nil
     local n, cls = rankTag:match("^(%d+)%s+(%S+)")
     if n then
         local level = tonumber(n)
@@ -356,7 +333,6 @@ local function _parseNameAndExtra(rest)
     local s = _normWs(rest)
     if s == "" then return nil end
 
-    -- Name token rules: first token after bracket, leading letter, allow digits/' thereafter
     local name = s:match("^([A-Za-z][A-Za-z0-9']*)")
     if not name or name == "" then
         return nil
@@ -390,7 +366,6 @@ local function _detectFlags(extraText)
     local s = extraText
     local upper = s:upper()
 
-    -- AFK / NH best-effort
     if upper:match("%(AFK%)") or upper:match("%f[%a]AFK%f[%A]") then
         _pushFlag(flags, "AFK")
     end
@@ -398,13 +373,11 @@ local function _detectFlags(extraText)
         _pushFlag(flags, "NH")
     end
 
-    -- idle patterns: "(idle:19)" or "idle:19"
     local lower = s:lower()
     if lower:match("%(idle:%d+%)") or lower:match("%f[%a]idle:%d+%f[%A]") then
         _pushFlag(flags, "idle")
     end
 
-    -- down marker: "<-- down" (canonical)
     if lower:find("<-- down", 1, true) ~= nil then
         _pushFlag(flags, "down")
     end
@@ -417,8 +390,6 @@ local function _deriveTitleText(extraText)
     local s = _normWs(extraText)
     if s == "" then return nil end
 
-    -- Remove only known flag markers/tokens (best-effort). Preserve other meaning.
-    -- Order matters.
     s = s:gsub("<%-%-%s*down", "")
     s = s:gsub("%(AFK%)", "")
     s = s:gsub("%(NH%)", "")
@@ -447,9 +418,8 @@ local function _parseWhoLineToEntry(line)
     local flags = _detectFlags(extraText)
     local titleText = _deriveTitleText(extraText)
 
-    -- Entry schema (v1.1)
     local entry = {
-        name = name, -- display/original
+        name = name,
         rankTag = pre.rankTag or "",
         level = level,
         class = class,
@@ -462,34 +432,25 @@ local function _parseWhoLineToEntry(line)
     return entry
 end
 
--- ############################################################
--- Legacy helpers (players map input)
--- ############################################################
-
 local function _normalizeNameForLegacy(s)
     if type(s) ~= "string" then return nil end
 
-    -- normalize whitespace
     s = s:gsub("\r", "")
     s = s:gsub("^%s+", ""):gsub("%s+$", "")
     if s == "" then return nil end
 
-    -- remove common mudlet/mud color codes (best-effort)
     s = s:gsub("\27%[[%d;]*m", "")
 
-    -- ignore divider-ish lines
     if s:match("^[-=_%*]+$") then
         return nil
     end
 
     local lower = s:lower()
 
-    -- ignore WHO footer lines
     if lower:match("^%d+%s+characters%s+displayed%.?$") then
         return nil
     end
 
-    -- Capture first plausible name token.
     local name = s:match("([A-Za-z][A-Za-z0-9']*)")
     if not name or name == "" then
         return nil
@@ -503,14 +464,12 @@ local function _normalizeNameForLegacy(s)
 end
 
 local function _asPlayersMap(players)
-    -- Accept either map {Name=true} OR array {"Name", ...}
     local out = {}
 
     if type(players) ~= "table" then
         return out
     end
 
-    -- array-like
     if #players > 0 then
         for i = 1, #players do
             local n = _normalizeNameForLegacy(tostring(players[i] or ""))
@@ -519,7 +478,6 @@ local function _asPlayersMap(players)
         return out
     end
 
-    -- map-like
     for k, v in pairs(players) do
         if v == true then
             local n = _normalizeNameForLegacy(tostring(k or ""))
@@ -529,10 +487,6 @@ local function _asPlayersMap(players)
 
     return out
 end
-
--- ############################################################
--- Snapshot builders / delta
--- ############################################################
 
 local function _rebuildLegacyPlayersFromSnapshot(snap)
     local out = {}
@@ -581,7 +535,6 @@ local function _computeDeltaByName(beforeByName, afterByName)
         if beforeE == nil then
             added = added + 1
         else
-            -- title change is normative; treat as "changed" when titleText differs.
             local bt = (type(beforeE) == "table") and beforeE.titleText or nil
             local at = (type(afterE) == "table") and afterE.titleText or nil
             if tostring(bt or "") ~= tostring(at or "") then
@@ -598,10 +551,6 @@ local function _computeDeltaByName(beforeByName, afterByName)
 
     return { added = added, removed = removed, changed = changed, total = _countMap(afterByName) }
 end
-
--- ############################################################
--- Event emission
--- ############################################################
 
 local function _emitUpdated(payload)
     payload = (type(payload) == "table") and payload or {}
@@ -647,10 +596,6 @@ local function _emitUpdated(payload)
     return false
 end
 
--- ############################################################
--- Public API
--- ############################################################
-
 function M.getVersion()
     return M.VERSION
 end
@@ -678,7 +623,6 @@ function M.onUpdated(handlerFn)
     return false, nil, maybeErr or tokenOrErr or "subscribe failed"
 end
 
--- Auto capture gate (robust against orphan triggers)
 function M.getAutoCaptureEnabled()
     return (_state.autoCaptureEnabled == true)
 end
@@ -689,7 +633,6 @@ function M.setAutoCaptureEnabled(flag, opts)
     return true, nil
 end
 
--- Docs-first snapshot API
 function M.getSnapshot()
     return _copySnapshot(_state.snapshot)
 end
@@ -700,9 +643,6 @@ function M.getEntry(name)
     local by = (type(_state.snapshot.byName) == "table") and _state.snapshot.byName or nil
     if type(by) ~= "table" then return nil end
 
-    -- Compatibility behavior:
-    -- - First try exact key (legacy callers that already pass lowercase will work)
-    -- - Then try canonical lowercase key (authoritative)
     local e = by[name]
     if not e then
         local k = _canonKey(name)
@@ -716,7 +656,6 @@ function M.getEntry(name)
 end
 
 function M.getAllNames()
-    -- Return display names (Entry.name), not byName keys.
     local out = {}
     local by = _state.snapshot.byName
     if type(by) ~= "table" then return out end
@@ -728,25 +667,16 @@ function M.getAllNames()
     return _sortedStringsCaseInsensitive(out)
 end
 
--- Legacy compatibility (kept)
 function M.getState()
     return {
         version = M.VERSION,
         updatedEventName = M.EV_UPDATED,
-
-        -- legacy player set view (lowercase keys)
         players = _copyTable(_state.players),
-
-        -- auto capture gate (debug)
         autoCaptureEnabled = (_state.autoCaptureEnabled == true),
-
-        -- legacy bookkeeping
         lastUpdatedTs = _state.lastUpdatedTs,
         source = _state.source,
         rawCount = _state.rawCount,
         stats = _copyTable(_state.stats),
-
-        -- docs-first snapshot (exposed read-only)
         snapshot = _copySnapshot(_state.snapshot),
     }
 end
@@ -762,10 +692,6 @@ end
 function M.getAllPlayers()
     return M.getAllNames()
 end
-
--- ############################################################
--- Mutations (legacy + docs-first updates)
--- ############################################################
 
 local function _applyNewSnapshot(newSnap, opts, delta)
     opts = (type(opts) == "table") and opts or {}
@@ -783,8 +709,6 @@ local function _applyNewSnapshot(newSnap, opts, delta)
     local payload = {
         ts = newSnap.ts or _state.lastUpdatedTs,
         source = _state.source,
-
-        -- docs-first payload (authoritative)
         snapshot = _copySnapshot(newSnap),
     }
 
@@ -792,7 +716,6 @@ local function _applyNewSnapshot(newSnap, opts, delta)
         payload.delta = _copyTable(delta)
     end
 
-    -- Legacy payload field (non-contract): some tools may still look at state
     payload.state = M.getState()
 
     _emitUpdated(payload)
@@ -804,7 +727,6 @@ function M.setState(newState, opts)
     newState = (type(newState) == "table") and newState or {}
     opts = (type(opts) == "table") and opts or {}
 
-    -- Legacy setState uses players list/map; we convert it into a minimal snapshot.
     local players = _asPlayersMap(newState.players)
 
     local ts = os.time()
@@ -821,7 +743,7 @@ function M.setState(newState, opts)
                 rawCount = rawCount + 1
                 rawLines[#rawLines + 1] = name
                 byName[key] = {
-                    name = name, -- preserve display/original
+                    name = name,
                     rankTag = "",
                     level = nil,
                     class = nil,
@@ -850,16 +772,14 @@ function M.update(delta, opts)
     local beforeByName = _state.snapshot.byName or {}
     local nextByName = _copyTable(beforeByName)
 
-    -- delta.players can be map or array
     if delta.players ~= nil then
         local addMap = _asPlayersMap(delta.players)
         for n, _ in pairs(addMap) do
             local key = _canonKey(n)
             if key then
-                -- create minimal entry if missing
                 if nextByName[key] == nil then
                     nextByName[key] = {
-                        name = n, -- preserve display/original passed in
+                        name = n,
                         rankTag = "",
                         level = nil,
                         class = nil,
@@ -873,7 +793,6 @@ function M.update(delta, opts)
         end
     end
 
-    -- Optional explicit remove list: delta.remove = {"Name", ...}
     if type(delta.remove) == "table" then
         for _, v in ipairs(delta.remove) do
             local n = _normalizeNameForLegacy(tostring(v or ""))
@@ -894,15 +813,12 @@ function M.update(delta, opts)
     local d = _computeDeltaByName(beforeByName, nextByName)
     d.mode = "update"
 
-    -- Derive a legacy-ish rawCount
     _state.rawCount = d.total
 
-    -- Only emit when state changed
     if d.added > 0 or d.removed > 0 or d.changed > 0 then
         return _applyNewSnapshot(snap, { source = src, rawCount = d.total }, d)
     end
 
-    -- Still update bookkeeping (SAFE), but no emit
     _state.snapshot = snap
     _state.players = _rebuildLegacyPlayersFromSnapshot(snap)
     _state.lastUpdatedTs = os.time()
@@ -928,7 +844,6 @@ function M.clear(opts)
         return _applyNewSnapshot(snap, { source = src, rawCount = 0 }, delta)
     end
 
-    -- No emit if already empty
     _state.snapshot = snap
     _state.players = {}
     _state.lastUpdatedTs = os.time()
@@ -937,10 +852,6 @@ function M.clear(opts)
     return true, nil
 end
 
--- ############################################################
--- Ingestion (WHO text/lines) -> Snapshot (v1.1)
--- ############################################################
-
 function M.ingestWhoLines(lines, opts)
     opts = (type(opts) == "table") and opts or {}
     if type(lines) ~= "table" then
@@ -948,14 +859,15 @@ function M.ingestWhoLines(lines, opts)
     end
 
     -- Gate: if watcher OFF, ignore auto-capture ingests (orphan triggers safe)
-    if (_state.autoCaptureEnabled ~= true) and tostring(opts.source or "") == "dwwho:auto" then
+    local src = tostring(opts.source or "")
+    if (_state.autoCaptureEnabled ~= true) and src:match("^dwwho:auto") then
         return true, nil
     end
 
     _state.stats.ingests = _state.stats.ingests + 1
 
     local mode = (opts.merge == true) and "merge" or "replace"
-    local src = tostring(opts.source or "ingestWhoLines")
+    src = tostring(opts.source or "ingestWhoLines")
     local ts = os.time()
 
     local rawLines = {}
@@ -975,7 +887,7 @@ function M.ingestWhoLines(lines, opts)
             if key then
                 parsedCount = parsedCount + 1
                 parsedEntries[#parsedEntries + 1] = e
-                byNameNew[key] = e -- last wins (case-insensitive via canonical key)
+                byNameNew[key] = e
             end
         end
     end
@@ -996,7 +908,6 @@ function M.ingestWhoLines(lines, opts)
 
     local nextRawLines = rawLines
     if mode == "merge" then
-        -- best-effort: keep history by concatenating previous rawLines
         local prev = (type(_state.snapshot.rawLines) == "table") and _state.snapshot.rawLines or {}
         nextRawLines = _copyArray(prev)
         for i = 1, #rawLines do
@@ -1016,7 +927,6 @@ function M.ingestWhoLines(lines, opts)
         return _applyNewSnapshot(snap, { source = src, rawCount = parsedCount }, d)
     end
 
-    -- No changes: still update snapshot bookkeeping (SAFE), but do not emit.
     _state.snapshot = snap
     _state.players = _rebuildLegacyPlayersFromSnapshot(snap)
     _state.lastUpdatedTs = os.time()
