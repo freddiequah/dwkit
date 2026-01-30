@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-01-29E
+-- Version     : v2026-01-30A
 -- Purpose     :
 --   - SAFE RoomEntities UI (consumer-only) that renders a per-entity ROW LIST with
 --     sections: Players / Mobs / Items-Objects / Unknown.
@@ -33,11 +33,16 @@
 --   - FIX (v2026-01-29E):
 --       * When falling back to text view (or row render fails), hide listRoot to avoid
 --         overlapping/ghost UI elements.
+--
+--   - NEW (v2026-01-30A):
+--       * Room Feed health indicator integration (LIVE / PAUSED / STALE / DEGRADED)
+--         via dwkit.services.roomfeed_status_service (non-disruptive status bar + title badge).
+--       * Persistent overrides per character/profile (best-effort, via dwkit.persist.store).
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-29E"
+M.VERSION = "v2026-01-30A"
 M.UI_ID = "roomentities_ui"
 M.id = M.UI_ID -- convenience alias (some tooling/debug expects ui.id)
 
@@ -199,6 +204,15 @@ local function _getWhoStoreServiceBestEffort()
     return WS
 end
 
+-- Room feed status service (LIVE/PAUSED/STALE/DEGRADED)
+local function _getRoomFeedServiceBestEffort()
+    local okR, RF = _safeRequire("dwkit.services.roomfeed_status_service")
+    if not okR or type(RF) ~= "table" then
+        return nil
+    end
+    return RF
+end
+
 local function _setLabelTextHtml(label, html)
     if type(label) == "table" and type(label.setText) == "function" then
         pcall(function()
@@ -225,12 +239,21 @@ local _state = {
 
     subscriptionRoomEntities = nil,
     subscriptionWhoStore = nil,
+    subscriptionRoomFeed = nil,
 
     overrides = {},
 
     -- Cache last data state rendered (service or injected) so override clicks can re-render
     -- without depending on RoomEntitiesService being populated.
     lastDataState = nil,
+
+    roomFeed = {
+        watchEnabled = true,
+        health = "STALE",
+        degradedReason = nil,
+        lastSnapshotTs = nil,
+        lastSnapshotSource = nil,
+    },
 
     lastRender = {
         counts = { players = 0, mobs = 0, items = 0, unknown = 0 },
@@ -246,9 +269,111 @@ local _state = {
         panel = nil,
         label = nil,
         listRoot = nil,
+        statusLabel = nil,
+        statusRoot = nil, -- container for status bar (future-proof)
+        setTitle = nil,   -- best-effort title setter from ui_window bundle
         rendered = {},
     },
 }
+
+-- ############################################################
+-- Persistence (Overrides per character/profile) - best effort
+-- ############################################################
+
+local function _getProfileTagBestEffort()
+    if type(W) == "table" and type(W.getProfileTagBestEffort) == "function" then
+        local ok, v = pcall(W.getProfileTagBestEffort)
+        if ok and type(v) == "string" and v ~= "" then
+            return v
+        end
+    end
+
+    local ok2, name = pcall(function()
+        if type(getProfileName) == "function" then return getProfileName() end
+        return nil
+    end)
+    if ok2 and type(name) == "string" and name ~= "" then
+        return name:gsub("%W+", "_")
+    end
+
+    return "default"
+end
+
+local function _getPersistStoreBestEffort()
+    if type(_G.DWKit) == "table" and type(_G.DWKit.persist) == "table" then
+        local s = _G.DWKit.persist.store
+        if type(s) == "table" and type(s.saveEnvelope) == "function" and type(s.loadEnvelope) == "function" then
+            return true, s, nil
+        end
+    end
+    local ok, modOrErr = pcall(require, "dwkit.persist.store")
+    if ok and type(modOrErr) == "table" and type(modOrErr.saveEnvelope) == "function" and type(modOrErr.loadEnvelope) == "function" then
+        return true, modOrErr, nil
+    end
+    return false, nil, "persist store not available"
+end
+
+local function _persistOverridesRelPath()
+    local tag = _getProfileTagBestEffort()
+    return "ui/roomentities/overrides_" .. tostring(tag) .. ".tbl"
+end
+
+local function _serializeOverridesClean(overrides)
+    overrides = (type(overrides) == "table") and overrides or {}
+    local out = {}
+    for name, mode in pairs(overrides) do
+        if type(name) == "string" and name ~= "" and type(mode) == "string" then
+            if mode ~= "auto" then
+                out[name] = mode
+            end
+        end
+    end
+    return out
+end
+
+local function _persistOverridesLoadBestEffort()
+    local okS, store = _getPersistStoreBestEffort()
+    if not okS then return false end
+
+    local okL, env = store.loadEnvelope(_persistOverridesRelPath())
+    if not okL or type(env) ~= "table" or type(env.data) ~= "table" then
+        return false
+    end
+
+    local data = env.data
+    local loaded = {}
+    if type(data.overrides) == "table" then
+        for name, mode in pairs(data.overrides) do
+            if type(name) == "string" and name ~= "" and type(mode) == "string" and mode ~= "" then
+                loaded[name] = mode
+            end
+        end
+    end
+
+    _state.overrides = loaded
+    return true
+end
+
+local function _persistOverridesSaveBestEffort(source)
+    local okS, store = _getPersistStoreBestEffort()
+    if not okS then return false end
+
+    local data = {
+        overrides = _serializeOverridesClean(_state.overrides),
+        profileTag = _getProfileTagBestEffort(),
+    }
+    local meta = {
+        source = tostring(source or "ui:roomentities:saveOverrides"),
+        ts = os.time(),
+        version = tostring(M.VERSION),
+    }
+    local okW = store.saveEnvelope(_persistOverridesRelPath(), "v1", data, meta)
+    return okW == true
+end
+
+-- ############################################################
+-- Events / subscriptions
+-- ############################################################
 
 local function _resolveUpdatedEventName(S)
     if type(S) ~= "table" then return nil end
@@ -302,8 +427,84 @@ local function _tryCreateRowUiRoot(parent)
     return false, "Failed to create list root"
 end
 
+local function _applyStatusStyleBestEffort(labelObj)
+    if type(labelObj) == "table" and type(labelObj.setStyleSheet) == "function" then
+        pcall(function()
+            labelObj:setStyleSheet([[
+                QLabel {
+                    padding: 2px 6px;
+                    margin: 0px;
+                    border: 1px solid rgba(255,255,255,0.12);
+                    background: rgba(255,255,255,0.04);
+                    font-size: 11px;
+                }
+            ]])
+        end)
+    end
+end
+
+local function _statusMessageFromRoomFeedState(st)
+    st = (type(st) == "table") and st or {}
+    local health = tostring(st.health or "STALE")
+
+    if health == "LIVE" then
+        return "", true
+    end
+
+    if health == "PAUSED" then
+        return "WATCH OFF: UI will not auto-update. Use: dwroom watch on", false
+    end
+
+    if health == "DEGRADED" then
+        local reason = tostring(st.degradedReason or "")
+        if reason ~= "" then
+            return "DEGRADED: " .. reason .. " (type look to resync)", false
+        end
+        return "DEGRADED: some movement lines unrecognized (type look to resync)", false
+    end
+
+    -- STALE or unknown: treat as stale
+    return "STALE: no recent room snapshot (move or look to resync)", false
+end
+
+local function _applyRoomFeedUiState(st, source)
+    st = (type(st) == "table") and st or {}
+    _state.roomFeed.watchEnabled = (st.watchEnabled == true)
+    _state.roomFeed.health = tostring(st.health or "STALE")
+    _state.roomFeed.degradedReason = st.degradedReason
+    _state.roomFeed.lastSnapshotTs = st.lastSnapshotTs
+    _state.roomFeed.lastSnapshotSource = st.lastSnapshotSource
+
+    -- Non-disruptive status bar
+    if type(_state.widgets.statusLabel) == "table" then
+        local msg, hide = _statusMessageFromRoomFeedState(st)
+        if hide == true then
+            U.safeHide(_state.widgets.statusRoot or _state.widgets.statusLabel)
+        else
+            U.safeShow(_state.widgets.statusRoot or _state.widgets.statusLabel)
+            _setLabelText(_state.widgets.statusLabel, msg)
+        end
+    end
+
+    -- Title badge (best-effort)
+    local baseTitle = "Room Entities"
+    local health = tostring(st.health or "STALE")
+    local title = baseTitle
+    if health ~= "LIVE" then
+        title = baseTitle .. " [" .. health .. "]"
+    end
+
+    if type(_state.widgets.setTitle) == "function" then
+        pcall(function()
+            _state.widgets.setTitle(title)
+        end)
+    end
+end
+
 local function _ensureWidgets()
-    local ok, widgets, err = U.ensureWidgets(M.UI_ID, { "container", "label", "content", "panel", "listRoot" },
+    -- NOTE: include "setTitle" so we can update window title badges when room feed is not LIVE.
+    local ok, widgets, err = U.ensureWidgets(M.UI_ID,
+        { "container", "label", "content", "panel", "listRoot", "statusRoot", "statusLabel", "setTitle" },
         function()
             local G = U.getGeyser()
             if not G then
@@ -357,21 +558,53 @@ local function _ensureWidgets()
 
             ListKit.applyPanelStyle(panel)
 
-            local label = G.Label:new({
-                name = "__DWKit_roomentities_ui_label",
+            -- Status bar (non-disruptive). Only shown when not LIVE.
+            local STATUS_H = 18
+            local statusRoot = G.Container:new({
+                name = "__DWKit_roomentities_ui_statusRoot",
+                x = 0,
+                y = 0,
+                width = "100%",
+                height = STATUS_H,
+            }, panel)
+
+            local statusLabel = G.Label:new({
+                name = "__DWKit_roomentities_ui_statusLabel",
                 x = 0,
                 y = 0,
                 width = "100%",
                 height = "100%",
+            }, statusRoot)
+
+            _applyStatusStyleBestEffort(statusLabel)
+
+            -- Main label (fallback text view) lives below status bar.
+            local label = G.Label:new({
+                name = "__DWKit_roomentities_ui_label",
+                x = 0,
+                y = STATUS_H,
+                width = "100%",
+                height = "100%-" .. tostring(STATUS_H),
             }, panel)
 
             ListKit.applyTextLabelStyle(label)
 
+            -- Row UI root (list view) below status bar too.
             local okRoot, listRootOrErr = _tryCreateRowUiRoot(panel)
             local listRoot = nil
             if okRoot then
                 listRoot = listRootOrErr
+                -- reposition listRoot below status bar
+                pcall(function()
+                    listRoot:move(0, STATUS_H)
+                end)
+                pcall(function()
+                    listRoot:resize("100%", "100%-" .. tostring(STATUS_H))
+                end)
             end
+
+            -- default: hide status bar until we compute state
+            U.safeHide(statusRoot)
 
             return {
                 container = container,
@@ -379,6 +612,9 @@ local function _ensureWidgets()
                 panel = panel,
                 label = label,
                 listRoot = listRoot,
+                statusRoot = statusRoot,
+                statusLabel = statusLabel,
+                setTitle = (type(bundle.setTitle) == "function") and bundle.setTitle or nil,
             }
         end)
 
@@ -391,6 +627,9 @@ local function _ensureWidgets()
     _state.widgets.panel = widgets.panel
     _state.widgets.label = widgets.label
     _state.widgets.listRoot = widgets.listRoot
+    _state.widgets.statusRoot = widgets.statusRoot
+    _state.widgets.statusLabel = widgets.statusLabel
+    _state.widgets.setTitle = widgets.setTitle
 
     return true, nil
 end
@@ -804,6 +1043,11 @@ local function _renderRowsIntoRoot(root, effectiveLists)
                 _state.overrides[name] = nil
             end
 
+            -- Persist overrides per profile (best-effort)
+            pcall(function()
+                _persistOverridesSaveBestEffort("ui:roomentities:override_click")
+            end)
+
             _out(string.format("[DWKit UI] roomentities_ui override name=%s mode=%s", tostring(name),
                 tostring(_state.overrides[name] or "auto")))
 
@@ -889,7 +1133,21 @@ function M.init(opts)
         return false, _state.lastError
     end
 
+    -- Load saved overrides for this profile (best-effort)
+    pcall(function()
+        _persistOverridesLoadBestEffort()
+    end)
+
     U.safeHide(_state.widgets.container)
+
+    -- Apply initial room feed status into UI (best-effort)
+    local rf = _getRoomFeedServiceBestEffort()
+    if type(rf) == "table" and type(rf.getState) == "function" then
+        local okS, st = pcall(rf.getState)
+        if okS and type(st) == "table" then
+            _applyRoomFeedUiState(st, "ui:init")
+        end
+    end
 
     _state.inited = true
     _state.lastError = nil
@@ -1078,6 +1336,69 @@ local function _ensureWhoStoreSubscription()
     return true, nil
 end
 
+-- RoomFeed subscription: subscribe directly to event bus (service emits EV_STATUS).
+local function _ensureRoomFeedSubscription()
+    if type(_state.subscriptionRoomFeed) == "table" and _state.subscriptionRoomFeed.handlerId ~= nil then
+        return true, nil
+    end
+
+    local rf = _getRoomFeedServiceBestEffort()
+    if type(rf) ~= "table" then
+        return true, nil
+    end
+
+    local evName = nil
+    if type(rf.getStatusEventName) == "function" then
+        local okE, v = pcall(rf.getStatusEventName)
+        if okE and type(v) == "string" and v ~= "" then
+            evName = v
+        end
+    end
+    if not evName and type(rf.EV_STATUS) == "string" and rf.EV_STATUS ~= "" then
+        evName = rf.EV_STATUS
+    end
+    if type(evName) ~= "string" or evName == "" then
+        return true, nil
+    end
+
+    local okB, BUS = _safeRequire("dwkit.bus.event_bus")
+    if not okB or type(BUS) ~= "table" or type(BUS.subscribe) ~= "function" then
+        return true, nil
+    end
+
+    local handlerFn = function(payload, _meta)
+        if _state.enabled ~= true or _state.visible ~= true then
+            return
+        end
+        payload = (type(payload) == "table") and payload or {}
+        _applyRoomFeedUiState(payload, "evt:roomfeed")
+    end
+
+    local handlerId = nil
+    local okS = pcall(function()
+        handlerId = BUS.subscribe(evName, handlerFn, { source = "ui:roomentities:roomfeed_sub" })
+    end)
+
+    if not okS or handlerId == nil then
+        return true, nil
+    end
+
+    _state.subscriptionRoomFeed = {
+        handlerId = handlerId,
+        updatedEventName = evName,
+    }
+
+    -- Also sync current state immediately (best-effort)
+    if type(rf.getState) == "function" then
+        local okG, st = pcall(rf.getState)
+        if okG and type(st) == "table" then
+            _applyRoomFeedUiState(st, "ui:roomfeed_sync")
+        end
+    end
+
+    return true, nil
+end
+
 local function _ensureSubscriptions()
     local ok1, err1 = _ensureRoomEntitiesSubscription()
     if not ok1 then
@@ -1086,6 +1407,10 @@ local function _ensureSubscriptions()
     local ok2, err2 = _ensureWhoStoreSubscription()
     if not ok2 then
         return false, err2
+    end
+    local ok3, err3 = _ensureRoomFeedSubscription()
+    if not ok3 then
+        return false, err3
     end
     return true, nil
 end
@@ -1130,6 +1455,15 @@ function M.apply(opts)
             _out("[DWKit UI] roomentities_ui WARN: " .. tostring(errSub))
         end
 
+        -- Sync room feed UI state whenever we show (in case watch toggled while hidden).
+        local rf = _getRoomFeedServiceBestEffort()
+        if type(rf) == "table" and type(rf.getState) == "function" then
+            local okS, st = pcall(rf.getState)
+            if okS and type(st) == "table" then
+                _applyRoomFeedUiState(st, "ui:apply_show")
+            end
+        end
+
         M._renderFromService()
         U.safeShow(_state.widgets.container)
     else
@@ -1149,10 +1483,12 @@ end
 function M.getState()
     local subR = (type(_state.subscriptionRoomEntities) == "table") and _state.subscriptionRoomEntities or {}
     local subW = (type(_state.subscriptionWhoStore) == "table") and _state.subscriptionWhoStore or {}
+    local subF = (type(_state.subscriptionRoomFeed) == "table") and _state.subscriptionRoomFeed or {}
 
     local hasContainer = (type(_state.widgets.container) == "table")
     local hasLabel = (type(_state.widgets.label) == "table")
     local hasRoot = (type(_state.widgets.listRoot) == "table")
+    local hasStatus = (type(_state.widgets.statusLabel) == "table")
 
     return {
         uiId = M.UI_ID,
@@ -1171,14 +1507,27 @@ function M.getState()
                 handlerId = subW.handlerId,
                 updatedEventName = subW.updatedEventName,
             },
+            roomfeed = {
+                handlerId = subF.handlerId,
+                updatedEventName = subF.updatedEventName,
+            },
         },
         widgets = {
             hasContainer = hasContainer,
             hasLabel = hasLabel,
             hasListRoot = hasRoot,
+            hasStatus = hasStatus,
+        },
+        roomFeed = {
+            watchEnabled = _state.roomFeed.watchEnabled,
+            health = _state.roomFeed.health,
+            degradedReason = _state.roomFeed.degradedReason,
+            lastSnapshotTs = _state.roomFeed.lastSnapshotTs,
+            lastSnapshotSource = _state.roomFeed.lastSnapshotSource,
         },
         overrides = {
             activeOverrideCount = _state.lastRender.overrideCount,
+            persistedProfileTag = _getProfileTagBestEffort(),
         },
         lastRender = {
             counts = _state.lastRender.counts,
@@ -1196,8 +1545,24 @@ function M.dispose(opts)
     U.unsubscribeServiceUpdates(_state.subscriptionRoomEntities)
     U.unsubscribeServiceUpdates(_state.subscriptionWhoStore)
 
+    -- Best-effort roomfeed unsubscribe (event bus token)
+    local okB, BUS = _safeRequire("dwkit.bus.event_bus")
+    if okB and type(BUS) == "table" and type(BUS.unsubscribe) == "function" then
+        if type(_state.subscriptionRoomFeed) == "table" and _state.subscriptionRoomFeed.handlerId ~= nil then
+            pcall(function()
+                BUS.unsubscribe(_state.subscriptionRoomFeed.handlerId)
+            end)
+        end
+    end
+
     _state.subscriptionRoomEntities = nil
     _state.subscriptionWhoStore = nil
+    _state.subscriptionRoomFeed = nil
+
+    -- Save overrides on dispose (best-effort)
+    pcall(function()
+        _persistOverridesSaveBestEffort("ui:roomentities:dispose")
+    end)
 
     U.clearUiStoreEntry(M.UI_ID)
 
@@ -1205,13 +1570,18 @@ function M.dispose(opts)
 
     U.safeDelete(_state.widgets.listRoot)
     U.safeDelete(_state.widgets.label)
+    U.safeDelete(_state.widgets.statusLabel)
+    U.safeDelete(_state.widgets.statusRoot)
     U.safeDelete(_state.widgets.container)
 
     _state.widgets.listRoot = nil
     _state.widgets.label = nil
+    _state.widgets.statusLabel = nil
+    _state.widgets.statusRoot = nil
     _state.widgets.container = nil
     _state.widgets.panel = nil
     _state.widgets.content = nil
+    _state.widgets.setTitle = nil
     _state.widgets.rendered = {}
 
     _state.inited = false

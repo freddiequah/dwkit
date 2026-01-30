@@ -3,281 +3,215 @@
 -- Owner       : UI
 -- Version     : v2026-01-28A
 -- Purpose     :
---   - Shared DWKit "frame" creator:
---       * Prefer Adjustable.Container (movable/resizable + autoSave/autoLoad)
---       * Fallback to plain Geyser.Container when Adjustable is unavailable
---   - Applies centralized theme for header/close and frame border.
---   - Returns { frame, content, closeLabel, meta } for UI modules to build into.
---
--- Public API  :
---   - create(opts) -> table|nil frameBundle
---       opts = {
---           uiId        = string (required)
---           title       = string (required)
---           x,y,width,height = number|string (optional; defaults provided by caller)
---           padding     = number (optional; default 6)
---           buttonSize  = number (optional; default 18)
---           buttonFontSize = number (optional; default 9)
---           profileTag  = string (optional)
---           onClose     = function(bundle) (optional)
---       }
---   - getProfileTagBestEffort() -> string
---   - hideMinimizeChromeBestEffort(container)
---
--- Events Emitted   : None
--- Events Consumed  : None
--- Automation Policy: Manual only
--- Dependencies     :
---   - Geyser (Mudlet)
---   - Optional: Adjustable.Container (Mudlet package)
+--   - Standard UI window wrapper (Frame + Title + Close)
+--   - Supports Adjustable container when available, otherwise falls back to Geyser
 -- #########################################################################
-
-local Theme = require("dwkit.ui.ui_theme")
 
 local M = {}
 
 M.VERSION = "v2026-01-28A"
 
-local function _pcall(fn, ...)
-    local ok, res = pcall(fn, ...)
-    if ok then return true, res end
-    return false, res
+local U = require("dwkit.ui.ui_utils")
+local Theme = require("dwkit.ui.ui_theme")
+
+local function _safeRequire(moduleName)
+    local ok, modOrErr = pcall(require, moduleName)
+    if ok then
+        return true, modOrErr
+    end
+    return false, nil
+end
+
+local function _mkId(prefix)
+    prefix = tostring(prefix or "DWKitWin")
+    local s = tostring(os.time()) .. tostring(math.random(1000, 9999))
+    s = s:gsub("%W", "")
+    return prefix .. "_" .. s
+end
+
+function M.getVersion()
+    return tostring(M.VERSION)
 end
 
 function M.getProfileTagBestEffort()
-    -- Prefer Mudlet profile name if available
-    if type(_G.getProfileName) == "function" then
-        local ok, v = _pcall(_G.getProfileName)
-        if ok and type(v) == "string" and v ~= "" then
-            -- Normalize to something filename-ish / widget-name-safe
-            v = v:gsub("%s+", "_")
-            v = v:gsub("[^%w_%-]", "")
-            if v ~= "" then return v end
+    local ok, profileName = pcall(function()
+        if type(getProfileName) == "function" then
+            return getProfileName()
         end
+        return nil
+    end)
+    if ok and type(profileName) == "string" and profileName ~= "" then
+        return profileName:gsub("%W+", "_")
     end
-    return "default"
-end
-
-function M.hideMinimizeChromeBestEffort(container)
-    if type(container) ~= "table" then return end
-
-    local function _hide(obj)
-        if type(obj) == "table" and type(obj.hide) == "function" then
-            pcall(function() obj:hide() end)
-        end
-    end
-
-    for _, k in ipairs({ "minLabel", "minimizeLabel", "minButton", "minimizeButton" }) do
-        _hide(container[k])
-    end
-
-    if type(container.window) == "table" then
-        for _, k in ipairs({ "minLabel", "minimizeLabel", "minButton", "minimizeButton" }) do
-            _hide(container.window[k])
-        end
-    end
-end
-
-local function _getAdjustableBestEffort()
-    -- Most Mudlet installs expose Adjustable as a global when installed.
-    if type(_G.Adjustable) == "table" and type(_G.Adjustable.Container) == "table" then
-        return _G.Adjustable
-    end
-
-    -- Best-effort require
-    if type(_G.require) == "function" then
-        local ok, mod = pcall(require, "Adjustable.Container")
-        if ok and mod then
-            -- Some versions return the module directly; some return a table with .Container
-            if type(mod) == "table" and type(mod.Container) == "table" then
-                return mod
-            end
-            if type(mod) == "table" and type(mod.new) == "function" then
-                return { Container = mod }
-            end
-        end
-    end
-
     return nil
-end
-
-local function _resolveInsideParent(frame)
-    -- dwkit.txt pattern:
-    --   parentForContent =
-    --     (frame.window and (frame.window.Inside or frame.window.inside or frame.window))
-    --     or frame.Inside or frame.inside or frame
-    if type(frame) ~= "table" then return frame end
-
-    if type(frame.window) == "table" then
-        return frame.window.Inside or frame.window.inside or frame.window
-    end
-
-    return frame.Inside or frame.inside or frame
-end
-
-local function _applyFrameStyleBestEffort(frame)
-    if type(frame) ~= "table" then return end
-
-    if type(frame.setStyleSheet) == "function" then
-        pcall(function() frame:setStyleSheet(Theme.frameStyle()) end)
-        return
-    end
-
-    if type(frame.window) == "table" and type(frame.window.setStyleSheet) == "function" then
-        pcall(function() frame.window:setStyleSheet(Theme.frameStyle()) end)
-    end
 end
 
 function M.create(opts)
     opts = (type(opts) == "table") and opts or {}
-    local uiId = tostring(opts.uiId or "")
-    local title = tostring(opts.title or "")
 
-    if uiId == "" or title == "" then
-        return nil
-    end
+    local title = tostring(opts.title or "Window")
+    local id = tostring(opts.id or _mkId("DWKitWin"))
 
-    local tag = tostring(opts.profileTag or M.getProfileTagBestEffort())
-    if tag == "" then tag = "default" end
+    local parent = opts.parent
+    local x = opts.x or "0%"
+    local y = opts.y or "0%"
+    local w = opts.width or "30%"
+    local h = opts.height or "30%"
 
-    local G = _G.Geyser
-    if type(G) ~= "table" then
-        return nil
-    end
-
-    local pad = tonumber(opts.padding or 6) or 6
-    local btnSz = tonumber(opts.buttonSize or 18) or 18
-    local btnFont = tonumber(opts.buttonFontSize or 9) or 9
-
-    local nameFrame = string.format("__DWKit_%s_frame_%s", uiId, tag)
-    local nameContent = string.format("__DWKit_%s_content_%s", uiId, tag)
+    local onClose = opts.onClose
 
     local bundle = {
         frame = nil,
         content = nil,
         closeLabel = nil,
+        headerLabel = nil,
+        setTitle = nil,
         meta = {
-            uiId = uiId,
+            id = id,
             title = title,
-            profileTag = tag,
             adjustable = false,
-            nameFrame = nameFrame,
-            nameContent = nameContent,
-        },
+        }
     }
 
-    local Adjustable = _getAdjustableBestEffort()
-    if type(Adjustable) == "table" and type(Adjustable.Container) == "table" and type(Adjustable.Container.new) == "function" then
-        -- Use Adjustable.Container (movable/resizable)
-        local frame = Adjustable.Container:new({
-            name = nameFrame,
-            x = opts.x or 30,
-            y = opts.y or 220,
-            width = opts.width or 280,
-            height = opts.height or 120,
-            titleText = title,
-            titleTxtColor = "white",
-            titleFormat = "l##9",
-            padding = pad,
-            buttonsize = btnSz,
-            buttonFontSize = btnFont,
-            adjLabelstyle = Theme.headerStyle(),
-            buttonstyle = Theme.closeStyle(),
-            autoSave = true,
-            autoLoad = true,
-            raiseOnClick = true,
-            lockStyle = "standard",
+    -- Adjustable container path (preferred)
+    local okA, Adjustable = _safeRequire("Adjustable")
+    if okA and type(Adjustable) == "table" and type(Adjustable.Container) == "function" then
+        local frame = Adjustable.Container({
+            name = id,
+            x = x,
+            y = y,
+            width = w,
+            height = h,
+            fixed = false,
         })
 
-        bundle.frame = frame
-        bundle.meta.adjustable = true
-
-        M.hideMinimizeChromeBestEffort(frame)
-
-        if type(frame) == "table" then
-            bundle.closeLabel = frame.closeLabel
+        if parent then
+            pcall(function()
+                frame:setParent(parent)
+            end)
         end
 
-        _applyFrameStyleBestEffort(frame)
-
-        local insideParent = _resolveInsideParent(frame)
-
-        local content = G.Container:new({
-            name = nameContent,
-            x = 0,
-            y = 0,
-            width = "100%",
-            height = "100%",
-        }, insideParent)
-
-        bundle.content = content
-    else
-        -- Fallback: plain container (still themed)
-        local frame = G.Container:new({
-            name = nameFrame,
-            x = opts.x or 30,
-            y = opts.y or 220,
-            width = opts.width or 280,
-            height = opts.height or 120,
-        })
-
-        _applyFrameStyleBestEffort(frame)
-
-        local headerH = 24
-        local header = G.Label:new({
-            name = nameFrame .. "__hdr",
-            x = 0,
-            y = 0,
-            width = "100%",
-            height = headerH,
-        }, frame)
+        -- Hide minimizer, keep close
         pcall(function()
-            header:setStyleSheet(Theme.headerStyle())
-            header:echo(" " .. title)
+            if type(frame.minimizeLabel) == "table" then
+                frame.minimizeLabel:hide()
+            end
         end)
 
-        local close = G.Label:new({
-            name = nameFrame .. "__close",
-            x = "-28px",
-            y = 0,
-            width = "28px",
-            height = headerH,
-        }, frame)
-        pcall(function()
-            close:setStyleSheet(Theme.closeStyle())
-            close:echo("X")
-        end)
-
-        local content = G.Container:new({
-            name = nameContent,
-            x = 0,
-            y = headerH,
-            width = "100%",
-            height = "-" .. tostring(headerH) .. "px",
-        }, frame)
-
-        bundle.frame = frame
-        bundle.content = content
-        bundle.closeLabel = close
-        bundle.meta.adjustable = false
-    end
-
-    -- Wire close action
-    local onClose = opts.onClose
-    if type(onClose) ~= "function" then
-        onClose = function(b)
-            if type(b) == "table" and type(b.frame) == "table" and type(b.frame.hide) == "function" then
-                pcall(function() b.frame:hide() end)
+        local okInside = false
+        local content = nil
+        if type(frame.window) == "table" then
+            local inside = frame.window.Inside
+            if type(inside) == "table" then
+                content = inside
+                okInside = true
             end
         end
+
+        bundle.frame = frame
+        bundle.content = content
+        bundle.closeLabel = (type(frame.closeLabel) == "table") and frame.closeLabel or nil
+        bundle.meta.adjustable = true
+
+        if okInside ~= true then
+            -- fallback for content: use frame itself
+            bundle.content = frame
+        end
+
+        return bundle
     end
 
-    if type(bundle.closeLabel) == "table" and type(bundle.closeLabel.setClickCallback) == "function" then
-        pcall(function()
-            bundle.closeLabel:setClickCallback(function()
-                onClose(bundle)
-            end)
-        end)
+    -- Fallback Geyser frame path
+    local G = U.getGeyser()
+    if not G then
+        return bundle
+    end
+
+    local outer = G.Container:new({
+        name = id,
+        x = x,
+        y = y,
+        width = w,
+        height = h,
+    }, parent)
+
+    local headerH = 22
+
+    local header = G.Label:new({
+        name = id .. "_header",
+        x = 0,
+        y = 0,
+        width = "100%",
+        height = headerH,
+    }, outer)
+
+    local close = G.Label:new({
+        name = id .. "_close",
+        x = "100%-30",
+        y = 0,
+        width = 30,
+        height = headerH,
+    }, outer)
+
+    local content = G.Container:new({
+        name = id .. "_content",
+        x = 0,
+        y = headerH,
+        width = "100%",
+        height = "100%-" .. tostring(headerH),
+    }, outer)
+
+    pcall(function()
+        header:setStyleSheet(Theme.headerStyle())
+        header:echo(" " .. title)
+    end)
+
+    bundle.headerLabel = header
+
+    pcall(function()
+        close:setStyleSheet(Theme.closeStyle())
+        close:echo("<center>x</center>")
+    end)
+
+    bundle.frame = outer
+    bundle.content = content
+    bundle.closeLabel = close
+    bundle.meta.adjustable = false
+
+    -- Best-effort: allow callers to update title (used for status badges).
+    bundle.setTitle = function(newTitle)
+        newTitle = tostring(newTitle or "")
+        if newTitle == "" then return end
+        bundle.meta.title = newTitle
+
+        local frame = bundle.frame
+        local ok = false
+
+        if type(frame) == "table" then
+            local candidates = { "setTitle", "setWindowTitle", "setName", "setText" }
+            for _, fn in ipairs(candidates) do
+                if type(frame[fn]) == "function" then
+                    ok = pcall(function() frame[fn](frame, newTitle) end)
+                    if ok then break end
+                end
+            end
+        end
+
+        if not ok and type(bundle.headerLabel) == "table" and type(bundle.headerLabel.echo) == "function" then
+            pcall(function() bundle.headerLabel:echo(" " .. newTitle) end)
+        end
+    end
+
+    if type(onClose) == "function" then
+        if type(close) == "table" then
+            if type(_G.setLabelClickCallback) == "function" then
+                pcall(function()
+                    setLabelClickCallback(close.name, function()
+                        onClose(bundle)
+                    end)
+                end)
+            end
+        end
     end
 
     return bundle
