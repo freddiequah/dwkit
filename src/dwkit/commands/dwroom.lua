@@ -2,12 +2,14 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwroom
 -- Owner       : Commands
--- Version     : v2026-01-27B
+-- Version     : v2026-02-02A
 -- Purpose     :
 --   - Command handler for "dwroom" alias (SAFE manual surface).
 --   - Implements RoomEntities SAFE inspection + helpers:
 --       * dwroom                -> status
 --       * dwroom status         -> status
+--       * dwroom ui on|off|toggle|status
+--       * dwroom watch on|off|status
 --       * dwroom clear          -> clear snapshot (service-defined)
 --       * dwroom ingestclip     -> ingest look-like text from clipboard (SAFE)
 --       * dwroom fixture [name] -> ingest fixture if service supports it (SAFE)
@@ -15,26 +17,6 @@
 --
 -- IMPORTANT:
 --   - MUST remain SAFE: no send(), no sendAll(), no gameplay commands.
---
--- FIX (v2026-01-23A):
---   - event_bus.emit requires meta (3rd arg) to deliver in this environment.
---   - fallback emit now passes meta as 3rd arg.
---   - dwroom fixture now calls ingestFixture(opts) in service-native shape.
---
--- FIX (v2026-01-23B):
---   - refresh now passes a minimal svcOpts table into service refresh/reclassify calls
---     (source only) instead of the richer meta object used for ensure-emits/logging.
---   - fixture now requests forceEmit=true so the deterministic seed always produces
---     an Updated event (useful for UI/pipeline validation).
---
--- FIX (v2026-01-27A):
---   - Added router-compatible dispatch signature:
---       dispatch(ctx, kit, tokens)
---     so command_router.dispatchGenericCommand can call split modules directly.
---
--- FIX (v2026-01-27B) [StepB/B3]:
---   - dwroom no longer depends on ctx.printRoomEntitiesStatus injection.
---   - Status now prints full counts using svc.getState() (best-effort).
 --
 -- Public API  :
 --   - dispatch(ctx, roomEntitiesService, sub, arg) -> nil
@@ -44,7 +26,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-27B"
+M.VERSION = "v2026-02-02A"
 
 local function _mkOut(ctx)
     if type(ctx) == "table" and type(ctx.out) == "function" then
@@ -98,6 +80,7 @@ local function _usage(out)
     out("  dwroom status")
     out("  dwroom ui on|off|toggle")
     out("  dwroom ui status")
+    out("  dwroom watch on|off|status")
     out("  dwroom clear")
     out("  dwroom ingestclip")
     out("  dwroom fixture [name]")
@@ -105,6 +88,7 @@ local function _usage(out)
     out("")
     out("Notes:")
     out("  - SAFE only: does NOT send any gameplay commands.")
+    out("  - watch: passive capture only (triggers), no polling, no timers, no sends.")
     out("  - refresh best-effort: reclassify/emitUpdated or eventBus.emit if available.")
 end
 
@@ -321,7 +305,7 @@ local function _emitUpdatedEnsure(ctx, svc, meta, methodName)
         ts = os.time(),
     }
 
-    -- REQUIRED in this environment: emit(eventName, payload, meta)
+    -- emit(eventName, payload, meta) (meta is optional in event_bus, but keep explicit)
     local ebMeta = {
         source = tostring(payload.source or "cmd:dwroom:refresh"),
         service = "dwkit.commands.dwroom",
@@ -472,10 +456,10 @@ local function _resolveSvcFromKitOrCtx(ctx, kit)
     return nil
 end
 
-
 local function _uiCommand(ctx, arg)
     local gs = require("dwkit.config.gui_settings")
     local ui = require("dwkit.ui.roomentities_ui")
+    local out = _mkOut(ctx)
 
     -- "visible" is only meaningful when gui_settings visibility persistence is enabled.
     -- dwverify ui_smoke calls this explicitly; dwroom ui should do the same.
@@ -491,10 +475,10 @@ local function _uiCommand(ctx, arg)
         local enabled = gs.getEnabledOrDefault("roomentities_ui", false)
         local visible = gs.getVisibleOrDefault("roomentities_ui", false)
         local st = (type(ui)=="table" and type(ui.getState)=="function") and ui.getState() or {}
-        print(string.format("[DWKit Room UI] roomentities_ui enabled=%s visible=%s", tostring(enabled), tostring(visible)))
+        out(string.format("[DWKit Room UI] roomentities_ui enabled=%s visible=%s", tostring(enabled), tostring(visible)))
         if type(st) == "table" then
-            if st.lastError ~= nil then print("[DWKit Room UI] lastError=" .. tostring(st.lastError)) end
-            if st.lastUpdateTs ~= nil then print("[DWKit Room UI] lastUpdateTs=" .. tostring(st.lastUpdateTs)) end
+            if st.lastError ~= nil then out("[DWKit Room UI] lastError=" .. tostring(st.lastError)) end
+            if st.lastUpdateTs ~= nil then out("[DWKit Room UI] lastUpdateTs=" .. tostring(st.lastUpdateTs)) end
         end
         return true
     end
@@ -502,7 +486,7 @@ local function _uiCommand(ctx, arg)
     local function _apply()
         if type(ui)=="table" and type(ui.apply)=="function" then
             local ok, err = ui.apply()
-            if ok == false then print("[DWKit Room UI] apply failed: " .. tostring(err)) end
+            if ok == false then out("[DWKit Room UI] apply failed: " .. tostring(err)) end
         end
     end
 
@@ -510,7 +494,7 @@ local function _uiCommand(ctx, arg)
         gs.setEnabled("roomentities_ui", true)
         gs.setVisible("roomentities_ui", true)
         _apply()
-        print(string.format(
+        out(string.format(
             "[DWKit Room UI] roomentities_ui enabled=%s visible=%s",
             tostring(gs.getEnabledOrDefault("roomentities_ui", false)),
             tostring(gs.getVisibleOrDefault("roomentities_ui", false))
@@ -522,7 +506,7 @@ local function _uiCommand(ctx, arg)
         gs.setVisible("roomentities_ui", false)
         gs.setEnabled("roomentities_ui", false)
         _apply()
-        print(string.format(
+        out(string.format(
             "[DWKit Room UI] roomentities_ui enabled=%s visible=%s",
             tostring(gs.getEnabledOrDefault("roomentities_ui", false)),
             tostring(gs.getVisibleOrDefault("roomentities_ui", false))
@@ -533,7 +517,7 @@ local function _uiCommand(ctx, arg)
     if action == "hide" then
         gs.setVisible("roomentities_ui", false)
         _apply()
-        print(string.format(
+        out(string.format(
             "[DWKit Room UI] roomentities_ui enabled=%s visible=%s",
             tostring(gs.getEnabledOrDefault("roomentities_ui", false)),
             tostring(gs.getVisibleOrDefault("roomentities_ui", false))
@@ -547,7 +531,7 @@ local function _uiCommand(ctx, arg)
             gs.setVisible("roomentities_ui", false)
             gs.setEnabled("roomentities_ui", false)
             _apply()
-            print(string.format(
+            out(string.format(
                 "[DWKit Room UI] roomentities_ui enabled=%s visible=%s",
                 tostring(gs.getEnabledOrDefault("roomentities_ui", false)),
                 tostring(gs.getVisibleOrDefault("roomentities_ui", false))
@@ -556,7 +540,7 @@ local function _uiCommand(ctx, arg)
             gs.setEnabled("roomentities_ui", true)
             gs.setVisible("roomentities_ui", true)
             _apply()
-            print(string.format(
+            out(string.format(
                 "[DWKit Room UI] roomentities_ui enabled=%s visible=%s",
                 tostring(gs.getEnabledOrDefault("roomentities_ui", false)),
                 tostring(gs.getVisibleOrDefault("roomentities_ui", false))
@@ -565,8 +549,92 @@ local function _uiCommand(ctx, arg)
         return true
     end
 
-    print("[DWKit Room UI] Unknown ui action: " .. tostring(arg))
-    _usage(ctx)
+    out("[DWKit Room UI] Unknown ui action: " .. tostring(arg))
+    _usage(out)
+    return false
+end
+
+local function _watchCommand(ctx, arg)
+    local out = _mkOut(ctx)
+    local err = _mkErr(ctx)
+
+    local okS, statusSvcOrErr = _safeRequire("dwkit.services.roomfeed_status_service")
+    if not okS or type(statusSvcOrErr) ~= "table" then
+        err("RoomFeedStatusService not available: " .. tostring(statusSvcOrErr))
+        return false
+    end
+    local statusSvc = statusSvcOrErr
+
+    local okC, capOrErr = _safeRequire("dwkit.capture.roomfeed_capture")
+    if not okC or type(capOrErr) ~= "table" then
+        err("RoomFeedCapture not available: " .. tostring(capOrErr))
+        return false
+    end
+    local cap = capOrErr
+
+    local action = tostring(arg or ""):match("^%s*(.-)%s*$"):lower()
+    if action == "" or action == "status" then
+        local hs = nil
+        local st = nil
+        if type(statusSvc.getHealthState) == "function" then
+            local ok, v1, v2 = pcall(statusSvc.getHealthState, { nowTs = os.time(), source = "cmd:dwroom:watch:status" })
+            if ok then
+                hs = v1
+                st = v2
+            end
+        end
+        if hs == nil and type(statusSvc.getState) == "function" then
+            local ok, v = pcall(statusSvc.getState)
+            if ok then st = v end
+        end
+        local capState = (type(cap.getDebugState) == "function") and cap.getDebugState() or {}
+
+        out("[DWKit Room Watch] status")
+        if type(st) == "table" then
+            out("  enabled=" .. tostring(st.enabled))
+            out("  health=" .. tostring(hs or st.health or "unknown"))
+            out("  lastCaptureTs=" .. tostring(st.lastCaptureTs or "nil"))
+            out("  lastAbortReason=" .. tostring(st.lastAbortReason or "nil"))
+            out("  lastError=" .. tostring(st.lastError or "nil"))
+        else
+            out("  (status state not available)")
+        end
+        if type(capState) == "table" then
+            out("  installed=" .. tostring(capState.installed))
+            out("  snapCapturing=" .. tostring(capState.snapCapturing))
+            out("  snapBufLen=" .. tostring(capState.snapBufLen))
+        end
+        return true
+    end
+
+    if action == "on" then
+        local ok1, e1 = pcall(cap.install, { source = "cmd:dwroom:watch:on" })
+        if not ok1 then
+            err("watch on failed (capture.install): " .. tostring(e1))
+            return false
+        end
+        if type(statusSvc.setEnabled) == "function" then
+            local ok2, e2 = pcall(statusSvc.setEnabled, true, { source = "cmd:dwroom:watch:on" })
+            if not ok2 then
+                err("watch on failed (status.setEnabled): " .. tostring(e2))
+                return false
+            end
+        end
+        out("[DWKit Room Watch] watch ON (passive capture installed)")
+        return true
+    end
+
+    if action == "off" then
+        if type(statusSvc.setEnabled) == "function" then
+            pcall(statusSvc.setEnabled, false, { source = "cmd:dwroom:watch:off" })
+        end
+        pcall(cap.uninstall, { source = "cmd:dwroom:watch:off" })
+        out("[DWKit Room Watch] watch OFF (passive capture removed)")
+        return true
+    end
+
+    out("[DWKit Room Watch] Unknown watch action: " .. tostring(arg))
+    _usage(out)
     return false
 end
 
@@ -581,9 +649,13 @@ local function _dispatchCore(ctx, svc, sub, arg)
         return
     end
 
-
     if sub == "ui" then
         _uiCommand(ctx, arg)
+        return
+    end
+
+    if sub == "watch" then
+        _watchCommand(ctx, arg)
         return
     end
 
@@ -642,5 +714,4 @@ function M.reset()
 end
 
 return M
-
 -- END FILE: src/dwkit/commands/dwroom.lua

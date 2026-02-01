@@ -1,7 +1,8 @@
+-- FILE: src/dwkit/bus/event_registry.lua
 -- #########################################################################
 -- Module Name : dwkit.bus.event_registry
 -- Owner       : Bus
--- Version     : v2026-01-17A
+-- Version     : v2026-02-02A
 -- Purpose     :
 --   - Canonical registry for all DWKit events (code mirror of docs/Event_Registry_v1.0.md).
 --   - No events are emitted here. Registry only.
@@ -33,7 +34,7 @@
 
 local M                           = {}
 
-M.VERSION                         = "v2026-01-17A"
+M.VERSION                         = "v2026-02-02A"
 
 local ID                          = require("dwkit.core.identity")
 
@@ -46,6 +47,7 @@ local EV_SVC_SKILLREG_UPDATED     = PREFIX .. "Service:SkillRegistry:Updated"
 local EV_SVC_SCORESTORE_UPDATED   = PREFIX .. "Service:ScoreStore:Updated"
 local EV_SVC_ROOMENTITIES_UPDATED = PREFIX .. "Service:RoomEntities:Updated"
 local EV_SVC_WHOSTORE_UPDATED     = PREFIX .. "Service:WhoStore:Updated"
+local EV_SVC_ROOMFEEDSTATUS_UPDATED = PREFIX .. "Service:RoomFeedStatus:Updated"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -69,7 +71,7 @@ end
 -- - M.VERSION is the code module version tag (calendar style)
 -- -------------------------
 local REG = {
-  version = "v1.9",
+  version = "v1.10",
   moduleVersion = M.VERSION,
   events = {
     [EV_BOOT_READY] = {
@@ -218,6 +220,28 @@ local REG = {
         "SAFE internal event (no gameplay commands).",
         "Manual-only: emitted only when service API is invoked.",
         "Primary consumer is RoomEntitiesService for best-effort player reclassification.",
+      },
+    },
+
+    [EV_SVC_ROOMFEEDSTATUS_UPDATED] = {
+      name = EV_SVC_ROOMFEEDSTATUS_UPDATED,
+      description = "Emitted when RoomFeedStatusService changes watch/health state (SAFE; no gameplay sends).",
+      payloadSchema = {
+        ts = "number",
+        state = "table",
+        delta = "table (optional)",
+        source = "string (optional)",
+      },
+      producers = {
+        "dwkit.services.roomfeed_status_service",
+      },
+      consumers = {
+        "internal (ui/tests/integrations)",
+      },
+      notes = {
+        "SAFE internal event (no gameplay commands).",
+        "Manual-only: emitted on watch on/off, capture OK/abort, and state transitions.",
+        "Primary consumer is UI modules that need to show Room Watch Health.",
       },
     },
   }
