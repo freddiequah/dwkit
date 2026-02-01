@@ -103,3 +103,9 @@ docs/_RECOVER_*.txt
 
 docs/_RECOVERED_*.md
 
+
+_backup_before_roomui.patch.txt
+
+_backup_roomentities_service.lua
+
+_backup_verification_plan.lua

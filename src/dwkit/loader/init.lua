@@ -116,6 +116,26 @@ function Loader.init()
         DWKit._guiSettingsInitLoadError = "guiSettings require failed"
     end
 
+
+    -- UI: RoomEntities (fast path)
+    -- NOTE: We intentionally initialize UI modules here (idempotent) so users can enable/disable via commands
+    -- without needing manual `lua do ... end` requires.
+    do
+        local ok, ui = pcall(require, "dwkit.ui.roomentities_ui")
+        if ok and type(ui) == "table" then
+            if type(ui.init) == "function" then
+                local okInit, errInit = pcall(ui.init)
+                if not okInit then
+                    print("[DWKit Loader] WARN roomentities_ui.init failed: " .. tostring(errInit))
+                end
+            end
+            DWKit.ui = DWKit.ui or {}
+            DWKit.ui.roomentities_ui = ui
+        else
+            print("[DWKit Loader] WARN require roomentities_ui failed: " .. tostring(ui))
+        end
+    end
+
     -- Attach test surface (SAFE, manual-only). Guarded to avoid hard failure.
     DWKit.test = DWKit.test or {}
 

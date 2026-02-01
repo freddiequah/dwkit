@@ -511,7 +511,7 @@ local function _extractKnownPlayersIndexFromWhoStoreState(wState)
 
     -- Prefer docs-first snapshot entries which preserve display-case (entry.name).
     -- This avoids treating WhoStore Option-A lowercase legacy players map as canonical.
-    do
+	    do
         local snap = wState.snapshot
         if type(snap) ~= "table" and type(wState.byName) == "table" then
             -- caller might have passed a snapshot directly
@@ -725,7 +725,7 @@ local function _classifyLookLine(line, opts, knownPlayersIdx)
 
     -- NEW: common room-object lines:
     --   "<thing> hangs here ..." -> items
-    do
+	    do
         local phrase = lineClean:match("^(.-)%s+hangs%s+here")
         if type(phrase) == "string" then
             phrase = _trim(phrase)
@@ -747,68 +747,70 @@ local function _classifyLookLine(line, opts, knownPlayersIdx)
         end
     end
 
-    do
-        local phrase, posture = lineClean:match("^(.-)%s+is%s+(%a+)%s+here%.$")
-        if type(phrase) == "string" and type(posture) == "string" then
-            posture = posture:lower()
-            if POSTURES[posture] == true then
-                phrase = _trim(phrase)
-                if phrase ~= "" then
-                    local conf = _confidenceForName(phrase, knownPlayersIdx)
-                    if conf == "exact" then
-                        return "players", _asKey(phrase)
-                    end
+	    do
+	        -- Allow trailing descriptors after the first period, e.g. "X is here. (glowing)"
+	        local phrase, posture = lineClean:match("^(.-)%s+is%s+(%a+)%s+here%.")
+	        if type(phrase) == "string" and type(posture) == "string" then
+	            posture = posture:lower()
+	            if POSTURES[posture] == true then
+	                phrase = _trim(phrase)
+	                if phrase ~= "" then
+	                    local conf = _confidenceForName(phrase, knownPlayersIdx)
+	                    if conf == "exact" then
+	                        return "players", _asKey(phrase)
+	                    end
 
-                    -- Candidate but not exact: prefer unknown (safe).
-                    if conf == "candidate" then
-                        return "unknown", _asKey(phrase)
-                    end
+	                    -- Candidate but not exact: prefer unknown (safe).
+	                    if conf == "candidate" then
+	                        return "unknown", _asKey(phrase)
+	                    end
 
-                    if opts.assumeCapitalizedAsPlayer == true then
-                        local first = phrase:sub(1, 1)
-                        if first:match("%u") then
-                            return "players", _asKey(phrase)
-                        end
-                    end
+	                    if opts.assumeCapitalizedAsPlayer == true then
+	                        local first = phrase:sub(1, 1)
+	                        if first:match("%u") then
+	                            return "players", _asKey(phrase)
+	                        end
+	                    end
 
-                    return "unknown", _asKey(phrase)
-                end
-            end
-        end
-    end
+	                    return "unknown", _asKey(phrase)
+	                end
+	            end
+	        end
+	    end
 
-    do
-        local phrase = lineClean:match("^(.-)%s+is%s+here%.$")
-        if type(phrase) == "string" then
-            phrase = _trim(phrase)
-            if phrase ~= "" then
-                local conf = _confidenceForName(phrase, knownPlayersIdx)
-                if conf == "exact" then
-                    return "players", _asKey(phrase)
-                end
+	    do
+	        -- Allow trailing descriptors after the first period, e.g. "X is here. (glowing)"
+	        local phrase = lineClean:match("^(.-)%s+is%s+here%.")
+	        if type(phrase) == "string" then
+	            phrase = _trim(phrase)
+	            if phrase ~= "" then
+	                local conf = _confidenceForName(phrase, knownPlayersIdx)
+	                if conf == "exact" then
+	                    return "players", _asKey(phrase)
+	                end
 
-                -- Candidate but not exact: prefer unknown (safe).
-                if conf == "candidate" then
-                    return "unknown", _asKey(phrase)
-                end
+	                -- Candidate but not exact: prefer unknown (safe).
+	                if conf == "candidate" then
+	                    return "unknown", _asKey(phrase)
+	                end
 
-                if lower:find("corpse") then
-                    return "items", _asKey(phrase)
-                end
+	                if lower:find("corpse") then
+	                    return "items", _asKey(phrase)
+	                end
 
-                local pLower = phrase:lower()
+	                local pLower = phrase:lower()
 
-                if pLower:match("^(a%s+)") or pLower:match("^(an%s+)") or pLower:match("^(the%s+)") then
-                    if _isProbablyItemPhrase(pLower) then
-                        return "items", _asKey(phrase)
-                    end
-                    return "mobs", _asKey(phrase)
-                end
+	                if pLower:match("^(a%s+)") or pLower:match("^(an%s+)") or pLower:match("^(the%s+)") then
+	                    if _isProbablyItemPhrase(pLower) then
+	                        return "items", _asKey(phrase)
+	                    end
+	                    return "mobs", _asKey(phrase)
+	                end
 
-                return "unknown", _asKey(phrase)
-            end
-        end
-    end
+	                return "unknown", _asKey(phrase)
+	            end
+	        end
+	    end
 
     if lower:find("corpse") then
         return "items", _asKey(lineClean)
