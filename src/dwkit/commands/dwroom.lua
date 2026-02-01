@@ -96,6 +96,8 @@ local function _usage(out)
     out("[DWKit Room] Usage:")
     out("  dwroom")
     out("  dwroom status")
+    out("  dwroom ui on|off|toggle")
+    out("  dwroom ui status")
     out("  dwroom clear")
     out("  dwroom ingestclip")
     out("  dwroom fixture [name]")
@@ -126,13 +128,27 @@ local function _printStatus(ctx, svc)
     local out = _mkOut(ctx)
     local err = _mkErr(ctx)
 
-    if type(svc) ~= "table" then
-        err("RoomEntitiesService not available.")
-        return
+    local function _looksLikeSvc(s)
+        return type(s) == "table" and (
+            type(s.getState) == "function" or
+            type(s.ingestLookText) == "function" or
+            type(s.reclassifyFromWhoStore) == "function" or
+            s.VERSION ~= nil
+        )
+    end
+
+    local loadErr = nil
+    if not _looksLikeSvc(svc) then
+        local ok, modOrErr = pcall(require, "dwkit.services.roomentities_service")
+        if ok and _looksLikeSvc(modOrErr) then
+            svc = modOrErr
+        else
+            loadErr = modOrErr
+        end
     end
 
     local state = {}
-    if type(svc.getState) == "function" then
+    if type(svc) == "table" and type(svc.getState) == "function" then
         local ok, v, _, _, callErr = _call(ctx, svc, "getState")
         if ok and type(v) == "table" then
             state = v
@@ -144,7 +160,12 @@ local function _printStatus(ctx, svc)
     local c = _roomCountsFromState(state)
 
     out("[DWKit Room] status (dwroom)")
-    out("  serviceVersion=" .. tostring(svc.VERSION or "unknown"))
+    out("  serviceVersion=" .. tostring((type(svc) == "table" and svc.VERSION) or "unknown"))
+    if loadErr ~= nil then
+        out("  serviceLoadErr=" .. tostring(loadErr))
+    elseif type(svc) ~= "table" then
+        err("RoomEntitiesService not available.")
+    end
     out("  players=" .. tostring(c.players))
     out("  mobs=" .. tostring(c.mobs))
     out("  items=" .. tostring(c.items))
@@ -425,19 +446,128 @@ local function _doRefreshSafe(ctx, svc)
 end
 
 local function _resolveSvcFromKitOrCtx(ctx, kit)
+    local function _looksLikeSvc(s)
+        return type(s) == "table" and (
+            type(s.getState) == "function" or
+            type(s.ingestLookText) == "function" or
+            type(s.reclassifyFromWhoStore) == "function" or
+            s.VERSION ~= nil
+        )
+    end
+
     if type(ctx) == "table" and type(ctx.getService) == "function" then
         local s = ctx.getService("roomEntitiesService")
-        if type(s) == "table" then return s end
+        if _looksLikeSvc(s) then return s end
     end
 
     if type(kit) == "table" and type(kit.services) == "table" and type(kit.services.roomEntitiesService) == "table" then
-        return kit.services.roomEntitiesService
+        if _looksLikeSvc(kit.services.roomEntitiesService) then
+            return kit.services.roomEntitiesService
+        end
     end
 
     local ok, mod = _safeRequire("dwkit.services.roomentities_service")
-    if ok and type(mod) == "table" then return mod end
+    if ok and _looksLikeSvc(mod) then return mod end
 
     return nil
+end
+
+
+local function _uiCommand(ctx, arg)
+    local gs = require("dwkit.config.gui_settings")
+    local ui = require("dwkit.ui.roomentities_ui")
+
+    -- "visible" is only meaningful when gui_settings visibility persistence is enabled.
+    -- dwverify ui_smoke calls this explicitly; dwroom ui should do the same.
+    if type(gs) == "table" and type(gs.enableVisiblePersistence) == "function" then
+        pcall(function() gs.enableVisiblePersistence({}) end)
+    end
+
+    -- Ensure UI module has registered settings/subscriptions (idempotent).
+    if type(ui) == "table" and type(ui.init) == "function" then pcall(ui.init) end
+
+    local action = tostring(arg or ""):match("^%s*(.-)%s*$"):lower()
+    if action == "" or action == "status" then
+        local enabled = gs.getEnabledOrDefault("roomentities_ui", false)
+        local visible = gs.getVisibleOrDefault("roomentities_ui", false)
+        local st = (type(ui)=="table" and type(ui.getState)=="function") and ui.getState() or {}
+        print(string.format("[DWKit Room UI] roomentities_ui enabled=%s visible=%s", tostring(enabled), tostring(visible)))
+        if type(st) == "table" then
+            if st.lastError ~= nil then print("[DWKit Room UI] lastError=" .. tostring(st.lastError)) end
+            if st.lastUpdateTs ~= nil then print("[DWKit Room UI] lastUpdateTs=" .. tostring(st.lastUpdateTs)) end
+        end
+        return true
+    end
+
+    local function _apply()
+        if type(ui)=="table" and type(ui.apply)=="function" then
+            local ok, err = ui.apply()
+            if ok == false then print("[DWKit Room UI] apply failed: " .. tostring(err)) end
+        end
+    end
+
+    if action == "on" or action == "show" then
+        gs.setEnabled("roomentities_ui", true)
+        gs.setVisible("roomentities_ui", true)
+        _apply()
+        print(string.format(
+            "[DWKit Room UI] roomentities_ui enabled=%s visible=%s",
+            tostring(gs.getEnabledOrDefault("roomentities_ui", false)),
+            tostring(gs.getVisibleOrDefault("roomentities_ui", false))
+        ))
+        return true
+    end
+
+    if action == "off" then
+        gs.setVisible("roomentities_ui", false)
+        gs.setEnabled("roomentities_ui", false)
+        _apply()
+        print(string.format(
+            "[DWKit Room UI] roomentities_ui enabled=%s visible=%s",
+            tostring(gs.getEnabledOrDefault("roomentities_ui", false)),
+            tostring(gs.getVisibleOrDefault("roomentities_ui", false))
+        ))
+        return true
+    end
+
+    if action == "hide" then
+        gs.setVisible("roomentities_ui", false)
+        _apply()
+        print(string.format(
+            "[DWKit Room UI] roomentities_ui enabled=%s visible=%s",
+            tostring(gs.getEnabledOrDefault("roomentities_ui", false)),
+            tostring(gs.getVisibleOrDefault("roomentities_ui", false))
+        ))
+        return true
+    end
+
+    if action == "toggle" then
+        local enabled = gs.getEnabledOrDefault("roomentities_ui", false)
+        if enabled then
+            gs.setVisible("roomentities_ui", false)
+            gs.setEnabled("roomentities_ui", false)
+            _apply()
+            print(string.format(
+                "[DWKit Room UI] roomentities_ui enabled=%s visible=%s",
+                tostring(gs.getEnabledOrDefault("roomentities_ui", false)),
+                tostring(gs.getVisibleOrDefault("roomentities_ui", false))
+            ))
+        else
+            gs.setEnabled("roomentities_ui", true)
+            gs.setVisible("roomentities_ui", true)
+            _apply()
+            print(string.format(
+                "[DWKit Room UI] roomentities_ui enabled=%s visible=%s",
+                tostring(gs.getEnabledOrDefault("roomentities_ui", false)),
+                tostring(gs.getVisibleOrDefault("roomentities_ui", false))
+            ))
+        end
+        return true
+    end
+
+    print("[DWKit Room UI] Unknown ui action: " .. tostring(arg))
+    _usage(ctx)
+    return false
 end
 
 local function _dispatchCore(ctx, svc, sub, arg)
@@ -448,6 +578,12 @@ local function _dispatchCore(ctx, svc, sub, arg)
 
     if sub == "" or sub == "status" then
         _printStatus(ctx, svc)
+        return
+    end
+
+
+    if sub == "ui" then
+        _uiCommand(ctx, arg)
         return
     end
 

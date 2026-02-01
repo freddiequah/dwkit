@@ -141,6 +141,21 @@ local SUITES = {
         },
     },
 
+    roomentities_items_trailing_descriptors = {
+        title = "roomentities_items_trailing_descriptors",
+        description =
+        "RoomEntities parsing: item lines like 'X is here. (glowing) ...' must be classified as items (not dropped).",
+        delay = 0.30,
+        steps = {
+            {
+                cmd =
+                'lua do local R=require("dwkit.services.roomentities_service"); local ok,err=R.clear({source="dwverify:roomitems"}); if not ok then error("RoomEntities clear failed: "..tostring(err)) end; ok,err=R.ingestLookLines({"A large keg of Killians Irish Red is here.","A self-destruct mechanism is here. (whirring) (humming) (glowing)"},{source="dwverify:roomitems"}); if not ok then error("ingestLookLines failed: "..tostring(err)) end; local st=R.getState(); if type(st.items)~="table" then error("Expected items table") end; if st.items["A large keg of Killians Irish Red"]~=true then error("Expected item: large keg") end; if st.items["A self-destruct mechanism"]~=true then error("Expected item: self-destruct mechanism (trailing descriptors)") end; local c=0; for _ in pairs(st.items) do c=c+1 end; print("[dwverify-roomentities] PASS items captured (count="..tostring(c)..")") end',
+                note = "ASSERT: item lines with trailing descriptors after first period are captured as items.",
+            },
+            { cmd = "dwroom status", note = "Human confirmation: items should be >= 2 after Step 1." },
+        },
+    },
+
     -- Live clear (NO WHO send; asserts empty snapshot after clear)
     whostore_live_clear = {
         title = "whostore_live_clear",
