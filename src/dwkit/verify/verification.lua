@@ -3,7 +3,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification
 -- Owner       : Verify
--- Version     : v2026-01-28B
+-- Version     : v2026-01-31A
 -- Purpose     :
 --   - Stable dwverify runner.
 --   - Executes a named suite from verification_plan.lua as a one-shot manual batch.
@@ -26,7 +26,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-28B"
+M.VERSION = "v2026-01-31A"
 
 local STATE = {
     running = false,
@@ -277,11 +277,12 @@ function M.run(suiteName, opts)
     if type(suiteKey) ~= "string" or suiteKey == "" then suiteKey = "default" end
     suiteKey = _trim(suiteKey)
 
-    local okPlan, Plan = pcall(require, "dwkit.verify.verification_plan")
-    if not okPlan or type(Plan) ~= "table" then
-        STATE.lastErr = "verification_plan not available"
+    local okPlan, PlanOrErr = pcall(require, "dwkit.verify.verification_plan")
+    if not okPlan or type(PlanOrErr) ~= "table" then
+        STATE.lastErr = "verification_plan not available: " .. tostring(PlanOrErr)
         return false, STATE.lastErr
     end
+    local Plan = PlanOrErr
 
     local suite = nil
     if type(Plan.getSuite) == "function" then

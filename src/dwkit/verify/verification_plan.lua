@@ -1,9 +1,10 @@
+-- FILE: src/dwkit/verify/verification_plan.lua
 -- #########################################################################
 -- BEGIN FILE: src/dwkit/verify/verification_plan.lua
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-01-30D
+-- Version     : v2026-02-01C
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -17,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-30D"
+M.VERSION = "v2026-02-01C"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -110,6 +111,33 @@ local SUITES = {
                 note = "Asserts Option A indexing policy and compatibility lookups (FAILs if any check fails).",
             },
             { cmd = "dwwho status", note = "Optional human confirmation: status should reflect latest update source=dwverify:index." },
+        },
+    },
+
+    -- NEW: RoomEntities confidence gate suite (prefer Unknown unless exact-case match)
+    roomentities_whostore_confidence_gate = {
+        title = "roomentities_whostore_confidence_gate",
+        description =
+        "RoomEntities policy: case-insensitive WhoStore match is candidate only; auto player classification requires exact display-name match. Note: ingestLookText replaces state each call, so human checks are split across steps.",
+        delay = 0.30,
+        steps = {
+            {
+                cmd =
+                'lua do local W=require("dwkit.services.whostore_service"); local R=require("dwkit.services.roomentities_service"); local ok,err=W.clear({source="dwverify:reconf"}); if not ok then error("WhoStore clear failed: "..tostring(err)) end; ok,err=W.setState({players={"Gaidin"}},{source="dwverify:reconf"}); if not ok then error("WhoStore setState failed: "..tostring(err)) end; ok,err=R.clear({source="dwverify:reconf"}); if not ok then error("RoomEntities clear failed: "..tostring(err)) end; print("[dwverify-roomentities] seeded WhoStore players={Gaidin} and cleared RoomEntities") end',
+                note = "Seed WhoStore with canonical display name and clear RoomEntities state.",
+            },
+            {
+                cmd =
+                'lua do local R=require("dwkit.services.roomentities_service"); local ok,err=R.ingestLookText("gaidin is here.",{source="dwverify:reconf"}); if not ok then error("ingestLookText failed: "..tostring(err)) end; local st=R.getState(); if type(st.players)=="table" and st.players["gaidin"]==true then error("Expected gaidin NOT in players (case mismatch)"); end; if type(st.unknown)~="table" or st.unknown["gaidin"]~=true then error("Expected gaidin in unknown (candidate only)"); end; ok,err=R.reclassifyFromWhoStore({source="dwverify:reconf"}); if not ok then error("reclassifyFromWhoStore failed: "..tostring(err)) end; st=R.getState(); if type(st.players)=="table" and st.players["gaidin"]==true then error("Expected gaidin NOT promoted by reclassify (case mismatch)"); end; if type(st.unknown)~="table" or st.unknown["gaidin"]~=true then error("Expected gaidin still in unknown after reclassify"); end; print("[dwverify-roomentities] PASS candidate-only gaidin stays unknown") end',
+                note = "ASSERT: lower-case gaidin is candidate-only and remains Unknown (even after reclassify).",
+            },
+            { cmd = "dwroom status", note = "Human check after Step 2: unknown should include gaidin; players should be 0." },
+            {
+                cmd =
+                'lua do local R=require("dwkit.services.roomentities_service"); local ok,err=R.ingestLookText("Gaidin is here.",{source="dwverify:reconf"}); if not ok then error("ingestLookText failed: "..tostring(err)) end; local st=R.getState(); if type(st.players)~="table" or st.players["Gaidin"]~=true then error("Expected Gaidin in players (exact match)"); end; print("[dwverify-roomentities] PASS exact-match Gaidin classified as player") end',
+                note = "ASSERT: exact-case Gaidin is classified as player.",
+            },
+            { cmd = "dwroom status", note = "Human check after Step 4: players should include Gaidin; unknown may be 0 due to replace-on-ingest." },
         },
     },
 
@@ -304,143 +332,8 @@ local SUITES = {
             },
             {
                 cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("presence_ui", true, {noSave=true}); gs.setVisible("presence_ui", false, {noSave=true}); local UI=require("dwkit.ui.presence_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] presence_ui visible=%s enabled=%s", tostring(s.visible), tostring(s.enabled))) end',
-                note = "Hide presence_ui via gui_settings + apply(); print state.",
-            },
-
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", true, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] roomentities_ui visible=%s enabled=%s hasContainer=%s hasLabel=%s", tostring(s.visible), tostring(s.enabled), tostring(s.widgets and s.widgets.hasContainer), tostring(s.widgets and s.widgets.hasLabel))) end',
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", true, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] roomentities_ui visible=%s enabled=%s hasContainer=%s hasLabel=%s hasListRoot=%s", tostring(s.visible), tostring(s.enabled), tostring(s.widgets and s.widgets.hasContainer), tostring(s.widgets and s.widgets.hasLabel), tostring(s.widgets and s.widgets.hasListRoot))) end',
                 note = "Show roomentities_ui via gui_settings + apply(); print state.",
-            },
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", false, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] roomentities_ui visible=%s enabled=%s", tostring(s.visible), tostring(s.enabled))) end',
-                note = "Hide roomentities_ui via gui_settings + apply(); print state.",
-            },
-        },
-    },
-
-    -- NEW: RoomEntities row-list smoke (console verification; no clicks required)
-    roomentities_smoke = {
-        title = "roomentities_smoke",
-        description = "RoomEntities row list: show UI, print lastRender counts/flags, hide UI (no screenshots)",
-        delay = 0.25,
-        steps = {
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", true, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); local lr=s.lastRender or {}; local c=lr.counts or {}; print(string.format("[dwverify-roomentities] visible=%s enabled=%s rowUi=%s whoBoost=%s overrides=%s players=%s mobs=%s items=%s unknown=%s err=%s", tostring(s.visible), tostring(s.enabled), tostring(lr.usedRowUi), tostring(lr.usedWhoStoreBoost), tostring((s.overrides and s.overrides.activeOverrideCount) or 0), tostring(c.players), tostring(c.mobs), tostring(c.items), tostring(c.unknown), tostring(lr.lastError))) end',
-                note = "Show roomentities_ui, render, and print lastRender counters.",
-            },
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", false, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-roomentities] hide visible=%s enabled=%s", tostring(s.visible), tostring(s.enabled))) end',
-                note = "Hide roomentities_ui via gui_settings + apply(); print state.",
-            },
-        },
-    },
-
-    -- NEW: RoomEntities + WhoStore boost proof (fixture-driven, deterministic PASS/FAIL)
-    roomentities_whostore_boost_fixture = {
-        title = "roomentities_whostore_boost_fixture",
-        description =
-        "Deterministic: seed WhoStore (Gaidin), seed RoomEntities unknown ('Gaidin the adventurer'), show UI and ASSERT whoBoost=true + players>=1, then hide.",
-        delay = 0.30,
-        steps = {
-            {
-                cmd =
-                'lua do local WS=require("dwkit.services.whostore_service"); local ok,err=WS.clear({source="dwverify:roomentities"}); if not ok then error("WhoStore clear failed: "..tostring(err)) end; ok,err=WS.setState({players={"Gaidin"}},{source="dwverify:roomentities"}); if not ok then error("WhoStore setState failed: "..tostring(err)) end; print("[dwverify-roomentities] seeded WhoStore players=Gaidin") end',
-                note = "Seed WhoStore with known player Gaidin (case-insensitive getEntry).",
-            },
-            {
-                cmd =
-                'lua do local S=require("dwkit.services.roomentities_service"); local ok,err=S.ingestFixture({unknown={"Gaidin the adventurer"}, mobs={"a fixture goblin"}, items={"a fixture chest"}, source="dwverify:roomentities"}); if not ok then error("RoomEntities ingestFixture failed: "..tostring(err)) end; print("[dwverify-roomentities] seeded RoomEntities fixture (unknown includes prefix phrase)") end',
-                note =
-                "Seed RoomEntities with unknown phrase starting with known player name (triggers UI prefix boost).",
-            },
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", true, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); local lr=s.lastRender or {}; local c=lr.counts or {}; if lr.usedWhoStoreBoost~=true then error("Expected whoBoost=true") end; if tonumber(c.players or 0)<1 then error("Expected players>=1") end; print(string.format("[dwverify-roomentities] PASS whoBoost=%s players=%s mobs=%s items=%s unknown=%s err=%s", tostring(lr.usedWhoStoreBoost), tostring(c.players), tostring(c.mobs), tostring(c.items), tostring(c.unknown), tostring(lr.lastError))) end',
-                note = "Show UI and ASSERT whoBoost=true + players>=1 (suite FAILs if not).",
-            },
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", false, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-roomentities] hide visible=%s enabled=%s", tostring(s.visible), tostring(s.enabled))) end',
-                note = "Hide roomentities_ui via gui_settings + apply(); print state.",
-            },
-        },
-    },
-
-    -- NEW: RoomEntities auto-reclassify on WhoStore Updated (event-driven, deterministic PASS/FAIL)
-    roomentities_whostore_live_update_reacts = {
-        title = "roomentities_whostore_live_update_reacts",
-        description =
-        "Event-driven: seed RoomEntities unknown ('Gaidin the adventurer') while WhoStore empty; then set WhoStore players=Gaidin and ASSERT RoomEntitiesService reclassified to players['Gaidin'] and emitted update; optionally show UI and confirm players>=1.",
-        delay = 0.35,
-        steps = {
-            {
-                cmd =
-                'lua do local WS=require("dwkit.services.whostore_service"); local ok,err=WS.clear({source="dwverify:reclassify"}); if not ok then error("WhoStore clear failed: "..tostring(err)) end; local S=require("dwkit.services.roomentities_service"); ok,err=S.clear({source="dwverify:reclassify"}); if not ok then error("RoomEntities clear failed: "..tostring(err)) end; ok,err=S.ingestFixture({unknown={"Gaidin the adventurer"}, source="dwverify:reclassify"}); if not ok then error("RoomEntities ingestFixture failed: "..tostring(err)) end; local st=S.getState(); if type(st.unknown)~="table" or st.unknown["Gaidin the adventurer"]~=true then error("Expected baseline unknown contains phrase") end; if type(st.players)=="table" and st.players["Gaidin"]==true then error("Unexpected baseline players[Gaidin] already true") end; local stats=S.getStats(); _G.DWVERIFY_RE_UPD=tonumber((stats and stats.updates) or 0) or 0; _G.DWVERIFY_RE_EMIT=tonumber((stats and stats.emits) or 0) or 0; print(string.format("[dwverify-roomentities] baseline set; updates=%s emits=%s", tostring(_G.DWVERIFY_RE_UPD), tostring(_G.DWVERIFY_RE_EMIT))) end',
-                note = "Baseline: WhoStore empty; RoomEntities has unknown phrase; record RoomEntities stats.",
-            },
-            {
-                cmd =
-                'lua do local WS=require("dwkit.services.whostore_service"); local ok,err=WS.setState({players={"Gaidin"}},{source="dwverify:reclassify"}); if not ok then error("WhoStore setState failed: "..tostring(err)) end; print("[dwverify-roomentities] seeded WhoStore players=Gaidin (should trigger RoomEntities reclassify via event)") end',
-                delay = 0.85,
-                note = "Trigger WhoStore Updated; wait for RoomEntities event-driven reclassify + emit.",
-            },
-            {
-                cmd =
-                'lua do local S=require("dwkit.services.roomentities_service"); local st=S.getState(); if type(st.players)~="table" or st.players["Gaidin"]~=true then error("Expected players[Gaidin]=true after WhoStore update") end; if type(st.unknown)=="table" and st.unknown["Gaidin the adventurer"]==true then error("Expected unknown phrase removed after canonicalize") end; local stats=S.getStats(); local u=tonumber((stats and stats.updates) or 0) or 0; local e=tonumber((stats and stats.emits) or 0) or 0; if u<=tonumber(_G.DWVERIFY_RE_UPD or 0) then error("Expected updates increased after reclassify; before="..tostring(_G.DWVERIFY_RE_UPD).." after="..tostring(u)) end; if e<=tonumber(_G.DWVERIFY_RE_EMIT or 0) then error("Expected emits increased after reclassify; before="..tostring(_G.DWVERIFY_RE_EMIT).." after="..tostring(e)) end; print(string.format("[dwverify-roomentities] PASS reclassify players[Gaidin]=true updates=%s emits=%s", tostring(u), tostring(e))) end',
-                note = "ASSERT: RoomEntitiesService reclassified + emitted (suite FAILs if not).",
-            },
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", true, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); local lr=s.lastRender or {}; local c=lr.counts or {}; if tonumber(c.players or 0)<1 then error("Expected UI players>=1 after service reclassify") end; print(string.format("[dwverify-roomentities] UI PASS players=%s mobs=%s items=%s unknown=%s whoBoost=%s rowUi=%s err=%s", tostring(c.players), tostring(c.mobs), tostring(c.items), tostring(c.unknown), tostring(lr.usedWhoStoreBoost), tostring(lr.usedRowUi), tostring(lr.lastError))) end',
-                note = "Optional consumer proof: show UI and confirm players>=1 after reclassify.",
-            },
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", false, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-roomentities] hide visible=%s enabled=%s", tostring(s.visible), tostring(s.enabled))) end',
-                note = "Hide roomentities_ui via gui_settings + apply(); print state.",
-            },
-        },
-    },
-
-    -- NEW: RoomEntities double update no-change suppression (event-driven; PASS/FAIL via stats)
-    roomentities_whostore_double_update_no_change = {
-        title = "roomentities_whostore_double_update_no_change",
-        description =
-        "Event-driven: baseline RoomEntities unknown ('Gaidin the adventurer'); set WhoStore players=Gaidin to reclassify once (emit). Then set WhoStore players=Gaidin again and ASSERT RoomEntities does NOT emit when state does not change (suppressedEmits increments; emits stable).",
-        delay = 0.35,
-        steps = {
-            {
-                cmd =
-                'lua do local WS=require("dwkit.services.whostore_service"); local ok,err=WS.clear({source="dwverify:nc"}); if not ok then error("WhoStore clear failed: "..tostring(err)) end; local S=require("dwkit.services.roomentities_service"); ok,err=S.clear({source="dwverify:nc"}); if not ok then error("RoomEntities clear failed: "..tostring(err)) end; ok,err=S.ingestFixture({unknown={"Gaidin the adventurer"}, source="dwverify:nc"}); if not ok then error("RoomEntities ingestFixture failed: "..tostring(err)) end; local st=S.getState(); if type(st.unknown)~="table" or st.unknown["Gaidin the adventurer"]~=true then error("Expected baseline unknown contains phrase") end; local stats=S.getStats(); _G.DWVERIFY_NC_EMIT=tonumber((stats and stats.emits) or 0) or 0; _G.DWVERIFY_NC_SUP=tonumber((stats and stats.suppressedEmits) or 0) or 0; print(string.format("[dwverify-roomentities] baseline set; emits=%s suppressed=%s", tostring(_G.DWVERIFY_NC_EMIT), tostring(_G.DWVERIFY_NC_SUP))) end',
-                note = "Baseline: WhoStore empty; RoomEntities has unknown phrase; record emits + suppressedEmits.",
-            },
-            {
-                cmd =
-                'lua do local WS=require("dwkit.services.whostore_service"); local ok,err=WS.setState({players={"Gaidin"}},{source="dwverify:nc"}); if not ok then error("WhoStore setState(1) failed: "..tostring(err)) end; print("[dwverify-roomentities] WhoStore setState #1 players=Gaidin (should reclassify + emit once)") end',
-                delay = 0.85,
-                note = "First WhoStore update: should cause reclassify and emit (state changed).",
-            },
-            {
-                cmd =
-                'lua do local S=require("dwkit.services.roomentities_service"); local st=S.getState(); if type(st.players)~="table" or st.players["Gaidin"]~=true then error("Expected players[Gaidin]=true after first WhoStore update") end; if type(st.unknown)=="table" and st.unknown["Gaidin the adventurer"]==true then error("Expected unknown phrase removed after canonicalize") end; local stats=S.getStats(); local e=tonumber((stats and stats.emits) or 0) or 0; if e<=tonumber(_G.DWVERIFY_NC_EMIT or 0) then error("Expected emits increased after first reclassify; before="..tostring(_G.DWVERIFY_NC_EMIT).." after="..tostring(e)) end; _G.DWVERIFY_NC_EMIT1=e; _G.DWVERIFY_NC_SUP1=tonumber((stats and stats.suppressedEmits) or 0) or 0; print(string.format("[dwverify-roomentities] PASS stage1 emits=%s suppressed=%s", tostring(_G.DWVERIFY_NC_EMIT1), tostring(_G.DWVERIFY_NC_SUP1))) end',
-                note =
-                "ASSERT stage1: reclassified + emitted (suite FAILs if not). Capture emits/suppressed baselines for stage2.",
-            },
-            {
-                cmd =
-                'lua do local WS=require("dwkit.services.whostore_service"); local ok,err=WS.setState({players={"Gaidin"}},{source="dwverify:nc"}); if not ok then error("WhoStore setState(2) failed: "..tostring(err)) end; print("[dwverify-roomentities] WhoStore setState #2 players=Gaidin (no state change expected; RoomEntities should suppress emit)") end',
-                delay = 0.85,
-                note = "Second WhoStore update with same set: RoomEntities should detect no change and suppress emit.",
-            },
-            {
-                cmd =
-                'lua do local S=require("dwkit.services.roomentities_service"); local st=S.getState(); if type(st.players)~="table" or st.players["Gaidin"]~=true then error("Expected players[Gaidin]=true after second WhoStore update") end; local stats=S.getStats(); local e=tonumber((stats and stats.emits) or 0) or 0; local s=tonumber((stats and stats.suppressedEmits) or 0) or 0; if tostring(e)~=tostring(_G.DWVERIFY_NC_EMIT1) then error("Expected emits unchanged on no-change reclassify; before="..tostring(_G.DWVERIFY_NC_EMIT1).." after="..tostring(e)) end; if s<=tonumber(_G.DWVERIFY_NC_SUP1 or 0) then error("Expected suppressedEmits increased on no-change reclassify; before="..tostring(_G.DWVERIFY_NC_SUP1).." after="..tostring(s)) end; print(string.format("[dwverify-roomentities] PASS no-change suppression emits=%s suppressed=%s", tostring(e), tostring(s))) end',
-                note = "ASSERT stage2: emits unchanged + suppressedEmits increased (suite FAILs if not).",
             },
         },
     },
@@ -448,11 +341,6 @@ local SUITES = {
 
 function M.getSuites()
     return SUITES
-end
-
-function M.getSuite(name)
-    if type(name) ~= "string" or name == "" then return nil end
-    return SUITES[name]
 end
 
 return M

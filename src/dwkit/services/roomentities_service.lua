@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.roomentities_service
 -- Owner       : Services
--- Version     : v2026-01-23C
+-- Version     : v2026-02-01B
 -- Purpose     :
 --   - SAFE, profile-portable RoomEntitiesService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
@@ -69,6 +69,27 @@
 --       - Also arm WhoStore subscription at module load (best-effort).
 --         So immediately after init(), getStats() reflects subscribed=true when available.
 --
+--   - NEW (v2026-01-31A):
+--       - Normalize entity keys by stripping trailing parenthetical tags:
+--           "a wooden board (glowing)" -> "a wooden board"
+--       - Classify common object lines:
+--           "<thing> hangs here ..." -> items
+--           "<thing> is mounted here ..." -> items
+--
+--   - NEW (v2026-02-01A):
+--       - Confidence gate for WhoStore/presence-assisted player classification:
+--           * Case-insensitive membership is treated as a BOOST CANDIDATE only.
+--           * Auto "players" classification requires an EXACT display-name match.
+--           * If candidate but not exact, prefer "unknown" (safe) unless caller overrides
+--             via UI override mechanism (handled in UI module).
+--       - ReclassifyFromWhoStore also applies the same gate (no prefix-based promotion).
+--
+--   - FIX (v2026-02-01B):
+--       - WhoStore Option-A legacy players map uses lowercase keys, which MUST NOT
+--         be treated as canonical display names. Build known-player index from
+--         WhoStore snapshot entries (entry.name) when available.
+--       - If snapshot not available, legacy players map is treated as candidate-only.
+--
 -- Public API  :
 --   - getVersion() -> string
 --   - getState() -> table copy
@@ -92,7 +113,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-23C"
+M.VERSION = "v2026-02-01B"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -149,6 +170,27 @@ local function _normName(s)
     s = _trim(s or "")
     if s == "" then return "" end
     return s:lower()
+end
+
+-- Strip trailing parenthetical tags like "(glowing)" "(humming)" etc.
+-- Repeats to remove multiple tags at end.
+local function _stripTrailingParenTags(s)
+    if type(s) ~= "string" then return "" end
+    local out = _trim(s)
+    if out == "" then return "" end
+
+    local changed = true
+    while changed do
+        changed = false
+        local before = out
+        out = out:gsub("%s*%b()%s*$", "")
+        out = _trim(out)
+        if out ~= before then
+            changed = true
+        end
+    end
+
+    return out
 end
 
 -- shallow copy with 1-level copy for nested tables (good enough for buckets)
@@ -210,8 +252,9 @@ local function _emit(stateCopy, deltaCopy, source)
     return false, errMsg
 end
 
+-- Normalize + build a stable key for buckets.
 local function _asKey(s)
-    s = _trim(s or "")
+    s = _stripTrailingParenTags(_trim(s or ""))
     if s == "" then return nil end
     return s
 end
@@ -281,14 +324,6 @@ local function _safeRequire(modName)
     return false, mod
 end
 
-local function _addToSet(set, name)
-    if type(set) ~= "table" then return end
-    if type(name) ~= "string" then return end
-    local key = _normName(name)
-    if key == "" then return end
-    set[key] = true
-end
-
 local function _isArrayTable(t)
     if type(t) ~= "table" then return false end
     for k in pairs(t) do
@@ -299,15 +334,67 @@ local function _isArrayTable(t)
     return true
 end
 
-local function _absorbNamesFromTable(set, t)
-    if type(set) ~= "table" or type(t) ~= "table" then return end
+-- ############################################################
+-- Confidence gate helpers (exact display-name match required)
+-- ############################################################
+
+local function _newNameIndex()
+    return {
+        set = {},          -- { [lower] = true }
+        canonByLower = {}, -- { [lower] = "DisplayName" }
+    }
+end
+
+local function _indexAdd(idx, name)
+    if type(idx) ~= "table" or type(name) ~= "string" then return end
+
+    local canon = _asKey(name) -- trims + strips trailing paren tags
+    if type(canon) ~= "string" or canon == "" then return end
+
+    local lower = _normName(canon)
+    if lower == "" then return end
+
+    idx.set[lower] = true
+    -- prefer later authoritative sources (caller controls merge order)
+    idx.canonByLower[lower] = canon
+end
+
+-- candidate-only add: membership without a canonical display name
+local function _indexAddLowerOnly(idx, name)
+    if type(idx) ~= "table" or type(name) ~= "string" then return end
+    local canon = _asKey(name)
+    if type(canon) ~= "string" or canon == "" then return end
+    local lower = _normName(canon)
+    if lower == "" then return end
+    idx.set[lower] = true
+    -- intentionally NOT setting canonByLower => candidate-only
+end
+
+local function _indexMerge(dst, src)
+    if type(dst) ~= "table" or type(src) ~= "table" then return end
+    if type(src.set) == "table" then
+        for k, v in pairs(src.set) do
+            if v == true then dst.set[k] = true end
+        end
+    end
+    if type(src.canonByLower) == "table" then
+        for k, v in pairs(src.canonByLower) do
+            if type(k) == "string" and type(v) == "string" and v ~= "" then
+                dst.canonByLower[k] = v
+            end
+        end
+    end
+end
+
+local function _absorbNamesToIndex(idx, t)
+    if type(idx) ~= "table" or type(t) ~= "table" then return end
 
     if _isArrayTable(t) then
         for _, v in ipairs(t) do
             if type(v) == "string" then
-                _addToSet(set, v)
+                _indexAdd(idx, v)
             elseif type(v) == "table" and type(v.name) == "string" then
-                _addToSet(set, v.name)
+                _indexAdd(idx, v.name)
             end
         end
         return
@@ -316,155 +403,199 @@ local function _absorbNamesFromTable(set, t)
     for k, v in pairs(t) do
         if type(k) == "string" then
             if v == true then
-                _addToSet(set, k)
+                _indexAdd(idx, k)
             elseif type(v) == "string" then
-                _addToSet(set, v)
+                _indexAdd(idx, v)
             elseif type(v) == "table" then
                 if type(v.name) == "string" then
-                    _addToSet(set, v.name)
+                    _indexAdd(idx, v.name)
                 end
             end
         elseif type(v) == "string" then
-            _addToSet(set, v)
+            _indexAdd(idx, v)
         elseif type(v) == "table" and type(v.name) == "string" then
-            _addToSet(set, v.name)
+            _indexAdd(idx, v.name)
         end
     end
 end
 
-local function _extractKnownPlayersSetFromPresenceState(pState)
-    local set = {}
-    if type(pState) ~= "table" then
-        return set
+-- returns "exact" | "candidate" | "none"
+local function _confidenceForName(name, idx)
+    if type(name) ~= "string" then return "none" end
+    idx = (type(idx) == "table") and idx or _newNameIndex()
+
+    local canon = _asKey(name)
+    if type(canon) ~= "string" or canon == "" then
+        return "none"
     end
 
-    _absorbNamesFromTable(set, pState)
+    local lower = _normName(canon)
+    if lower == "" then
+        return "none"
+    end
+
+    if idx.set[lower] ~= true then
+        return "none"
+    end
+
+    local expected = idx.canonByLower[lower]
+    if type(expected) == "string" and expected ~= "" then
+        if expected == canon then
+            return "exact"
+        end
+        return "candidate"
+    end
+
+    -- no canonical known; treat as candidate only
+    return "candidate"
+end
+
+-- ############################################################
+-- Presence / WhoStore known player extraction (index form)
+-- ############################################################
+
+local function _extractKnownPlayersIndexFromPresenceState(pState)
+    local idx = _newNameIndex()
+    if type(pState) ~= "table" then
+        return idx
+    end
+
+    _absorbNamesToIndex(idx, pState)
 
     local keys = { "players", "nearby", "present", "who", "names", "list" }
     for _, k in ipairs(keys) do
         local v = pState[k]
         if type(v) == "table" then
-            _absorbNamesFromTable(set, v)
+            _absorbNamesToIndex(idx, v)
         end
     end
 
-    return set
+    return idx
 end
 
-local function _getKnownPlayersSetBestEffort(opts)
+local function _getPresenceKnownPlayersIndexBestEffort(opts)
     opts = (type(opts) == "table") and opts or {}
 
     if type(opts.knownPlayers) == "table" then
-        local set = {}
-        _absorbNamesFromTable(set, opts.knownPlayers)
-        return set
+        local idx = _newNameIndex()
+        _absorbNamesToIndex(idx, opts.knownPlayers)
+        return idx
     end
 
     if opts.usePresence ~= nil and opts.usePresence ~= true then
-        return {}
+        return _newNameIndex()
     end
 
     local okP, P = _safeRequire("dwkit.services.presence_service")
     if not okP or type(P) ~= "table" then
-        return {}
+        return _newNameIndex()
     end
 
     if type(P.getState) ~= "function" then
-        return {}
+        return _newNameIndex()
     end
 
     local okS, pState = pcall(P.getState)
     if not okS or type(pState) ~= "table" then
-        return {}
+        return _newNameIndex()
     end
 
-    return _extractKnownPlayersSetFromPresenceState(pState)
+    return _extractKnownPlayersIndexFromPresenceState(pState)
 end
 
-local function _isKnownPlayer(name, knownPlayersSet)
-    if type(knownPlayersSet) ~= "table" then return false end
-    local key = _normName(name)
-    if key == "" then return false end
-    return (knownPlayersSet[key] == true)
-end
-
-local function _extractKnownPlayersSetFromWhoStoreState(wState)
-    local set = {}
+local function _extractKnownPlayersIndexFromWhoStoreState(wState)
+    local idx = _newNameIndex()
     if type(wState) ~= "table" then
-        return set
+        return idx
     end
 
-    if type(wState.players) == "table" then
-        _absorbNamesFromTable(set, wState.players)
-    else
-        _absorbNamesFromTable(set, wState)
-    end
+    -- Prefer docs-first snapshot entries which preserve display-case (entry.name).
+    -- This avoids treating WhoStore Option-A lowercase legacy players map as canonical.
+    do
+        local snap = wState.snapshot
+        if type(snap) ~= "table" and type(wState.byName) == "table" then
+            -- caller might have passed a snapshot directly
+            snap = wState
+        end
 
-    return set
-end
-
-local function _getWhoStoreKnownPlayersSetBestEffort()
-    local okW, W = _safeRequire("dwkit.services.whostore_service")
-    if not okW or type(W) ~= "table" then
-        return {}
-    end
-    if type(W.getState) ~= "function" then
-        return {}
-    end
-
-    local okS, wState = pcall(W.getState)
-    if not okS or type(wState) ~= "table" then
-        return {}
-    end
-
-    return _extractKnownPlayersSetFromWhoStoreState(wState)
-end
-
-local function _getKnownPlayersSetCombined(opts)
-    opts = (type(opts) == "table") and opts or {}
-
-    if type(opts.knownPlayers) == "table" then
-        local set = {}
-        _absorbNamesFromTable(set, opts.knownPlayers)
-        return set
-    end
-
-    local set = {}
-
-    if opts.usePresence == nil or opts.usePresence == true then
-        local pSet = _getKnownPlayersSetBestEffort(opts)
-        _merge(set, pSet)
-    end
-
-    if opts.useWhoStore == nil or opts.useWhoStore == true then
-        local wSet = _getWhoStoreKnownPlayersSetBestEffort()
-        _merge(set, wSet)
-    end
-
-    return set
-end
-
-local function _extractKnownPlayerPrefixName(phrase, knownPlayersSet)
-    if type(phrase) ~= "string" then return nil end
-    if type(knownPlayersSet) ~= "table" then return nil end
-
-    local raw = _trim(phrase)
-    if raw == "" then return nil end
-
-    local lower = raw:lower()
-
-    for knownLower in pairs(knownPlayersSet) do
-        if type(knownLower) == "string" and knownLower ~= "" then
-            if lower:sub(1, #knownLower) == knownLower then
-                local nextChar = lower:sub(#knownLower + 1, #knownLower + 1)
-                if nextChar == "" or nextChar:match("%s") then
-                    return _trim(raw:sub(1, #knownLower))
+        if type(snap) == "table" and type(snap.byName) == "table" then
+            for _, e in pairs(snap.byName) do
+                if type(e) == "table" and type(e.name) == "string" and e.name ~= "" then
+                    _indexAdd(idx, e.name)
                 end
+            end
+            return idx
+        end
+
+        if type(snap) == "table" and type(snap.entries) == "table" then
+            for i = 1, #snap.entries do
+                local e = snap.entries[i]
+                if type(e) == "table" and type(e.name) == "string" and e.name ~= "" then
+                    _indexAdd(idx, e.name)
+                end
+            end
+            if next(idx.set) ~= nil then
+                return idx
             end
         end
     end
 
-    return nil
+    -- Fallback: legacy players map may only contain lowercase canonical keys.
+    -- Treat as membership-only (candidate), not canonical display-name exact.
+    if type(wState.players) == "table" then
+        for k, v in pairs(wState.players) do
+            if v == true and type(k) == "string" and k ~= "" then
+                _indexAddLowerOnly(idx, k)
+            end
+        end
+        return idx
+    end
+
+    -- Last resort: if someone passed a plain list/map of names, absorb normally.
+    _absorbNamesToIndex(idx, wState)
+    return idx
+end
+
+local function _getWhoStoreKnownPlayersIndexBestEffort()
+    local okW, W = _safeRequire("dwkit.services.whostore_service")
+    if not okW or type(W) ~= "table" then
+        return _newNameIndex()
+    end
+    if type(W.getState) ~= "function" then
+        return _newNameIndex()
+    end
+
+    local okS, wState = pcall(W.getState)
+    if not okS or type(wState) ~= "table" then
+        return _newNameIndex()
+    end
+
+    return _extractKnownPlayersIndexFromWhoStoreState(wState)
+end
+
+local function _getKnownPlayersIndexCombined(opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    if type(opts.knownPlayers) == "table" then
+        local idx = _newNameIndex()
+        _absorbNamesToIndex(idx, opts.knownPlayers)
+        return idx
+    end
+
+    local idx = _newNameIndex()
+
+    -- Merge order matters: Presence first, then WhoStore overrides canonical names.
+    if opts.usePresence == nil or opts.usePresence == true then
+        local pIdx = _getPresenceKnownPlayersIndexBestEffort(opts)
+        _indexMerge(idx, pIdx)
+    end
+
+    if opts.useWhoStore == nil or opts.useWhoStore == true then
+        local wIdx = _getWhoStoreKnownPlayersIndexBestEffort()
+        _indexMerge(idx, wIdx)
+    end
+
+    return idx
 end
 
 local function _looksLikeExitRow(lineLower)
@@ -555,7 +686,7 @@ local function _shouldIgnoreByCallerRules(trimmed, opts)
     return false
 end
 
-local function _classifyLookLine(line, opts, knownPlayersSet)
+local function _classifyLookLine(line, opts, knownPlayersIdx)
     opts = (type(opts) == "table") and opts or {}
     if type(line) ~= "string" then return nil, nil end
 
@@ -592,6 +723,30 @@ local function _classifyLookLine(line, opts, knownPlayersSet)
         return nil, nil
     end
 
+    -- NEW: common room-object lines:
+    --   "<thing> hangs here ..." -> items
+    do
+        local phrase = lineClean:match("^(.-)%s+hangs%s+here")
+        if type(phrase) == "string" then
+            phrase = _trim(phrase)
+            if phrase ~= "" then
+                return "items", _asKey(phrase)
+            end
+        end
+    end
+
+    -- NEW: common room-object lines:
+    --   "<thing> is mounted here ..." -> items
+    do
+        local phrase = lineClean:match("^(.-)%s+is%s+mounted%s+here")
+        if type(phrase) == "string" then
+            phrase = _trim(phrase)
+            if phrase ~= "" then
+                return "items", _asKey(phrase)
+            end
+        end
+    end
+
     do
         local phrase, posture = lineClean:match("^(.-)%s+is%s+(%a+)%s+here%.$")
         if type(phrase) == "string" and type(posture) == "string" then
@@ -599,13 +754,14 @@ local function _classifyLookLine(line, opts, knownPlayersSet)
             if POSTURES[posture] == true then
                 phrase = _trim(phrase)
                 if phrase ~= "" then
-                    local canon = _extractKnownPlayerPrefixName(phrase, knownPlayersSet)
-                    if canon then
-                        return "players", _asKey(canon)
+                    local conf = _confidenceForName(phrase, knownPlayersIdx)
+                    if conf == "exact" then
+                        return "players", _asKey(phrase)
                     end
 
-                    if _isKnownPlayer(phrase, knownPlayersSet) then
-                        return "players", _asKey(phrase)
+                    -- Candidate but not exact: prefer unknown (safe).
+                    if conf == "candidate" then
+                        return "unknown", _asKey(phrase)
                     end
 
                     if opts.assumeCapitalizedAsPlayer == true then
@@ -626,13 +782,14 @@ local function _classifyLookLine(line, opts, knownPlayersSet)
         if type(phrase) == "string" then
             phrase = _trim(phrase)
             if phrase ~= "" then
-                local canon = _extractKnownPlayerPrefixName(phrase, knownPlayersSet)
-                if canon then
-                    return "players", _asKey(canon)
+                local conf = _confidenceForName(phrase, knownPlayersIdx)
+                if conf == "exact" then
+                    return "players", _asKey(phrase)
                 end
 
-                if _isKnownPlayer(phrase, knownPlayersSet) then
-                    return "players", _asKey(phrase)
+                -- Candidate but not exact: prefer unknown (safe).
+                if conf == "candidate" then
+                    return "unknown", _asKey(phrase)
                 end
 
                 if lower:find("corpse") then
@@ -690,73 +847,64 @@ local function _resolveWhoStoreUpdatedEventName(W)
     return nil
 end
 
-local function _reclassifyBucketsWithKnownPlayers(current, knownPlayersSet)
+local function _reclassifyBucketsWithKnownPlayers(current, knownIdx)
     current = _ensureBucketsPresent((type(current) == "table") and current or {})
-    knownPlayersSet = (type(knownPlayersSet) == "table") and knownPlayersSet or {}
+    knownIdx = (type(knownIdx) == "table") and knownIdx or _newNameIndex()
 
     local next = _newBuckets()
 
-    local function moveIfKnown(name)
-        if type(name) ~= "string" or name == "" then return false, nil end
-
-        local key = _normName(name)
-        if key ~= "" and knownPlayersSet[key] == true then
-            next.players[name] = true
-            return true, name
-        end
-
-        local canon = _extractKnownPlayerPrefixName(name, knownPlayersSet)
-        if canon then
-            next.players[canon] = true
-            return true, canon
-        end
-
-        return false, nil
-    end
-
     local moved = 0
+
+    local function placeName(originalBucket, name)
+        if type(name) ~= "string" or name == "" then return end
+
+        local conf = _confidenceForName(name, knownIdx)
+
+        if conf == "exact" then
+            next.players[name] = true
+            moved = moved + 1
+            return
+        end
+
+        -- Candidate but not exact: prefer unknown for safety.
+        if conf == "candidate" then
+            next.unknown[name] = true
+            return
+        end
+
+        -- No signal: keep original bucket (except we demote unconfirmed players to unknown).
+        if originalBucket == "players" then
+            next.unknown[name] = true
+        elseif originalBucket == "mobs" then
+            next.mobs[name] = true
+        elseif originalBucket == "items" then
+            next.items[name] = true
+        else
+            next.unknown[name] = true
+        end
+    end
 
     for k, v in pairs(current.players) do
         if v == true and type(k) == "string" and k ~= "" then
-            local okMove, canon = moveIfKnown(k)
-            if okMove then
-                if canon ~= k then moved = moved + 1 end
-            else
-                next.players[k] = true
-            end
+            placeName("players", k)
         end
     end
 
     for k, v in pairs(current.unknown) do
         if v == true and type(k) == "string" and k ~= "" then
-            local okMove, canon = moveIfKnown(k)
-            if okMove then
-                moved = moved + 1
-            else
-                next.unknown[k] = true
-            end
+            placeName("unknown", k)
         end
     end
 
     for k, v in pairs(current.mobs) do
         if v == true and type(k) == "string" and k ~= "" then
-            local okMove, canon = moveIfKnown(k)
-            if okMove then
-                moved = moved + 1
-            else
-                next.mobs[k] = true
-            end
+            placeName("mobs", k)
         end
     end
 
     for k, v in pairs(current.items) do
         if v == true and type(k) == "string" and k ~= "" then
-            local okMove, canon = moveIfKnown(k)
-            if okMove then
-                moved = moved + 1
-            else
-                next.items[k] = true
-            end
+            placeName("items", k)
         end
     end
 
@@ -772,10 +920,10 @@ local function _applyReclassifyNow(opts)
 
     _who.reclassifyRunning = true
 
-    local knownPlayersSet = _getWhoStoreKnownPlayersSetBestEffort()
+    local knownIdx = _getWhoStoreKnownPlayersIndexBestEffort()
     local before = _copyOneLevel(_ensureBucketsPresent(STATE.state))
 
-    local next, moved = _reclassifyBucketsWithKnownPlayers(before, knownPlayersSet)
+    local next, moved = _reclassifyBucketsWithKnownPlayers(before, knownIdx)
 
     if opts.forceEmit ~= true and _statesEqual(before, next) then
         STATE.suppressedEmits = STATE.suppressedEmits + 1
@@ -1072,11 +1220,11 @@ function M.ingestLookLines(lines, opts)
 
     _ensureWhoStoreSubscription()
 
-    local knownPlayersSet = _getKnownPlayersSetCombined(opts)
+    local knownPlayersIdx = _getKnownPlayersIndexCombined(opts)
     local buckets = _newBuckets()
 
     for _, raw in ipairs(lines) do
-        local bucketName, key = _classifyLookLine(raw, opts, knownPlayersSet)
+        local bucketName, key = _classifyLookLine(raw, opts, knownPlayersIdx)
         if bucketName and key then
             _addBucket(buckets[bucketName], key)
         end

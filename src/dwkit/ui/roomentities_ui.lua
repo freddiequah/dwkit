@@ -1,14 +1,17 @@
+-- FILE: src/dwkit/ui/roomentities_ui.lua
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-01-29E
+-- Version     : v2026-02-01A
 -- Purpose     :
 --   - SAFE RoomEntities UI (consumer-only) that renders a per-entity ROW LIST with
 --     sections: Players / Mobs / Items-Objects / Unknown.
 --   - Supports per-entity manual override cycle:
 --       auto -> player -> mob -> item -> unknown -> auto
---   - Uses WhoStore as an authority signal (auto-mode boost): if a name exists in
---     WhoStore (via getEntry()), treat as player unless overridden.
+--   - Uses WhoStore as an authority signal (auto-mode boost) WITH CONFIDENCE GATE:
+--       * Case-insensitive WhoStore lookup is allowed as a candidate signal only.
+--       * Auto "player" boost requires exact display-name match (name == entry.name).
+--       * If not exact, prefer Unknown unless explicit override forces a type.
 --   - Creates a shared-frame window (ui_window + ui_theme) + list-style content.
 --   - Subscribes to RoomEntitiesService Updated (and WhoStore Updated best-effort)
 --     to re-render while visible.
@@ -33,11 +36,15 @@
 --   - FIX (v2026-01-29E):
 --       * When falling back to text view (or row render fails), hide listRoot to avoid
 --         overlapping/ghost UI elements.
+--
+--   - NEW (v2026-02-01A):
+--       * Confidence gate: stop promoting "player" solely from case-insensitive matches
+--         or prefix matches. Exact display-name match only (or explicit override).
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-29E"
+M.VERSION = "v2026-02-01A"
 M.UI_ID = "roomentities_ui"
 M.id = M.UI_ID -- convenience alias (some tooling/debug expects ui.id)
 
@@ -455,35 +462,44 @@ local function _baseTypeForName(name, buckets)
     return "unknown"
 end
 
-local function _whoHasName(whoService, name)
+local function _whoGetEntry(whoService, name)
     if type(whoService) ~= "table" or type(name) ~= "string" or name == "" then
-        return false
+        return nil
     end
 
-    -- Consumer hardening: use WhoStoreService.getEntry (case-insensitive) rather than reading snapshot.byName.
     if type(whoService.getEntry) == "function" then
         local ok, e = pcall(whoService.getEntry, name)
         if ok and e ~= nil then
-            return true
+            return e
         end
+    end
+
+    return nil
+end
+
+local function _whoHasExactName(whoService, name)
+    local e = _whoGetEntry(whoService, name)
+    if type(e) ~= "table" then
+        return false
+    end
+
+    -- Confidence gate: exact display-name match only.
+    if type(e.name) == "string" and e.name ~= "" then
+        return (e.name == name)
     end
 
     return false
 end
 
-local function _whoHasPrefix(whoService, phrase)
+local function _whoHasPrefixExact(whoService, phrase)
+    -- Policy: prefix-only is a candidate signal, not enough to auto-promote to player.
+    -- Keep the helper for compatibility, but do not return true unless phrase itself is exact.
     if type(whoService) ~= "table" or type(phrase) ~= "string" or phrase == "" then
         return false
     end
 
-    -- Best-effort: treat "Scynox the adventurer" as known if "Scynox" is known.
-    local w = _firstWord(phrase)
-    if w ~= "" then
-        if _whoHasName(whoService, w) then
-            return true
-        end
-    end
-
+    -- If phrase is exactly a known display-name, _whoHasExactName will handle it.
+    -- Therefore: return false here.
     return false
 end
 
@@ -495,10 +511,10 @@ local function _effectiveTypeForName(name, buckets, whoService)
     end
 
     if type(whoService) == "table" and type(name) == "string" and name ~= "" then
-        if _whoHasName(whoService, name) then
+        if _whoHasExactName(whoService, name) then
             return "players", true
         end
-        if _whoHasPrefix(whoService, name) then
+        if _whoHasPrefixExact(whoService, name) then
             return "players", true
         end
     end
