@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.capture.roomfeed_capture
 -- Owner       : Capture
--- Version     : v2026-02-02E
+-- Version     : v2026-02-02F
 -- Purpose     :
 --   - Passive capture of room output blocks (movement room header, look output)
 --     without GMCP and without sending any commands.
@@ -19,6 +19,7 @@
 --   - Admin poof lines are customizable, so we do NOT attempt to special-case "poof" anymore.
 --   - IMPORTANT: MUD output may include ANSI/control characters. We strip ANSI + \r for parsing
 --     decisions (header/exits/prompt/arrive/leave), while keeping raw lines for ingestion.
+--   - Defensive: if a snapshot starts on the exits line, we set snapHasExits immediately.
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -40,7 +41,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-02E"
+M.VERSION = "v2026-02-02F"
 
 local function _nowTs()
     return os.time()
@@ -68,14 +69,34 @@ end
 
 -- Strip common ANSI escape sequences + carriage returns for parsing decisions.
 -- Keep raw lines for RoomSvc ingestion.
+--
+-- Important: some clients use private mode sequences like ESC[?25h.
+-- We strip:
+--  - CSI: ESC[ ... final byte (broad)
+--  - OSC: ESC] ... BEL
+--  - Charset designations: ESC(  / ESC)
+--  - Any remaining single ESC + char leftovers
 local function _stripAnsi(s)
     s = tostring(s or "")
+
     -- strip CR
     s = s:gsub("\r", "")
-    -- CSI sequences: ESC [ ... letter
-    s = s:gsub("\27%[[0-9;]*[A-Za-z]", "")
-    -- OSC sequences (rare): ESC ] ... BEL
+
+    -- OSC sequences: ESC ] ... BEL
     s = s:gsub("\27%][^\7]*\7", "")
+
+    -- CSI sequences (broad): ESC [ digits/;/?, optional intermediates, final byte
+    -- This catches things like: ESC[0m, ESC[1;36m, ESC[?25h, ESC[2J, ESC[K, etc.
+    s = s:gsub("\27%[[%d%;%?]*[@-~]", "")
+    s = s:gsub("\27%[[%d%;%?]*[%s%-/]*[@-~]", "") -- extra-safe for odd intermediates
+
+    -- Charset / other 2-byte escapes: ESC( X or ESC) X
+    s = s:gsub("\27%([%w]", "")
+    s = s:gsub("\27%)%w", "")
+
+    -- Any remaining ESC + one char (defensive)
+    s = s:gsub("\27.", "")
+
     return s
 end
 
@@ -98,6 +119,11 @@ local function _isRoomHeaderStrong(lnClean)
     return (ln:find("%(#%d+%)") ~= nil)
 end
 
+local function _isExitsLine(lnClean)
+    local ln = tostring(lnClean or "")
+    return (ln:lower():match("^%s*obvious exits:%s*$") ~= nil)
+end
+
 -- Fallback header: conservative "room title" detection for rooms that do NOT print "(#id)".
 -- We keep this strict so we don't accidentally start snapshots on random one-liners or command echoes.
 local function _isRoomTitleCandidate(lnClean)
@@ -116,12 +142,14 @@ local function _isRoomTitleCandidate(lnClean)
 
     local lower = t:lower()
 
+    -- never treat exits line as a title
+    if _isExitsLine(t) then return false end
+
     -- avoid command echo lines / kit invocations
     if lower:match("^dw[%w_%-]") then return false end
     if lower:match("^lua%s") then return false end
 
     -- avoid obvious non-title lines
-    if lower:match("^obvious exits:") then return false end
     if lower:match("^you are ") then return false end
     if lower:match("^at the ") then return false end
     if lower:find(" has connected") or lower:find(" has quit") or lower:find(" un%-renting") then return false end
@@ -147,11 +175,6 @@ end
 
 local function _isRoomHeaderAny(lnClean)
     return _isRoomHeaderStrong(lnClean) or _isRoomTitleCandidate(lnClean)
-end
-
-local function _isExitsLine(lnClean)
-    local ln = tostring(lnClean or "")
-    return (ln:lower():match("^%s*obvious exits:%s*$") ~= nil)
 end
 
 local function _tryParseArriveLeave(lnClean)
@@ -302,6 +325,11 @@ local function _beginSnap(lnRaw, lnClean)
     ROOT.snapStartLineClean = tostring(lnClean or "")
     ROOT.snapBuf[#ROOT.snapBuf + 1] = tostring(lnRaw or "")
     ROOT.snapSeenLines = 1
+
+    -- defensive: if snapshot begins on exits line, mark it immediately
+    if _isExitsLine(ROOT.snapStartLineClean) then
+        ROOT.snapHasExits = true
+    end
 end
 
 local function _abortSnap(reason)
