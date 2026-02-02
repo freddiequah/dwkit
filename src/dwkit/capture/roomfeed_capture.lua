@@ -1,14 +1,22 @@
 -- #########################################################################
 -- Module Name : dwkit.capture.roomfeed_capture
 -- Owner       : Capture
--- Version     : v2026-02-02B
+-- Version     : v2026-02-02D
 -- Purpose     :
 --   - Passive capture of room output blocks (movement room header, look output)
 --     without GMCP and without sending any commands.
 --   - Detects a "room snapshot" start from a room header marker, buffers lines
 --     until prompt-noise is seen, then ingests the block into RoomEntitiesService.
 --   - Best-effort arrival/leave line inference (conservative): updates Unknown bucket
---     only for simple single-token names; otherwise marks room watch as DEGRADED.
+--     only for simple single-token names; otherwise ignored (no disruption).
+--
+-- Notes (Feb 2026 update):
+--   - Some rooms do NOT print "(#12345)" in the first line (e.g. "The Adventurer's Meeting Room").
+--     We now support a conservative "room title" fallback to start snapshot capture.
+--   - IMPORTANT: command echo lines (e.g. "dwroom watch status") must NOT be treated as titles.
+--     Fallback title detection requires at least one uppercase letter and rejects "dw*/lua*" lines.
+--   - "appears out of thin air." is standard player relocation, treat as ARRIVE (not admin-only).
+--   - Admin poof lines are customizable, so we do NOT attempt to special-case "poof" anymore.
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -30,7 +38,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-02B"
+M.VERSION = "v2026-02-02D"
 
 local function _nowTs()
     return os.time()
@@ -65,9 +73,61 @@ local function _isPromptNoise(ln)
     return false
 end
 
-local function _isRoomHeader(ln)
+-- Strong header: room line includes "(#12345)"
+local function _isRoomHeaderStrong(ln)
     ln = tostring(ln or "")
     return (ln:find("%(#%d+%)") ~= nil)
+end
+
+-- Fallback header: conservative "room title" detection for rooms that do NOT print "(#id)".
+-- We keep this strict so we don't accidentally start snapshots on random one-liners or command echoes.
+local function _isRoomTitleCandidate(ln)
+    ln = tostring(ln or "")
+    if ln == "" then return false end
+    if _isPromptNoise(ln) then return false end
+
+    -- must be unindented
+    if ln:match("^%s") then return false end
+
+    local t = _trim(ln)
+    if t == "" then return false end
+
+    -- avoid bracket/system lines: "[ X has connected. ]"
+    if t:match("^%[") then return false end
+
+    local lower = t:lower()
+
+    -- avoid command echo lines / kit invocations
+    if lower:match("^dw[%w_%-]") then return false end
+    if lower:match("^lua%s") then return false end
+
+    -- avoid obvious non-title lines
+    if lower:match("^obvious exits:") then return false end
+    if lower:match("^you are ") then return false end
+    if lower:match("^at the ") then return false end
+    if lower:find(" has connected") or lower:find(" has quit") or lower:find(" un%-renting") then return false end
+
+    -- avoid arrive/leave chatter being mistaken as title
+    if lower:find(" arrives") or lower:find(" leaves") or lower:find(" appears") then return false end
+
+    -- typical room title should not end with punctuation (most of your room titles don't)
+    if t:match("[%:%.%!%?]$") then return false end
+
+    -- length bounds (title-ish)
+    local len = #t
+    if len < 4 or len > 72 then return false end
+
+    -- must contain at least one letter
+    if not t:match("[%a]") then return false end
+
+    -- critical: require at least one uppercase letter to avoid matching command echos (usually lowercase)
+    if not t:match("%u") then return false end
+
+    return true
+end
+
+local function _isRoomHeaderAny(ln)
+    return _isRoomHeaderStrong(ln) or _isRoomTitleCandidate(ln)
 end
 
 local function _isExitsLine(ln)
@@ -79,16 +139,25 @@ local function _tryParseArriveLeave(ln)
     ln = _trim(ln)
     if ln == "" then return nil end
 
-    local lower = ln:lower()
-    if lower:find("poof") then
-        return { kind = "poof", name = nil }
-    end
-
+    -- ARRIVE (standard)
     local name = ln:match("^([%a][%w%-%']*)%s+arrives")
     if name then
         return { kind = "arrive", name = name }
     end
 
+    -- ARRIVE (teleport/relocation styles seen in your logs)
+    name = ln:match("^([%a][%w%-%']*)%s+appears%s+out%s+of%s+thin%s+air%.$")
+    if name then
+        return { kind = "arrive", name = name }
+    end
+
+    -- (optional but common) "X arrives suddenly."
+    name = ln:match("^([%a][%w%-%']*)%s+arrives%s+suddenly%.$")
+    if name then
+        return { kind = "arrive", name = name }
+    end
+
+    -- LEAVE
     name = ln:match("^([%a][%w%-%']*)%s+leaves")
     if name then
         return { kind = "leave", name = name }
@@ -257,21 +326,9 @@ local function _handleArriveLeave(ln)
     local parsed = _tryParseArriveLeave(ln)
     if not parsed then return end
 
-    local okS, Status = _resolveStatusSvc()
-    if parsed.kind == "poof" then
-        ROOT.lastDegradedReason = "admin poof line seen, run look to resync"
-        if okS then
-            Status.noteDegraded(ROOT.lastDegradedReason, { ts = _nowTs() })
-        end
-        return
-    end
-
     local name = tostring(parsed.name or "")
     if name == "" then
-        ROOT.lastDegradedReason = "unrecognized arrive/leave line, run look to resync"
-        if okS then
-            Status.noteDegraded(ROOT.lastDegradedReason, { ts = _nowTs() })
-        end
+        -- Keep conservative: do not spam DEGRADED for unknown chatter.
         return
     end
 
@@ -319,7 +376,7 @@ function M.install(opts)
         end
 
         if ROOT.snapCapturing ~= true then
-            if _isRoomHeader(ln) then
+            if _isRoomHeaderAny(ln) then
                 _beginSnap(ln)
                 return
             end
@@ -337,7 +394,8 @@ function M.install(opts)
             return
         end
 
-        if _isRoomHeader(ln) and tostring(ln or "") ~= tostring(ROOT.snapStartLine or "") then
+        -- If a new header/title starts mid-capture, restart (best-effort).
+        if _isRoomHeaderAny(ln) and tostring(ln or "") ~= tostring(ROOT.snapStartLine or "") then
             _abortSnap("abort:restart_header_seen")
             _beginSnap(ln)
             return
