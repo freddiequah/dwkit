@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.capture.roomfeed_capture
 -- Owner       : Capture
--- Version     : v2026-02-02F
+-- Version     : v2026-02-02G
 -- Purpose     :
 --   - Passive capture of room output blocks (movement room header, look output)
 --     without GMCP and without sending any commands.
@@ -14,12 +14,11 @@
 --   - Some rooms do NOT print "(#12345)" in the first line (e.g. "The Adventurer's Meeting Room").
 --     We support a conservative "room title" fallback to start snapshot capture.
 --   - IMPORTANT: command echo lines (e.g. "dwroom watch status") must NOT be treated as titles.
---     Fallback title detection requires at least one uppercase letter and rejects "dw*/lua*" lines.
---   - "appears out of thin air." is standard player relocation, treat as ARRIVE (not admin-only).
---   - Admin poof lines are customizable, so we do NOT attempt to special-case "poof" anymore.
 --   - IMPORTANT: MUD output may include ANSI/control characters. We strip ANSI + \r for parsing
 --     decisions (header/exits/prompt/arrive/leave), while keeping raw lines for ingestion.
 --   - Defensive: if a snapshot starts on the exits line, we set snapHasExits immediately.
+--   - Tightened: fallback title detection rejects exit-entry lines (e.g. "East - ...") and
+--     common look-description lines like "hangs here", "is here", "mounted on", etc.
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -41,7 +40,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-02F"
+M.VERSION = "v2026-02-02G"
 
 local function _nowTs()
     return os.time()
@@ -124,6 +123,33 @@ local function _isExitsLine(lnClean)
     return (ln:lower():match("^%s*obvious exits:%s*$") ~= nil)
 end
 
+-- Reject exit-entry lines like:
+--   East      - The Adventurer's Meeting Room
+--   North     - The Voting Booth
+local function _isExitEntryLine(lnClean)
+    local t = _trim(lnClean)
+    if t == "" then return false end
+    local lower = t:lower()
+
+    -- must have a dash separator in the typical exits style
+    if not lower:find("%s%-%s") then return false end
+
+    -- direction token at start
+    local dir = lower:match("^(%a+)")
+    if not dir then return false end
+
+    local okDir = {
+        north=true, south=true, east=true, west=true, up=true, down=true,
+        northeast=true, northwest=true, southeast=true, southwest=true,
+    }
+
+    if okDir[dir] ~= true then
+        return false
+    end
+
+    return true
+end
+
 -- Fallback header: conservative "room title" detection for rooms that do NOT print "(#id)".
 -- We keep this strict so we don't accidentally start snapshots on random one-liners or command echoes.
 local function _isRoomTitleCandidate(lnClean)
@@ -142,8 +168,9 @@ local function _isRoomTitleCandidate(lnClean)
 
     local lower = t:lower()
 
-    -- never treat exits line as a title
+    -- never treat exits line or exit-entry line as a title
     if _isExitsLine(t) then return false end
+    if _isExitEntryLine(t) then return false end
 
     -- avoid command echo lines / kit invocations
     if lower:match("^dw[%w_%-]") then return false end
@@ -153,6 +180,13 @@ local function _isRoomTitleCandidate(lnClean)
     if lower:match("^you are ") then return false end
     if lower:match("^at the ") then return false end
     if lower:find(" has connected") or lower:find(" has quit") or lower:find(" un%-renting") then return false end
+
+    -- avoid look-description / object lines commonly in room output
+    if lower:find(" hangs here") then return false end
+    if lower:find(" is here") then return false end
+    if lower:find(" are here") then return false end
+    if lower:find(" is mounted") then return false end
+    if lower:find(" are mounted") then return false end
 
     -- avoid arrive/leave chatter being mistaken as title
     if lower:find(" arrives") or lower:find(" leaves") or lower:find(" appears") then return false end
@@ -236,9 +270,9 @@ local function _copyBuckets(state)
     state = (type(state) == "table") and state or {}
     local out = { players = {}, mobs = {}, items = {}, unknown = {} }
     for _, k in ipairs({ "players", "mobs", "items", "unknown" }) do
-        local t = state[k]
-        if type(t) == "table" then
-            for i = 1, #t do out[k][i] = tostring(t[i]) end
+        local tt = state[k]
+        if type(tt) == "table" then
+            for i = 1, #tt do out[k][i] = tostring(tt[i]) end
         end
     end
     return out
@@ -250,12 +284,12 @@ local function _removeFromBuckets(buckets, name)
     local changed = false
 
     for _, k in ipairs({ "players", "mobs", "items", "unknown" }) do
-        local t = buckets[k]
-        if type(t) == "table" then
+        local tt = buckets[k]
+        if type(tt) == "table" then
             local nextT = {}
-            for i = 1, #t do
-                if tostring(t[i]) ~= name then
-                    nextT[#nextT + 1] = t[i]
+            for i = 1, #tt do
+                if tostring(tt[i]) ~= name then
+                    nextT[#nextT + 1] = tt[i]
                 else
                     changed = true
                 end
@@ -272,10 +306,10 @@ local function _addToUnknown(buckets, name)
     if name == "" then return false end
 
     for _, k in ipairs({ "players", "mobs", "items", "unknown" }) do
-        local t = buckets[k]
-        if type(t) == "table" then
-            for i = 1, #t do
-                if tostring(t[i]) == name then
+        local tt = buckets[k]
+        if type(tt) == "table" then
+            for i = 1, #tt do
+                if tostring(tt[i]) == name then
                     return false
                 end
             end
@@ -378,7 +412,6 @@ local function _handleArriveLeave(lnClean)
 
     local name = tostring(parsed.name or "")
     if name == "" then
-        -- Keep conservative: do not spam DEGRADED for unknown chatter.
         return
     end
 
@@ -521,7 +554,6 @@ function M.status(opts)
     return s
 end
 
--- compat helper used by your already-installed dwroom.lua
 function M.getDebugState()
     local s = M.status({ quiet = true })
     s.installedAtTs = s.installTs
