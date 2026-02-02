@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.capture.roomfeed_capture
 -- Owner       : Capture
--- Version     : v2026-02-02D
+-- Version     : v2026-02-02E
 -- Purpose     :
 --   - Passive capture of room output blocks (movement room header, look output)
 --     without GMCP and without sending any commands.
@@ -12,11 +12,13 @@
 --
 -- Notes (Feb 2026 update):
 --   - Some rooms do NOT print "(#12345)" in the first line (e.g. "The Adventurer's Meeting Room").
---     We now support a conservative "room title" fallback to start snapshot capture.
+--     We support a conservative "room title" fallback to start snapshot capture.
 --   - IMPORTANT: command echo lines (e.g. "dwroom watch status") must NOT be treated as titles.
 --     Fallback title detection requires at least one uppercase letter and rejects "dw*/lua*" lines.
 --   - "appears out of thin air." is standard player relocation, treat as ARRIVE (not admin-only).
 --   - Admin poof lines are customizable, so we do NOT attempt to special-case "poof" anymore.
+--   - IMPORTANT: MUD output may include ANSI/control characters. We strip ANSI + \r for parsing
+--     decisions (header/exits/prompt/arrive/leave), while keeping raw lines for ingestion.
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -38,7 +40,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-02D"
+M.VERSION = "v2026-02-02E"
 
 local function _nowTs()
     return os.time()
@@ -64,8 +66,25 @@ local function _trim(s)
     return s
 end
 
-local function _isPromptNoise(ln)
-    ln = tostring(ln or "")
+-- Strip common ANSI escape sequences + carriage returns for parsing decisions.
+-- Keep raw lines for RoomSvc ingestion.
+local function _stripAnsi(s)
+    s = tostring(s or "")
+    -- strip CR
+    s = s:gsub("\r", "")
+    -- CSI sequences: ESC [ ... letter
+    s = s:gsub("\27%[[0-9;]*[A-Za-z]", "")
+    -- OSC sequences (rare): ESC ] ... BEL
+    s = s:gsub("\27%][^\7]*\7", "")
+    return s
+end
+
+local function _cleanLine(ln)
+    return _stripAnsi(tostring(ln or ""))
+end
+
+local function _isPromptNoise(lnClean)
+    local ln = tostring(lnClean or "")
     if ln == "" then return false end
     if ln:find("<%d") and (ln:lower():find("hp") or ln:lower():find("mp") or ln:lower():find("mv")) then
         return true
@@ -74,15 +93,15 @@ local function _isPromptNoise(ln)
 end
 
 -- Strong header: room line includes "(#12345)"
-local function _isRoomHeaderStrong(ln)
-    ln = tostring(ln or "")
+local function _isRoomHeaderStrong(lnClean)
+    local ln = tostring(lnClean or "")
     return (ln:find("%(#%d+%)") ~= nil)
 end
 
 -- Fallback header: conservative "room title" detection for rooms that do NOT print "(#id)".
 -- We keep this strict so we don't accidentally start snapshots on random one-liners or command echoes.
-local function _isRoomTitleCandidate(ln)
-    ln = tostring(ln or "")
+local function _isRoomTitleCandidate(lnClean)
+    local ln = tostring(lnClean or "")
     if ln == "" then return false end
     if _isPromptNoise(ln) then return false end
 
@@ -126,17 +145,17 @@ local function _isRoomTitleCandidate(ln)
     return true
 end
 
-local function _isRoomHeaderAny(ln)
-    return _isRoomHeaderStrong(ln) or _isRoomTitleCandidate(ln)
+local function _isRoomHeaderAny(lnClean)
+    return _isRoomHeaderStrong(lnClean) or _isRoomTitleCandidate(lnClean)
 end
 
-local function _isExitsLine(ln)
-    ln = tostring(ln or "")
+local function _isExitsLine(lnClean)
+    local ln = tostring(lnClean or "")
     return (ln:lower():match("^%s*obvious exits:%s*$") ~= nil)
 end
 
-local function _tryParseArriveLeave(ln)
-    ln = _trim(ln)
+local function _tryParseArriveLeave(lnClean)
+    local ln = _trim(lnClean)
     if ln == "" then return nil end
 
     -- ARRIVE (standard)
@@ -253,7 +272,8 @@ local ROOT = {
     snapCapturing = false,
     snapBuf = {},
     snapStartTs = nil,
-    snapStartLine = nil,
+    snapStartLineRaw = nil,
+    snapStartLineClean = nil,
     snapHasExits = false,
     snapSeenLines = 0,
 
@@ -268,17 +288,19 @@ local function _resetSnap()
     ROOT.snapCapturing = false
     ROOT.snapBuf = {}
     ROOT.snapStartTs = nil
-    ROOT.snapStartLine = nil
+    ROOT.snapStartLineRaw = nil
+    ROOT.snapStartLineClean = nil
     ROOT.snapHasExits = false
     ROOT.snapSeenLines = 0
 end
 
-local function _beginSnap(ln)
+local function _beginSnap(lnRaw, lnClean)
     _resetSnap()
     ROOT.snapCapturing = true
     ROOT.snapStartTs = _nowTs()
-    ROOT.snapStartLine = tostring(ln or "")
-    ROOT.snapBuf[#ROOT.snapBuf + 1] = tostring(ln or "")
+    ROOT.snapStartLineRaw = tostring(lnRaw or "")
+    ROOT.snapStartLineClean = tostring(lnClean or "")
+    ROOT.snapBuf[#ROOT.snapBuf + 1] = tostring(lnRaw or "")
     ROOT.snapSeenLines = 1
 end
 
@@ -322,8 +344,8 @@ local function _finalizeSnap()
     end
 end
 
-local function _handleArriveLeave(ln)
-    local parsed = _tryParseArriveLeave(ln)
+local function _handleArriveLeave(lnClean)
+    local parsed = _tryParseArriveLeave(lnClean)
     if not parsed then return end
 
     local name = tostring(parsed.name or "")
@@ -369,21 +391,22 @@ function M.install(opts)
     ROOT.installTs = _nowTs()
 
     ROOT.lineTriggerId = tempRegexTrigger("^(.*)$", function()
-        local ln = (type(line) == "string") and line or tostring(line or "")
+        local lnRaw = (type(line) == "string") and line or tostring(line or "")
+        local lnClean = _cleanLine(lnRaw)
 
         if ROOT.snapCapturing ~= true then
-            _handleArriveLeave(ln)
+            _handleArriveLeave(lnClean)
         end
 
         if ROOT.snapCapturing ~= true then
-            if _isRoomHeaderAny(ln) then
-                _beginSnap(ln)
+            if _isRoomHeaderAny(lnClean) then
+                _beginSnap(lnRaw, lnClean)
                 return
             end
             return
         end
 
-        if _isPromptNoise(ln) then
+        if _isPromptNoise(lnClean) then
             _finalizeSnap()
             return
         end
@@ -395,17 +418,17 @@ function M.install(opts)
         end
 
         -- If a new header/title starts mid-capture, restart (best-effort).
-        if _isRoomHeaderAny(ln) and tostring(ln or "") ~= tostring(ROOT.snapStartLine or "") then
+        if _isRoomHeaderAny(lnClean) and tostring(lnClean or "") ~= tostring(ROOT.snapStartLineClean or "") then
             _abortSnap("abort:restart_header_seen")
-            _beginSnap(ln)
+            _beginSnap(lnRaw, lnClean)
             return
         end
 
-        if _isExitsLine(ln) then
+        if _isExitsLine(lnClean) then
             ROOT.snapHasExits = true
         end
 
-        ROOT.snapBuf[#ROOT.snapBuf + 1] = ln
+        ROOT.snapBuf[#ROOT.snapBuf + 1] = lnRaw
     end)
 
     if type(ROOT.lineTriggerId) ~= "number" then
