@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-02-01A
+-- Version     : v2026-02-02B
 -- Purpose     :
 --   - SAFE RoomEntities UI (consumer-only) that renders a per-entity ROW LIST with
 --     sections: Players / Mobs / Items-Objects / Unknown.
@@ -40,11 +40,15 @@
 --   - NEW (v2026-02-01A):
 --       * Confidence gate: stop promoting "player" solely from case-insensitive matches
 --         or prefix matches. Exact display-name match only (or explicit override).
+--
+--   - FIX (v2026-02-02B):
+--       * Readability: ensure listRoot and row containers are transparent, and row/header
+--         label styles force readable text colors (prevents white-on-white or pale palettes).
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-01A"
+M.VERSION = "v2026-02-02B"
 M.UI_ID = "roomentities_ui"
 M.id = M.UI_ID -- convenience alias (some tooling/debug expects ui.id)
 
@@ -378,6 +382,11 @@ local function _ensureWidgets()
             local listRoot = nil
             if okRoot then
                 listRoot = listRootOrErr
+            end
+
+            -- Readability: ensure listRoot never paints an opaque light background.
+            if type(listRoot) == "table" and type(ListKit.applyListRootStyle) == "function" then
+                pcall(function() ListKit.applyListRootStyle(listRoot) end)
             end
 
             return {
@@ -781,6 +790,13 @@ local function _renderRowsIntoRoot(root, effectiveLists)
         end
 
         _state.widgets.rendered[#_state.widgets.rendered + 1] = row
+
+        -- Readability: keep row container transparent to avoid "white bar" backgrounds.
+        if type(row) == "table" and type(row.setStyleSheet) == "function" then
+            pcall(function()
+                row:setStyleSheet([[background-color: rgba(0,0,0,0); border: 0px;]])
+            end)
+        end
 
         local nameLabel = G.Label:new({
             name = row.name .. "_name",
