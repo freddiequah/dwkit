@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.capture.roomfeed_capture
 -- Owner       : Capture
--- Version     : v2026-02-02G
+-- Version     : v2026-02-03E
 -- Purpose     :
 --   - Passive capture of room output blocks (movement room header, look output)
 --     without GMCP and without sending any commands.
@@ -19,6 +19,24 @@
 --   - Defensive: if a snapshot starts on the exits line, we set snapHasExits immediately.
 --   - Tightened: fallback title detection rejects exit-entry lines (e.g. "East - ...") and
 --     common look-description lines like "hangs here", "is here", "mounted on", etc.
+--
+-- Mar 2026 fix (v2026-02-03B):
+--   - Add silent debug fields (queried via status({quiet=true})) to confirm whether
+--     headers are being recognized and whether snapshots begin.
+--   - Strong header matches one-or-more [ ... ] flag blocks, with optional (#id).
+--
+-- Mar 2026 fix (v2026-02-03C):
+--   - Some servers/clients include non-ANSI invisible control chars / NBSP that survive ANSI stripping.
+--     These break header matching. We now normalize NBSP -> space and strip remaining ASCII control chars
+--     (0x00-0x1F, 0x7F) after ANSI removal, for parsing decisions only.
+--
+-- Mar 2026 fix (v2026-02-03E):
+--   - Header detection was still not matching in live output (lines are seen, but no header recognized).
+--     Replace brittle single-pattern header matching with a stepwise approach:
+--       * require trailing one-or-more [ ... ] flag blocks
+--       * strip flag blocks and optional (#id)
+--       * sanity-check remaining title text
+--   - Add "seenLineCount/lastLineSeen*" silent diagnostics to confirm the trigger is receiving output.
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -40,7 +58,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-02G"
+M.VERSION = "v2026-02-03E"
 
 local function _nowTs()
     return os.time()
@@ -75,6 +93,10 @@ end
 --  - OSC: ESC] ... BEL
 --  - Charset designations: ESC(  / ESC)
 --  - Any remaining single ESC + char leftovers
+--
+-- Additional hardening:
+--  - Normalize NBSP (0xC2 0xA0) -> space
+--  - Strip remaining ASCII control chars (0x00-0x1F, 0x7F)
 local function _stripAnsi(s)
     s = tostring(s or "")
 
@@ -96,6 +118,13 @@ local function _stripAnsi(s)
     -- Any remaining ESC + one char (defensive)
     s = s:gsub("\27.", "")
 
+    -- Normalize NBSP -> space (UTF-8 C2 A0)
+    s = s:gsub("\194\160", " ")
+
+    -- Strip remaining ASCII control chars (keep output readable; parsing-only)
+    -- Includes NUL..US and DEL.
+    s = s:gsub("[%z\1-\31\127]", "")
+
     return s
 end
 
@@ -110,12 +139,6 @@ local function _isPromptNoise(lnClean)
         return true
     end
     return false
-end
-
--- Strong header: room line includes "(#12345)"
-local function _isRoomHeaderStrong(lnClean)
-    local ln = tostring(lnClean or "")
-    return (ln:find("%(#%d+%)") ~= nil)
 end
 
 local function _isExitsLine(lnClean)
@@ -150,8 +173,73 @@ local function _isExitEntryLine(lnClean)
     return true
 end
 
--- Fallback header: conservative "room title" detection for rooms that do NOT print "(#id)".
--- We keep this strict so we don't accidentally start snapshots on random one-liners or command echoes.
+-- Strong header (works for immortal + normal):
+--   "Corner of Falgo and Straight (#11952) [ NOBITS ]"
+--   "Some Room [ INDOORS ]"
+--   "Foo Bar [ INDOORS ] [ SAFE ]"
+--
+-- We now detect headers stepwise instead of a single brittle pattern:
+--   1) require at least one trailing [ ... ] block
+--   2) strip trailing [ ... ] blocks (supports multiple)
+--   3) strip optional "(#12345)" at end
+--   4) sanity-check remaining title
+local function _isRoomHeaderStrong(lnClean)
+    local t = _trim(lnClean)
+    if t == "" then return false end
+    if _isPromptNoise(t) then return false end
+
+    -- avoid bracket/system lines: "[ X has connected. ]"
+    if t:match("^%[") then return false end
+
+    -- speech/flavor lines often include quotes; never treat as header
+    if t:find('"', 1, true) then return false end
+
+    -- must not be an exits entry line
+    if _isExitEntryLine(t) then return false end
+
+    -- must not be command echo lines / kit invocations
+    local lower = t:lower()
+    if lower:match("^dw[%w_%-]") then return false end
+    if lower:match("^lua%s") then return false end
+
+    -- Require at least one trailing [ ... ] flags block (balanced bracket)
+    if not t:match("%b[]%s*$") then
+        return false
+    end
+
+    -- Strip ALL trailing [ ... ] blocks
+    local base = t
+    local guard = 0
+    while base:match("%s*%b[]%s*$") do
+        base = base:gsub("%s*%b[]%s*$", "")
+        guard = guard + 1
+        if guard > 8 then break end -- defensive
+    end
+    base = _trim(base)
+    if base == "" then return false end
+
+    -- Strip optional "(#12345)" if it is at the end of base
+    base = base:gsub("%s*%(%#%d+%)%s*$", "")
+    base = _trim(base)
+    if base == "" then return false end
+
+    -- Basic "title-ish" sanity
+    if base:match("[%:%.%!%?]$") then return false end
+    local len = #base
+    if len < 4 or len > 72 then return false end
+    if not base:match("[%a]") then return false end
+    if not base:match("%u") then return false end
+
+    -- Avoid obvious non-title lines
+    local baseLower = base:lower()
+    if baseLower:match("^you are ") then return false end
+    if baseLower:match("^at the ") then return false end
+    if baseLower:find(" has connected") or baseLower:find(" has quit") or baseLower:find(" un%-renting") then return false end
+
+    return true
+end
+
+-- Fallback title detection remains available, but we keep primary detection strong header first.
 local function _isRoomTitleCandidate(lnClean)
     local ln = tostring(lnClean or "")
     if ln == "" then return false end
@@ -207,6 +295,8 @@ local function _isRoomTitleCandidate(lnClean)
     return true
 end
 
+-- IMPORTANT:
+-- Strong header first; only use fallback when strong header is not present.
 local function _isRoomHeaderAny(lnClean)
     return _isRoomHeaderStrong(lnClean) or _isRoomTitleCandidate(lnClean)
 end
@@ -337,6 +427,17 @@ local ROOT = {
     lastOkTs = nil,
     lastAbortReason = nil,
     lastDegradedReason = nil,
+
+    -- silent diagnostics (no prints)
+    lastHeaderSeenTs = nil,
+    lastHeaderSeenClean = nil,
+    lastSnapStartTs = nil,
+    lastSnapStartClean = nil,
+
+    -- line receipt diagnostics (no prints)
+    seenLineCount = 0,
+    lastLineSeenTs = nil,
+    lastLineSeenClean = nil,
 }
 
 local MAX_SNAP_LINES = 140
@@ -359,6 +460,10 @@ local function _beginSnap(lnRaw, lnClean)
     ROOT.snapStartLineClean = tostring(lnClean or "")
     ROOT.snapBuf[#ROOT.snapBuf + 1] = tostring(lnRaw or "")
     ROOT.snapSeenLines = 1
+
+    -- silent diagnostics
+    ROOT.lastSnapStartTs = ROOT.snapStartTs
+    ROOT.lastSnapStartClean = ROOT.snapStartLineClean
 
     -- defensive: if snapshot begins on exits line, mark it immediately
     if _isExitsLine(ROOT.snapStartLineClean) then
@@ -455,12 +560,21 @@ function M.install(opts)
         local lnRaw = (type(line) == "string") and line or tostring(line or "")
         local lnClean = _cleanLine(lnRaw)
 
+        -- line receipt diagnostics (silent)
+        ROOT.seenLineCount = (tonumber(ROOT.seenLineCount or 0) or 0) + 1
+        ROOT.lastLineSeenTs = _nowTs()
+        ROOT.lastLineSeenClean = _trim(lnClean)
+
         if ROOT.snapCapturing ~= true then
             _handleArriveLeave(lnClean)
         end
 
         if ROOT.snapCapturing ~= true then
             if _isRoomHeaderAny(lnClean) then
+                -- silent diagnostics
+                ROOT.lastHeaderSeenTs = _nowTs()
+                ROOT.lastHeaderSeenClean = _trim(lnClean)
+
                 _beginSnap(lnRaw, lnClean)
                 return
             end
@@ -539,6 +653,17 @@ function M.status(opts)
         lastOkTs = ROOT.lastOkTs,
         lastAbortReason = ROOT.lastAbortReason,
         lastDegradedReason = ROOT.lastDegradedReason,
+
+        -- silent diagnostics
+        lastHeaderSeenTs = ROOT.lastHeaderSeenTs,
+        lastHeaderSeenClean = ROOT.lastHeaderSeenClean,
+        lastSnapStartTs = ROOT.lastSnapStartTs,
+        lastSnapStartClean = ROOT.lastSnapStartClean,
+
+        -- line receipt diagnostics
+        seenLineCount = ROOT.seenLineCount,
+        lastLineSeenTs = ROOT.lastLineSeenTs,
+        lastLineSeenClean = ROOT.lastLineSeenClean,
     }
 
     if opts.quiet ~= true then
@@ -546,6 +671,8 @@ function M.status(opts)
         for _, k in ipairs({
             "installed", "lineTriggerId", "snapCapturing", "snapHasExits", "snapBufLen",
             "lastOkTs", "lastAbortReason", "lastDegradedReason",
+            "lastHeaderSeenTs", "lastHeaderSeenClean", "lastSnapStartTs", "lastSnapStartClean",
+            "seenLineCount", "lastLineSeenTs", "lastLineSeenClean",
         }) do
             _out(string.format("  %s=%s", k, tostring(s[k])))
         end
