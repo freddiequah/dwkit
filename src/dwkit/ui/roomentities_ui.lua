@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-02-02B
+-- Version     : v2026-02-03A
 -- Purpose     :
 --   - SAFE RoomEntities UI (consumer-only) that renders a per-entity ROW LIST with
 --     sections: Players / Mobs / Items-Objects / Unknown.
@@ -44,11 +44,14 @@
 --   - FIX (v2026-02-02B):
 --       * Readability: ensure listRoot and row containers are transparent, and row/header
 --         label styles force readable text colors (prevents white-on-white or pale palettes).
+--
+--   - NEW (v2026-02-03A):
+--       * Quiet-aware logging: apply() output respects opts.quiet (for ui_manager applyAll/applyOne).
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-02B"
+M.VERSION = "v2026-02-03A"
 M.UI_ID = "roomentities_ui"
 M.id = M.UI_ID -- convenience alias (some tooling/debug expects ui.id)
 
@@ -62,8 +65,17 @@ local function _safeRequire(modName)
     return false, mod
 end
 
-local function _out(line)
+local function _isQuiet(opts)
+    return type(opts) == "table" and opts.quiet == true
+end
+
+local function _out(line, opts)
+    if _isQuiet(opts) then return end
     U.out(line)
+end
+
+local function _err(msg)
+    U.out("[DWKit UI] ERROR: " .. tostring(msg))
 end
 
 local function _countAny(x)
@@ -711,19 +723,15 @@ local function _renderRowsIntoRoot(root, effectiveLists)
 
     _clearRenderedWidgets()
 
-    -- Layout robustness: prevent "bottom-cut" by giving labels enough height
-    -- for padding, and by starting with a small top pad.
     local TOP_PAD = 3
     local BOTTOM_PAD = 2
 
     local yCursor = TOP_PAD
     local GAP = 3
 
-    -- Increased heights to accommodate ListKit styling padding (prevents clipping/overlap).
     local HEADER_H = 30
     local ROW_H = 28
 
-    -- Best-effort clamp: if we can read root height, avoid placing beyond bottom.
     local availH = _getHeightBestEffort(root)
 
     local function canPlace(h)
@@ -791,7 +799,6 @@ local function _renderRowsIntoRoot(root, effectiveLists)
 
         _state.widgets.rendered[#_state.widgets.rendered + 1] = row
 
-        -- Readability: keep row container transparent to avoid "white bar" backgrounds.
         if type(row) == "table" and type(row.setStyleSheet) == "function" then
             pcall(function()
                 row:setStyleSheet([[background-color: rgba(0,0,0,0); border: 0px;]])
@@ -836,8 +843,11 @@ local function _renderRowsIntoRoot(root, effectiveLists)
                 _state.overrides[name] = nil
             end
 
-            _out(string.format("[DWKit UI] roomentities_ui override name=%s mode=%s", tostring(name),
-                tostring(_state.overrides[name] or "auto")))
+            -- Interactive action: keep this log (not part of quiet applyAll/applyOne)
+            _out(string.format("[DWKit UI] roomentities_ui override name=%s mode=%s",
+                tostring(name),
+                tostring(_state.overrides[name] or "auto")
+            ), nil)
 
             local st = _state.lastDataState
             if type(st) == "table" then
@@ -854,7 +864,6 @@ local function _renderRowsIntoRoot(root, effectiveLists)
     local function addSection(title, list)
         local n = (type(list) == "table") and #list or 0
 
-        -- Option 3 + explicit empty indicator without adding an extra row (prevents clipping).
         local hdr = string.format("%s (%d)", tostring(title), tonumber(n) or 0)
         if n == 0 then
             hdr = hdr .. " (empty)"
@@ -870,9 +879,8 @@ local function _renderRowsIntoRoot(root, effectiveLists)
         end
 
         for i = 1, n do
-            local okRow, errRow = addRow(list[i])
+            local okRow, _errRow = addRow(list[i])
             if not okRow then
-                -- Stop rendering further rows if we run out of space; do not overlap.
                 return true, nil
             end
         end
@@ -886,8 +894,6 @@ local function _renderRowsIntoRoot(root, effectiveLists)
     local okD = addSection("Unknown", effectiveLists.unknown)
 
     if not okA or not okB or not okC or not okD then
-        -- Best-effort: we still consider render "ok" because a partial render is safer
-        -- than overlapping/clipping. The fallback text view covers deeper inspection.
         return true, nil
     end
 
@@ -931,7 +937,6 @@ end
 function M._renderNow(state)
     state = (type(state) == "table") and state or {}
 
-    -- Cache last rendered data state so override clicks can re-render the same dataset.
     _state.lastDataState = state
 
     local effectiveLists, overrideCount, usedWhoBoost = _computeEffectiveLists(state)
@@ -948,8 +953,6 @@ function M._renderNow(state)
         if not okRows then
             usedRowUi = false
             lastErr = tostring(errRows or "row render failed")
-
-            -- Minimal safe fix: ensure listRoot is hidden when we fall back.
             U.safeHide(_state.widgets.listRoot)
         else
             U.safeShow(_state.widgets.listRoot)
@@ -957,7 +960,6 @@ function M._renderNow(state)
     end
 
     if not usedRowUi then
-        -- Minimal safe fix: ensure listRoot is hidden in fallback path (prevents overlap/ghost UI).
         if type(_state.widgets.listRoot) == "table" then
             U.safeHide(_state.widgets.listRoot)
         end
@@ -984,8 +986,6 @@ function M._renderFromService()
     return M._renderNow(state)
 end
 
--- NEW: Recommended test pipeline helper (seed the SERVICE, UI remains consumer-only).
--- Use this instead of calling UI._renderNow directly in ad-hoc tests.
 function M.seedServiceFixture(opts)
     opts = (type(opts) == "table") and opts or {}
 
@@ -998,7 +998,6 @@ function M.seedServiceFixture(opts)
         return false, "RoomEntitiesService.ingestFixture not available"
     end
 
-    -- ensure deterministic default source if caller didn't provide
     if type(opts.source) ~= "string" or opts.source == "" then
         opts.source = "fixture:roomentities_ui"
     end
@@ -1008,7 +1007,6 @@ function M.seedServiceFixture(opts)
         return false, tostring(err)
     end
 
-    -- If UI is currently shown, re-render from service (subscribers should also fire).
     if _state.enabled == true and _state.visible == true then
         M._renderFromService()
     end
@@ -1095,7 +1093,7 @@ local function _ensureWhoStoreSubscription()
         M._renderFromService()
     end
 
-    local okSub, sub, errSub = U.subscribeServiceUpdates(
+    local okSub, sub, _errSub = U.subscribeServiceUpdates(
         M.UI_ID,
         WS.onUpdated,
         handlerFn,
@@ -1159,7 +1157,8 @@ function M.apply(opts)
 
         local okSub, errSub = _ensureSubscriptions()
         if not okSub then
-            _out("[DWKit UI] roomentities_ui WARN: " .. tostring(errSub))
+            -- Respect quiet; caller can still inspect getState().lastError
+            _out("[DWKit UI] roomentities_ui WARN: " .. tostring(errSub), opts)
         end
 
         M._renderFromService()
@@ -1173,7 +1172,7 @@ function M.apply(opts)
         tostring(enabled),
         tostring(visible),
         tostring(action)
-    ))
+    ), opts)
 
     return true, nil
 end

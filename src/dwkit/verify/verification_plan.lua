@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-03A
+-- Version     : v2026-02-03B
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-03A"
+M.VERSION = "v2026-02-03B"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -371,6 +371,74 @@ local SUITES = {
                 note = "ASSERT: gui_settings shows enabled=false and visible=false after dwgui disable.",
             },
             { cmd = "dwgui status",                  note = "Human confirmation: list should show roomentities_ui enabled=OFF visible=OFF." },
+        },
+    },
+
+    -- ---------------------------------------------------------------------
+    -- UI Manager + LaunchPad suites (ported from the provided changes, but
+    -- kept compatible with existing runner schema + best-effort guards).
+    -- ---------------------------------------------------------------------
+
+    ui_manager_enabled_visible_matrix = {
+        title = "ui_manager_enabled_visible_matrix",
+        description =
+        "UI manager applies enabled/visible matrix; visible toggles should reflect in UI state; disabled UI should stand down best-effort.",
+        delay = 0.30,
+        steps = {
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); if type(gs.register)=="function" then pcall(gs.register,"presence_ui",{enabled=false,visible=false},{save=false}); pcall(gs.register,"roomentities_ui",{enabled=false,visible=false},{save=false}); pcall(gs.register,"launchpad_ui",{enabled=false,visible=false},{save=false}); end; gs.setEnabled("presence_ui",true,{noSave=true}); gs.setVisible("presence_ui",true,{noSave=true}); gs.setEnabled("roomentities_ui",true,{noSave=true}); gs.setVisible("roomentities_ui",true,{noSave=true}); gs.setEnabled("launchpad_ui",false,{noSave=true}); gs.setVisible("launchpad_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)~="table" or type(UM.applyAll)~="function" then error("ui_manager.applyAll missing") end; local ok,err=UM.applyAll({source="dwverify:matrix"}); if ok==false then error("ui_manager.applyAll failed: "..tostring(err)) end; local P=require("dwkit.ui.presence_ui"); local R=require("dwkit.ui.roomentities_ui"); local sp=P.getState(); local sr=R.getState(); if sp.visible~=true then error("Expected presence_ui visible=true; got "..tostring(sp.visible)) end; if sr.visible~=true then error("Expected roomentities_ui visible=true; got "..tostring(sr.visible)) end; print("[dwverify-ui] PASS matrix step1 presence_ui visible=true roomentities_ui visible=true") end',
+                note = "Seed enabled/visible for presence+roomentities; applyAll; assert both visible=true.",
+            },
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.setVisible("presence_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("presence_ui",{source="dwverify:matrix"}); if ok==false then error("applyOne(presence_ui) failed: "..tostring(err)) end; local P=require("dwkit.ui.presence_ui"); local st=P.getState(); if st.visible~=false then error("Expected presence_ui visible=false; got "..tostring(st.visible)) end; print("[dwverify-ui] PASS matrix step2 presence_ui visible=false (enabled remains ON)") end',
+                note = "Toggle presence_ui visible OFF (still enabled); applyOne; assert visible=false.",
+            },
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.setEnabled("roomentities_ui",false,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("roomentities_ui",{source="dwverify:matrix"}); if ok==false then error("applyOne(roomentities_ui) failed: "..tostring(err)) end; local R=require("dwkit.ui.roomentities_ui"); local st=R.getState(); local okState=(st.visible==false) or (st.enabled==false) or (st.inited==false); if not okState then error("Expected roomentities_ui to stand down (visible/enabled/inited false); got visible="..tostring(st.visible).." enabled="..tostring(st.enabled).." inited="..tostring(st.inited)) end; print("[dwverify-ui] PASS matrix step3 roomentities_ui stood down best-effort") end',
+                note =
+                "Disable roomentities_ui; applyOne; accept any of: visible=false OR enabled=false OR inited=false (best-effort stand-down).",
+            },
+        },
+        _toggle_helper = true, -- (ignored; harmless marker if your runner prints raw suite table; remove if undesired)
+    },
+
+    launchpad_only_when_any_enabled = {
+        title = "launchpad_only_when_any_enabled",
+        description = "LaunchPad must not appear when no other UI is enabled; must appear when at least one is enabled.",
+        delay = 0.30,
+        steps = {
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); if type(gs.register)=="function" then pcall(gs.register,"launchpad_ui",{enabled=true,visible=true},{save=false}); pcall(gs.register,"presence_ui",{enabled=false,visible=false},{save=false}); pcall(gs.register,"roomentities_ui",{enabled=false,visible=false},{save=false}); end; gs.setEnabled("presence_ui",false,{noSave=true}); gs.setVisible("presence_ui",false,{noSave=true}); gs.setEnabled("roomentities_ui",false,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); gs.setEnabled("launchpad_ui",true,{noSave=true}); gs.setVisible("launchpad_ui",true,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)=="table" and type(UM.applyOne)=="function" then UM.applyOne("launchpad_ui",{source="dwverify:launchpad"}) else local L=require("dwkit.ui.launchpad_ui"); if type(L.apply)=="function" then L.apply({}) end end; local L=require("dwkit.ui.launchpad_ui"); local st=L.getState(); local rowCount=(st.widgets and st.widgets.rowCount) or (st.rowCount) or 0; if st.visible~=false then error("Expected launchpad visible=false when no other UI enabled; got "..tostring(st.visible)) end; if tonumber(rowCount)~=0 then error("Expected launchpad rowCount=0 when none enabled; got "..tostring(rowCount)) end; print("[dwverify-ui] PASS launchpad step1 hidden when none enabled (rowCount=0)") end',
+                note = "No enabled UIs (besides LaunchPad itself). Expect LaunchPad forces itself hidden and 0 rows.",
+            },
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.setEnabled("roomentities_ui",true,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); gs.setVisible("launchpad_ui",true,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)=="table" and type(UM.applyOne)=="function" then UM.applyOne("roomentities_ui",{source="dwverify:launchpad"}); UM.applyOne("launchpad_ui",{source="dwverify:launchpad"}) else local R=require("dwkit.ui.roomentities_ui"); if type(R.apply)=="function" then R.apply({}) end; local L=require("dwkit.ui.launchpad_ui"); if type(L.apply)=="function" then L.apply({}) end end; local L=require("dwkit.ui.launchpad_ui"); local st=L.getState(); local ids=st.renderedUiIds or {}; local has=false; for i=1,#ids do if ids[i]=="roomentities_ui" then has=true end end; local rowCount=(st.widgets and st.widgets.rowCount) or (st.rowCount) or #ids; if st.visible~=true then error("Expected launchpad visible=true when at least one enabled; got "..tostring(st.visible)) end; if not has then error("Expected launchpad list to include roomentities_ui; ids="..tostring(table.concat(ids,","))) end; if tonumber(rowCount)<1 then error("Expected launchpad rowCount>=1; got "..tostring(rowCount)) end; print("[dwverify-ui] PASS launchpad step2 visible and lists roomentities_ui") end',
+                note = "Enable roomentities_ui only. Expect LaunchPad visible=true and lists roomentities_ui.",
+            },
+        },
+    },
+
+    launchpad_lists_enabled_only = {
+        title = "launchpad_lists_enabled_only",
+        description =
+        "LaunchPad list contains only enabled UIs and updates after enable/disable changes (sorted by uiId).",
+        delay = 0.30,
+        steps = {
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); if type(gs.register)=="function" then pcall(gs.register,"launchpad_ui",{enabled=true,visible=true},{save=false}); pcall(gs.register,"presence_ui",{enabled=false,visible=false},{save=false}); pcall(gs.register,"roomentities_ui",{enabled=false,visible=false},{save=false}); end; gs.setEnabled("presence_ui",true,{noSave=true}); gs.setVisible("presence_ui",true,{noSave=true}); gs.setEnabled("roomentities_ui",true,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); gs.setEnabled("launchpad_ui",true,{noSave=true}); gs.setVisible("launchpad_ui",true,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)~="table" or type(UM.applyAll)~="function" then error("ui_manager.applyAll missing") end; local ok,err=UM.applyAll({source="dwverify:launchpad"}); if ok==false then error("ui_manager.applyAll failed: "..tostring(err)) end; local L=require("dwkit.ui.launchpad_ui"); local st=L.getState(); local ids=st.renderedUiIds or {}; if #ids~=2 or ids[1]~="presence_ui" or ids[2]~="roomentities_ui" then error("Expected ids=[presence_ui,roomentities_ui]; got "..tostring(table.concat(ids,","))) end; print("[dwverify-ui] PASS launchpad list step1 ids="..tostring(table.concat(ids,","))) end',
+                note = "Enable presence_ui + roomentities_ui; LaunchPad should list exactly both (sorted by uiId).",
+            },
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.setEnabled("presence_ui",false,{noSave=true}); gs.setVisible("presence_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)~="table" or type(UM.applyOne)~="function" then error("ui_manager.applyOne missing") end; UM.applyOne("presence_ui",{source="dwverify:launchpad"}); UM.applyOne("launchpad_ui",{source="dwverify:launchpad"}); local L=require("dwkit.ui.launchpad_ui"); local st=L.getState(); local ids=st.renderedUiIds or {}; if #ids~=1 or ids[1]~="roomentities_ui" then error("Expected ids=[roomentities_ui]; got "..tostring(table.concat(ids,","))) end; print("[dwverify-ui] PASS launchpad list step2 ids="..tostring(table.concat(ids,","))) end',
+                note = "Disable presence_ui; LaunchPad should list only roomentities_ui.",
+            },
         },
     },
 }

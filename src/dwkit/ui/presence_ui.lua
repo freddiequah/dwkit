@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.presence_ui
 -- Owner       : UI
--- Version     : v2026-01-16D
+-- Version     : v2026-02-03A
 -- Purpose     :
 --   - SAFE Presence UI scaffold with live render from PresenceService (data only).
 --   - Creates a small Geyser container + label.
@@ -20,7 +20,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-28A"
+M.VERSION = "v2026-02-03A"
 M.UI_ID = "presence_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -106,7 +106,13 @@ local _state = {
     },
 }
 
-local function _out(line)
+-- QUIET-AWARE output helper:
+-- - suppresses normal info logs when opts.quiet == true
+local function _out(line, opts)
+    opts = (type(opts) == "table") and opts or {}
+    if opts.quiet == true then
+        return
+    end
     U.out(line)
 end
 
@@ -305,7 +311,7 @@ function M.apply(opts)
     end
 
     if _state.inited ~= true then
-        local okInit, errInit = M.init()
+        local okInit, errInit = M.init(opts)
         if not okInit then
             return false, errInit
         end
@@ -348,12 +354,13 @@ function M.apply(opts)
         U.safeHide(_state.widgets.container)
     end
 
+    -- IMPORTANT: quiet-aware
     _out(string.format("[DWKit UI] apply uiId=%s enabled=%s visible=%s action=%s",
         tostring(M.UI_ID),
         tostring(enabled),
         tostring(visible),
         tostring(action)
-    ))
+    ), opts)
 
     return true, nil
 end
