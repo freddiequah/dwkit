@@ -4,9 +4,13 @@
 -- Purpose:
 --   - List enabled UIs and provide quick visible toggle (show/hide).
 --   - Must only appear if at least 1 other UI is enabled.
+--
+-- Semantics:
+--   - LaunchPad is a *temporary* show/hide surface by default (noSave=true).
+--   - Persistent visibility changes should be done via dwgui visible <uiId> on|off.
 
 local M = {}
-M.VERSION = "v2026-02-03D"
+M.VERSION = "v2026-02-03E"
 
 local U = require("dwkit.ui.ui_base")
 local Window = require("dwkit.ui.ui_window")
@@ -86,6 +90,7 @@ end
 
 local function _forceSelfHiddenNoSave(gs)
     if type(gs) ~= "table" or type(gs.setVisible) ~= "function" then return end
+    pcall(gs.enableVisiblePersistence, { noSave = true })
     pcall(gs.setVisible, UI_ID, false, { noSave = true })
 end
 
@@ -131,14 +136,11 @@ local function _getEnabledUiIdsFallback()
     end
 
     local enabled = nil
-    if type(mgr.listEnabled) == "function" then
-        -- Prefer records=true if supported (safe even if ignored)
-        local ok, v = pcall(mgr.listEnabled, { records = true })
-        if ok then enabled = v end
-        if type(enabled) ~= "table" then
-            local ok2, v2 = pcall(mgr.listEnabled)
-            if ok2 then enabled = v2 end
-        end
+    local ok, v = pcall(mgr.listEnabled, { records = true })
+    if ok then enabled = v end
+    if type(enabled) ~= "table" then
+        local ok2, v2 = pcall(mgr.listEnabled)
+        if ok2 then enabled = v2 end
     end
 
     if type(enabled) ~= "table" then
@@ -183,7 +185,7 @@ local function _ensureFrame()
         return false
     end
 
-    local ok, frame = pcall(Window.create, {
+    local ok, bundle = pcall(Window.create, {
         uiId = UI_ID,
         title = UI_LABEL,
         width = 330,
@@ -192,11 +194,16 @@ local function _ensureFrame()
         y = 80,
         resizable = true,
     })
-    if not ok or not frame then
+    if not ok or type(bundle) ~= "table" then
         return false
     end
 
-    _frame = frame
+    local root = bundle.content or bundle.frame or bundle
+    if not root then
+        return false
+    end
+
+    _frame = bundle.frame or bundle
     _state.inited = true
     _state.widgets.hasFrame = true
 
@@ -206,23 +213,29 @@ local function _ensureFrame()
         end
     end)
 
-    local okList, listRoot = pcall(ListKit.newListRoot, _frame, {
-        name = "DWKit_LaunchPad_ListRoot",
-        x = 10,
-        y = 44,
-        width = -20,
-        height = -54,
-    })
+    local okList, listRoot = pcall(function()
+        if type(ListKit.newListRoot) == "function" then
+            return ListKit.newListRoot(root, {
+                name = "DWKit_LaunchPad_ListRoot",
+                x = 10,
+                y = 10,
+                width = -20,
+                height = -20,
+            })
+        end
+        return nil
+    end)
+
     if okList and listRoot then
         _listRoot = listRoot
     else
         _listRoot = G.Container:new({
             name = "DWKit_LaunchPad_ListRoot_Fallback",
             x = 10,
-            y = 44,
+            y = 10,
             width = -20,
-            height = -54,
-        }, _frame)
+            height = -20,
+        }, root)
     end
 
     return true
@@ -279,9 +292,7 @@ local function _renderList(uiIds)
             height = rowH - 10,
         }, row.container)
 
-        local text = uiId
-        if not enabled then text = text .. " (disabled)" end
-        pcall(function() row.label:echo(text) end)
+        pcall(function() row.label:echo(uiId) end)
 
         local btnLabel = visible and "Hide" or "Show"
         row.button = G.Label:new({
@@ -303,6 +314,11 @@ local function _renderList(uiIds)
             local gs2 = U.getGuiSettingsBestEffort()
             if type(gs2) ~= "table" then return end
 
+            -- Ensure visible persistence for this session, but do not save (LaunchPad is temporary)
+            if type(gs2.enableVisiblePersistence) == "function" then
+                pcall(gs2.enableVisiblePersistence, { noSave = true })
+            end
+
             local curVis = false
             if type(gs2.getVisible) == "function" then
                 local okV, v = pcall(gs2.getVisible, uiId, false)
@@ -311,12 +327,12 @@ local function _renderList(uiIds)
             local newVis = (curVis ~= true)
 
             if type(gs2.setVisible) == "function" then
-                pcall(gs2.setVisible, uiId, newVis, { save = true })
+                pcall(gs2.setVisible, uiId, newVis, { noSave = true })
             end
 
             local okM, mgr = pcall(require, "dwkit.ui.ui_manager")
             if okM and type(mgr) == "table" and type(mgr.applyOne) == "function" then
-                pcall(mgr.applyOne, uiId, { source = "launchpad_ui:toggle" })
+                pcall(mgr.applyOne, uiId, { source = "launchpad_ui:toggle", quiet = true })
             end
 
             pcall(M.apply, { source = "launchpad_ui:toggle" })
@@ -360,7 +376,6 @@ function M.apply(opts)
     _state.debug.lastEnabledUiIds = enabledUiIds
     _state.debug.lastReason = "enabledSource=" .. tostring(src)
 
-    -- IMPORTANT: keep state updated for tests even if we end up hidden.
     _state.renderedUiIds = enabledUiIds
     _state.widgets.rowCount = #enabledUiIds
 
@@ -389,7 +404,6 @@ function M.apply(opts)
     pcall(function() _frame:show() end)
     _renderList(enabledUiIds)
 
-    -- render overwrites rowCount accurately
     _state.widgets.rowCount = #enabledUiIds
     _state.renderedUiIds = enabledUiIds
 

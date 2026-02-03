@@ -4,13 +4,13 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-03B
+-- Version     : v2026-02-03C
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
 --   - steps can be:
 --       * "command string" (Mudlet command)
---       * { cmd="...", note="...", expect="..." } for richer output
+--       * { cmd="...", note="...", expect="...", delay=... } for richer output
 -- Notes:
 --   - KEEP Lua steps single-line: use `lua do ... end` only (Mudlet input paste safety).
 --   - Suites should avoid spamming gameplay commands; prefer SAFE commands.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-03B"
+M.VERSION = "v2026-02-03C"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -95,7 +95,7 @@ local SUITES = {
                 note = "ASSERT: gate was forced open + ingest happened (PASS/FAIL).",
             },
 
-            { cmd = "dwwho status",   note = "Human confirmation: should show autoCaptureEnabled=true and updated timestamp/source." },
+            { cmd = "dwwho status", note = "Human confirmation: should show autoCaptureEnabled=true and updated timestamp/source." },
         },
     },
 
@@ -162,7 +162,7 @@ local SUITES = {
         description = "WhoStore live clear: clear snapshot + assert empty + human confirm (no WHO send)",
         delay = 0.30,
         steps = {
-            { cmd = "dwwho clear",  note = "Clear WhoStore snapshot (no WHO send)." },
+            { cmd = "dwwho clear", note = "Clear WhoStore snapshot (no WHO send)." },
 
             {
                 cmd =
@@ -195,9 +195,8 @@ local SUITES = {
                 note = "Expect WhoStore summary to reflect latest capture (players count may be 0 if nobody online).",
             },
 
-            { cmd = "dwwho list",         note = "If players exist, expect parsed entries listed (names/classes/etc per contract)." },
-
-            { cmd = "dwwho status",       note = "Human confirmation: refresh guard + watcher lastErr=nil; source should reflect latest update." },
+            { cmd = "dwwho list",   note = "If players exist, expect parsed entries listed (names/classes/etc per contract)." },
+            { cmd = "dwwho status", note = "Human confirmation: refresh guard + watcher lastErr=nil; source should reflect latest update." },
         },
     },
 
@@ -228,7 +227,7 @@ local SUITES = {
                 note = "Assert: WhoStore source is dwwho:auto after manual who (FAIL if still dwwho:refresh).",
             },
 
-            { cmd = "dwwho status",       note = "Human confirmation: source should show dwwho:auto now." },
+            { cmd = "dwwho status", note = "Human confirmation: source should show dwwho:auto now." },
         },
     },
 
@@ -239,7 +238,7 @@ local SUITES = {
         "B4 regression lock-in: establish baseline via refresh, disable watcher, record OFF-baseline, then manual 'who' must NOT update WhoStore after OFF-baseline (lastUpdatedTs/source unchanged). Restores watcher ON at end.",
         delay = 0.45,
         steps = {
-            { cmd = "dwwho watch on",     note = "Precondition: ensure watcher ON so baseline refresh definitely captures/ingests." },
+            { cmd = "dwwho watch on", note = "Precondition: ensure watcher ON so baseline refresh definitely captures/ingests." },
 
             {
                 cmd = "dwwho refresh",
@@ -265,8 +264,7 @@ local SUITES = {
             {
                 cmd = "who",
                 delay = 0.80,
-                note =
-                "Manual WHO while watcher OFF: should NOT ingest/update WhoStore (no state change after OFF-baseline).",
+                note = "Manual WHO while watcher OFF: should NOT ingest/update WhoStore (no state change after OFF-baseline).",
             },
 
             {
@@ -288,7 +286,7 @@ local SUITES = {
         "Watcher off: record lastUpdatedTs, disable watcher, manual 'who' should NOT update WhoStore; then re-enable watcher.",
         delay = 0.45,
         steps = {
-            { cmd = "dwwho watch on",  note = "Ensure watcher is ON before setting baseline." },
+            { cmd = "dwwho watch on", note = "Ensure watcher is ON before setting baseline." },
 
             {
                 cmd = "dwwho refresh",
@@ -350,6 +348,11 @@ local SUITES = {
                 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", true, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] roomentities_ui visible=%s enabled=%s hasContainer=%s hasLabel=%s hasListRoot=%s", tostring(s.visible), tostring(s.enabled), tostring(s.widgets and s.widgets.hasContainer), tostring(s.widgets and s.widgets.hasLabel), tostring(s.widgets and s.widgets.hasListRoot))) end',
                 note = "Show roomentities_ui via gui_settings + apply(); print state.",
             },
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("launchpad_ui", true, {noSave=true}); gs.setVisible("launchpad_ui", true, {noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)=="table" and type(UM.applyOne)=="function" then UM.applyOne("launchpad_ui",{source="dwverify:ui_smoke"}) else local UI=require("dwkit.ui.launchpad_ui"); if type(UI.apply)=="function" then local ok,err=UI.apply({}); if ok==false then error(err) end end end; local UI=require("dwkit.ui.launchpad_ui"); local s=UI.getState(); local rowCount=(s.widgets and s.widgets.rowCount) or s.rowCount or 0; local ids=s.renderedUiIds or {}; print(string.format("[dwverify-ui] launchpad_ui visible=%s enabled=%s rowCount=%s ids=%s", tostring(s.visible), tostring(s.enabled), tostring(rowCount), tostring(table.concat(ids,",")))) end',
+                note = "Show launchpad_ui (via ui_manager if present) and print rendered list state.",
+            },
         },
     },
 
@@ -370,13 +373,12 @@ local SUITES = {
                 'lua do local gs=require("dwkit.config.gui_settings"); local m=gs.list(); local rec=m["roomentities_ui"]; if type(rec)~="table" then error("Expected gui_settings record for roomentities_ui") end; if rec.enabled~=false then error("Expected enabled=false after disable; got "..tostring(rec.enabled)) end; if rec.visible~=false then error("Expected visible=false after disable; got "..tostring(rec.visible)) end; print("[dwverify-ui] PASS gui_settings enabled=false visible=false after disable") end',
                 note = "ASSERT: gui_settings shows enabled=false and visible=false after dwgui disable.",
             },
-            { cmd = "dwgui status",                  note = "Human confirmation: list should show roomentities_ui enabled=OFF visible=OFF." },
+            { cmd = "dwgui status", note = "Human confirmation: list should show roomentities_ui enabled=OFF visible=OFF." },
         },
     },
 
     -- ---------------------------------------------------------------------
-    -- UI Manager + LaunchPad suites (ported from the provided changes, but
-    -- kept compatible with existing runner schema + best-effort guards).
+    -- UI Manager + LaunchPad suites
     -- ---------------------------------------------------------------------
 
     ui_manager_enabled_visible_matrix = {
@@ -398,11 +400,9 @@ local SUITES = {
             {
                 cmd =
                 'lua do local gs=require("dwkit.config.gui_settings"); gs.setEnabled("roomentities_ui",false,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("roomentities_ui",{source="dwverify:matrix"}); if ok==false then error("applyOne(roomentities_ui) failed: "..tostring(err)) end; local R=require("dwkit.ui.roomentities_ui"); local st=R.getState(); local okState=(st.visible==false) or (st.enabled==false) or (st.inited==false); if not okState then error("Expected roomentities_ui to stand down (visible/enabled/inited false); got visible="..tostring(st.visible).." enabled="..tostring(st.enabled).." inited="..tostring(st.inited)) end; print("[dwverify-ui] PASS matrix step3 roomentities_ui stood down best-effort") end',
-                note =
-                "Disable roomentities_ui; applyOne; accept any of: visible=false OR enabled=false OR inited=false (best-effort stand-down).",
+                note = "Disable roomentities_ui; applyOne; accept any of: visible=false OR enabled=false OR inited=false (best-effort stand-down).",
             },
         },
-        _toggle_helper = true, -- (ignored; harmless marker if your runner prints raw suite table; remove if undesired)
     },
 
     launchpad_only_when_any_enabled = {
