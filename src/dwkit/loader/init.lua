@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-01-23D
+-- Version     : v2026-02-03C
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -116,23 +116,48 @@ function Loader.init()
         DWKit._guiSettingsInitLoadError = "guiSettings require failed"
     end
 
-
-    -- UI: RoomEntities (fast path)
-    -- NOTE: We intentionally initialize UI modules here (idempotent) so users can enable/disable via commands
-    -- without needing manual `lua do ... end` requires.
+    -- Enable visible persistence in-session (SAFE, noSave) so LaunchPad can toggle show/hide.
     do
-        local ok, ui = pcall(require, "dwkit.ui.roomentities_ui")
-        if ok and type(ui) == "table" then
-            if type(ui.init) == "function" then
-                local okInit, errInit = pcall(ui.init)
-                if not okInit then
-                    print("[DWKit Loader] WARN roomentities_ui.init failed: " .. tostring(errInit))
+        local gs = DWKit.config and DWKit.config.guiSettings or nil
+        if type(gs) == "table" and type(gs.enableVisiblePersistence) == "function" then
+            pcall(gs.enableVisiblePersistence, { noSave = true })
+        end
+    end
+
+    -- UI bootstrap (SAFE, manual-only semantics)
+    -- Prefer ui_manager.applyAll() (enabled-only). Falls back to roomentities_ui if ui_manager missing.
+    do
+        local okMgr, mgrOrErr = pcall(require, "dwkit.ui.ui_manager")
+        if okMgr and type(mgrOrErr) == "table" then
+            -- Seed known UI ids once (best-effort, no overwrite)
+            if type(mgrOrErr.seedRegisteredDefaults) == "function" then
+                pcall(mgrOrErr.seedRegisteredDefaults, { save = false })
+            end
+
+            if type(mgrOrErr.applyAll) == "function" then
+                local okApply, errApply = pcall(mgrOrErr.applyAll, { source = "dwkit.loader.init", quiet = true })
+                if not okApply then
+                    print("[DWKit Loader] WARN ui_manager.applyAll failed: " .. tostring(errApply))
                 end
             end
-            DWKit.ui = DWKit.ui or {}
-            DWKit.ui.roomentities_ui = ui
         else
-            print("[DWKit Loader] WARN require roomentities_ui failed: " .. tostring(ui))
+            -- Backward compatible fallback: apply RoomEntities UI only (best-effort)
+            local ok, ui = pcall(require, "dwkit.ui.roomentities_ui")
+            if ok and type(ui) == "table" then
+                if type(ui.init) == "function" then
+                    local okInit, errInit = pcall(ui.init)
+                    if not okInit then
+                        print("[DWKit Loader] WARN roomentities_ui.init failed: " .. tostring(errInit))
+                    end
+                end
+                if type(ui.apply) == "function" then
+                    pcall(ui.apply, { source = "dwkit.loader.init:fallback" })
+                end
+                DWKit.ui = DWKit.ui or {}
+                DWKit.ui.roomentities_ui = ui
+            else
+                print("[DWKit Loader] WARN require roomentities_ui failed: " .. tostring(ui))
+            end
         end
     end
 
