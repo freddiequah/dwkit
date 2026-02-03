@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwgui
 -- Owner       : Commands
--- Version     : v2026-01-26A
+-- Version     : v2026-02-03A
 -- Purpose     :
 --   - Command handler for "dwgui" (SAFE)
 --   - Delegated by dwkit.services.command_aliases
@@ -15,6 +15,11 @@
 --       * reload [<uiId>]
 --       * state <uiId>
 --
+-- Notes:
+--   - "disable <uiId>" additionally best-effort forces visible OFF and disposes the UI,
+--     to avoid "enabled=OFF but still visible=ON" confusing states.
+--   - SAFE: no gameplay commands, no timers, no hidden automation.
+--
 -- Public API  :
 --   - dispatch(ctx, gs, sub, uiId, arg3)
 --   - dispatch(ctx, sub, uiId, arg3)      (gs resolved from ctx.getGuiSettings())
@@ -26,7 +31,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-26A"
+M.VERSION = "v2026-02-03A"
 
 function M.reset()
     -- no state kept in this module (reserved for future)
@@ -134,6 +139,39 @@ local function _callAny(ctx, um, fnNames, ...)
     return false
 end
 
+-- Best-effort: ensure visible persistence ON, then setVisible(uiId, false).
+-- This is used by "disable" to force a clean UX state.
+local function _forceVisibleOffBestEffort(ctx, gs, uiId)
+    if type(gs) ~= "table" or type(uiId) ~= "string" or uiId == "" then
+        return false, "invalid args"
+    end
+
+    -- Step 1: enable visible persistence (prefer saving, fallback to noSave)
+    if type(gs.enableVisiblePersistence) == "function" then
+        local okP, okFlag, errMaybe = pcall(gs.enableVisiblePersistence, {})
+        if not okP or okFlag ~= true then
+            pcall(gs.enableVisiblePersistence, { noSave = true })
+        end
+    end
+
+    -- Step 2: setVisible(false) (prefer saving, fallback to noSave)
+    if type(gs.setVisible) ~= "function" then
+        return false, "guiSettings.setVisible not available"
+    end
+
+    local ok1, okFlag1, err1 = pcall(gs.setVisible, uiId, false, {})
+    if ok1 and okFlag1 == true then
+        return true, nil
+    end
+
+    local ok2, okFlag2, err2 = pcall(gs.setVisible, uiId, false, { noSave = true })
+    if ok2 and okFlag2 == true then
+        return true, nil
+    end
+
+    return false, tostring(err2 or err1 or "setVisible failed")
+end
+
 function M.dispatch(...)
     local a1, a2, a3, a4, a5 = ...
 
@@ -230,13 +268,37 @@ function M.dispatch(...)
             _err(ctx, "guiSettings.setEnabled not available.")
             return
         end
+
         local enable = (sub == "enable")
-        local okCall, errOrNil = pcall(gs.setEnabled, uiId, enable)
-        if not okCall then
-            _err(ctx, "setEnabled failed: " .. tostring(errOrNil))
-            return
+        do
+            local okCall, okFlag, errMaybe = pcall(gs.setEnabled, uiId, enable)
+            if not okCall or okFlag ~= true then
+                _err(ctx, "setEnabled failed: " .. tostring(errMaybe or okFlag))
+                return
+            end
         end
         _out(ctx, string.format("[DWKit GUI] setEnabled uiId=%s enabled=%s", tostring(uiId), enable and "ON" or "OFF"))
+
+        -- NEW: disable also forces visible OFF + dispose best-effort
+        if not enable then
+            local okVis, visErr = _forceVisibleOffBestEffort(ctx, gs, uiId)
+            if okVis then
+                _out(ctx, string.format("[DWKit GUI] setVisible uiId=%s visible=%s", tostring(uiId), "OFF"))
+            else
+                _out(ctx,
+                    string.format("[DWKit GUI] WARN: could not force visible OFF uiId=%s err=%s", tostring(uiId),
+                        tostring(visErr)))
+            end
+
+            local um = _requireUiManager(ctx)
+            if type(um) == "table" then
+                -- dispose should be best-effort even if disabled (dispose does not gate on enabled)
+                if _callAny(ctx, um, { "disposeOne" }, uiId, { source = "dwgui:disable" }) then
+                    _out(ctx, "[DWKit UI] dispose uiId=" .. tostring(uiId) .. " ok=true")
+                end
+            end
+        end
+
         return
     end
 
@@ -250,9 +312,9 @@ function M.dispatch(...)
             return
         end
         local vis = (arg3 == "on")
-        local okCall, errOrNil = pcall(gs.setVisible, uiId, vis)
-        if not okCall then
-            _err(ctx, "setVisible failed: " .. tostring(errOrNil))
+        local okCall, okFlag, errMaybe = pcall(gs.setVisible, uiId, vis)
+        if not okCall or okFlag ~= true then
+            _err(ctx, "setVisible failed: " .. tostring(errMaybe or okFlag))
             return
         end
         _out(ctx, string.format("[DWKit GUI] setVisible uiId=%s visible=%s", tostring(uiId), vis and "ON" or "OFF"))
