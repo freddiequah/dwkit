@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_manager
 -- Owner       : UI
--- Version     : v2026-02-03F
+-- Version     : v2026-02-03H
 -- Purpose     :
 --   - SAFE dispatcher for applying UI modules registered in gui_settings.
 --   - Provides manual-only "apply all" and "apply one" capability.
@@ -11,12 +11,17 @@
 --
 -- Public API  :
 --   - getModuleVersion() -> string
+--   - getState(opts?) -> table (manager summary; compat)
+--   - listUiIds(opts?) -> {string} (compat)
 --   - applyAll(opts?) -> boolean ok, string|nil err
 --   - applyOne(uiId, opts?) -> boolean ok, string|nil err
 --   - disposeOne(uiId, opts?) -> boolean ok, string|nil err
 --   - reloadOne(uiId, opts?) -> boolean ok, string|nil err
 --   - reloadAll(opts?) -> boolean ok, string|nil err
 --   - stateOne(uiId, opts?) -> boolean ok, string|nil err
+--   - listAll(opts?) -> {uiId}|{records}
+--   - listEnabled(opts?) -> {uiId}|{records}
+--   - seedRegisteredDefaults(opts?) -> boolean ok, string|nil err
 --
 -- Notes:
 --   - Gating:
@@ -27,7 +32,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-03F"
+M.VERSION = "v2026-02-03H"
 
 local function _rawOut(line)
     line = tostring(line or "")
@@ -528,21 +533,21 @@ function M.stateOne(uiId, opts)
     end
 
     _out("{", opts)
-    _ppTable(stateOrErr, { maxDepth = opts.maxDepth or 4, maxItems = opts.maxItems or 80, quiet = opts.quiet }, 0, "",
-        nil, nil)
+    _ppTable(stateOrErr, { maxDepth = opts.maxDepth or 4, maxItems = opts.maxItems or 80, quiet = opts.quiet }, 0, "", nil, nil)
     _out("}", opts)
 
     return true, nil
 end
 
 function M.printState(uiId, opts) return M.stateOne(uiId, opts) end
-
 function M.state(uiId, opts) return M.stateOne(uiId, opts) end
 
+-- Defaults for registered UI ids (seed only; does not overwrite existing records)
 M.KNOWN_UI_DEFAULTS = {
     presence_ui = { enabled = true, visible = true },
     roomentities_ui = { enabled = true, visible = true },
     launchpad_ui = { enabled = true, visible = false },
+    ui_manager_ui = { enabled = true, visible = false }, -- NEW: UI Manager UI (enable/disable surface)
 }
 
 function M.seedRegisteredDefaults(opts)
@@ -599,27 +604,96 @@ function M.listAll(opts)
     return out
 end
 
+local function _looksLikeUiId(s)
+    if type(s) ~= "string" then return false end
+    -- simple, permissive heuristic: letters/numbers/_ and ends with "_ui"
+    return s:match("^[%w_]+_ui$") ~= nil
+end
+
+local function _normalizeExcludeSet(opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    local exclude = {}
+
+    -- excludeUiIds can be:
+    -- 1) array: {"launchpad_ui","presence_ui"}
+    -- 2) map: { launchpad_ui=true, presence_ui=true }
+    if type(opts.excludeUiIds) == "table" then
+        local isArray = (#opts.excludeUiIds > 0)
+        if isArray then
+            for _, v in ipairs(opts.excludeUiIds) do
+                if type(v) == "string" and v ~= "" then exclude[v] = true end
+            end
+        else
+            for k, v in pairs(opts.excludeUiIds) do
+                if v == true and type(k) == "string" and k ~= "" then exclude[k] = true end
+            end
+        end
+    end
+
+    -- includeSelf=false means "exclude the caller ui id" (generic)
+    if opts.includeSelf == false then
+        local selfUiId = opts.selfUiId or opts.selfUi or opts.uiId or opts.callerUiId
+        if (type(selfUiId) ~= "string" or selfUiId == "") and _looksLikeUiId(opts.source) then
+            -- generic inference: if source looks like a ui id, treat it as self
+            selfUiId = opts.source
+        end
+        if type(selfUiId) == "string" and selfUiId ~= "" then
+            exclude[selfUiId] = true
+        end
+    end
+
+    return exclude
+end
+
 function M.listEnabled(opts)
     opts = (type(opts) == "table") and opts or {}
 
     local ids = M.listAll({ records = true })
-    local out = {}
+    local exclude = _normalizeExcludeSet(opts)
 
+    local out = {}
     for _, rec in ipairs(ids) do
-        if rec.enabled == true then
-            if (opts.includeSelf == false) and rec.uiId == "launchpad_ui" then
-                -- skip
+        if rec.enabled == true and exclude[rec.uiId] ~= true then
+            if opts.records == true then
+                out[#out + 1] = rec
             else
-                if opts.records == true then
-                    out[#out + 1] = rec
-                else
-                    out[#out + 1] = rec.uiId
-                end
+                out[#out + 1] = rec.uiId
             end
         end
     end
 
     return out
+end
+
+-- -------------------------------------------------------------------------
+-- Compat helpers (your Mudlet calls expected these names)
+-- -------------------------------------------------------------------------
+
+function M.listUiIds(opts)
+    return M.listAll(opts)
+end
+
+function M.getState(opts)
+    opts = (type(opts) == "table") and opts or {}
+    local gs = _getGuiSettingsBestEffort()
+
+    local gsStatus = nil
+    if type(gs) == "table" and type(gs.status) == "function" then
+        local ok, v = pcall(gs.status)
+        if ok and type(v) == "table" then
+            gsStatus = v
+        end
+    end
+
+    local records = M.listAll({ records = true })
+    return {
+        moduleVersion = M.VERSION,
+        uiCount = #records,
+        ui = records,
+        guiSettingsStatus = gsStatus,
+        note = "ui_manager is a dispatcher; dwkit.ui.ui_manager_ui is the UI surface",
+    }
 end
 
 return M
