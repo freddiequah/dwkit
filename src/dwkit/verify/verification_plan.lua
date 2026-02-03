@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-01C
+-- Version     : v2026-02-03A
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-01C"
+M.VERSION = "v2026-02-03A"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -128,13 +128,13 @@ local SUITES = {
             },
             {
                 cmd =
-                'lua do local R=require("dwkit.services.roomentities_service"); local ok,err=R.ingestLookText("gaidin is here.",{source="dwverify:reconf"}); if not ok then error("ingestLookText failed: "..tostring(err)) end; local st=R.getState(); if type(st.players)=="table" and st.players["gaidin"]==true then error("Expected gaidin NOT in players (case mismatch)"); end; if type(st.unknown)~="table" or st.unknown["gaidin"]~=true then error("Expected gaidin in unknown (candidate only)"); end; ok,err=R.reclassifyFromWhoStore({source="dwverify:reconf"}); if not ok then error("reclassifyFromWhoStore failed: "..tostring(err)) end; st=R.getState(); if type(st.players)=="table" and st.players["gaidin"]==true then error("Expected gaidin NOT promoted by reclassify (case mismatch)"); end; if type(st.unknown)~="table" or st.unknown["gaidin"]~=true then error("Expected gaidin still in unknown after reclassify"); end; print("[dwverify-roomentities] PASS candidate-only gaidin stays unknown") end',
+                'lua do local R=require("dwkit.services.roomentities_service"); local ok,err=R.ingestLookText("gaidin is here.",{source="dwverify:reconf"}); if not ok then error("ingestLookText failed: "..tostring(err)) end; local st=R.getState(); if type(st.players)=="table" and st.players["gaidin"]==true then error("Expected gaidin NOT in players (case mismatch)") end; if type(st.unknown)~="table" or st.unknown["gaidin"]~=true then error("Expected gaidin in unknown (candidate only)") end; ok,err=R.reclassifyFromWhoStore({source="dwverify:reconf"}); if not ok then error("reclassifyFromWhoStore failed: "..tostring(err)) end; st=R.getState(); if type(st.players)=="table" and st.players["gaidin"]==true then error("Expected gaidin NOT promoted by reclassify (case mismatch)") end; if type(st.unknown)~="table" or st.unknown["gaidin"]~=true then error("Expected gaidin still in unknown after reclassify") end; print("[dwverify-roomentities] PASS candidate-only gaidin stays unknown") end',
                 note = "ASSERT: lower-case gaidin is candidate-only and remains Unknown (even after reclassify).",
             },
             { cmd = "dwroom status", note = "Human check after Step 2: unknown should include gaidin; players should be 0." },
             {
                 cmd =
-                'lua do local R=require("dwkit.services.roomentities_service"); local ok,err=R.ingestLookText("Gaidin is here.",{source="dwverify:reconf"}); if not ok then error("ingestLookText failed: "..tostring(err)) end; local st=R.getState(); if type(st.players)~="table" or st.players["Gaidin"]~=true then error("Expected Gaidin in players (exact match)"); end; print("[dwverify-roomentities] PASS exact-match Gaidin classified as player") end',
+                'lua do local R=require("dwkit.services.roomentities_service"); local ok,err=R.ingestLookText("Gaidin is here.",{source="dwverify:reconf"}); if not ok then error("ingestLookText failed: "..tostring(err)) end; local st=R.getState(); if type(st.players)~="table" or st.players["Gaidin"]~=true then error("Expected Gaidin in players (exact match)") end; print("[dwverify-roomentities] PASS exact-match Gaidin classified as player") end',
                 note = "ASSERT: exact-case Gaidin is classified as player.",
             },
             { cmd = "dwroom status", note = "Human check after Step 4: players should include Gaidin; unknown may be 0 due to replace-on-ingest." },
@@ -350,6 +350,27 @@ local SUITES = {
                 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", true, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] roomentities_ui visible=%s enabled=%s hasContainer=%s hasLabel=%s hasListRoot=%s", tostring(s.visible), tostring(s.enabled), tostring(s.widgets and s.widgets.hasContainer), tostring(s.widgets and s.widgets.hasLabel), tostring(s.widgets and s.widgets.hasListRoot))) end',
                 note = "Show roomentities_ui via gui_settings + apply(); print state.",
             },
+        },
+    },
+
+    -- NEW: Locked semantics verification (Objective 1)
+    ui_disable_forces_visible_off = {
+        title = "ui_disable_forces_visible_off",
+        description = "Locked semantics: dwgui disable must force visible=OFF (and stand down best-effort)",
+        delay = 0.30,
+        steps = {
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", true, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] pre-disable roomentities_ui visible=%s enabled=%s", tostring(s.visible), tostring(s.enabled))) end',
+                note = "Precondition: make roomentities_ui enabled+visible in-memory and show it.",
+            },
+            { cmd = "dwgui disable roomentities_ui", note = "Disable should also force visible OFF (and dispose best-effort)." },
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); local m=gs.list(); local rec=m["roomentities_ui"]; if type(rec)~="table" then error("Expected gui_settings record for roomentities_ui") end; if rec.enabled~=false then error("Expected enabled=false after disable; got "..tostring(rec.enabled)) end; if rec.visible~=false then error("Expected visible=false after disable; got "..tostring(rec.visible)) end; print("[dwverify-ui] PASS gui_settings enabled=false visible=false after disable") end',
+                note = "ASSERT: gui_settings shows enabled=false and visible=false after dwgui disable.",
+            },
+            { cmd = "dwgui status",                  note = "Human confirmation: list should show roomentities_ui enabled=OFF visible=OFF." },
         },
     },
 }

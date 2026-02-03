@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.config.gui_settings
 -- Owner       : Config
--- Version     : v2026-01-15B
+-- Version     : v2026-02-03D
 -- Purpose     :
 --   - Provide per-profile GUI settings storage for DWKit UI modules.
 --   - Owns "enabled" (mandatory) and "visible" (optional) flags per UI id.
@@ -26,26 +26,26 @@
 --   - status() -> table (copy) summary
 --   - selfTestPersistenceSmoke(opts?) -> boolean ok, string|nil err
 --
--- Events Emitted   : None
--- Events Consumed  : None
 -- Persistence      :
 --   - Uses dwkit.persist.store envelope at relPath:
 --       default: "config/gui_settings.tbl"
 --     SchemaVersion:
 --       "v0.1"
--- Automation Policy: Manual only
--- Dependencies     :
---   - dwkit.core.identity
---   - Optional: DWKit.persist.store (preferred) or require("dwkit.persist.store")
--- Invariants       :
---   - Does not create UI windows or trigger visibility changes.
---   - Enabled defaults to options.enabledDefault unless caller provides defaults.enabled.
---   - Visible is only stored/returned when options.visiblePersistenceEnabled=true.
+--
+-- IMPORTANT SEMANTICS (session):
+--   - If enableVisiblePersistence({noSave=true}) is called, visible persistence and any in-memory
+--     per-ui visible flags must remain effective for this Mudlet session even if some code calls load() again.
+--
+-- IMPORTANT SEMANTICS (visible defaults):
+--   - When visible persistence is enabled, "visible" should behave as a boolean at read/list time:
+--       * if a record has explicit visible=true/false, use it
+--       * if a record has visible=nil (unset), return options.visibleDefault (default false)
+--     This avoids "third state" nil surprises (e.g., disable expects visible=OFF).
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-15B"
+M.VERSION = "v2026-02-03D"
 M.SCHEMA_VERSION = "v0.1"
 
 local ID = require("dwkit.core.identity")
@@ -56,6 +56,10 @@ local _state = {
     loaded = false,
     relPath = DEFAULT_REL_PATH,
     schemaVersion = M.SCHEMA_VERSION,
+
+    -- Sticky runtime flag: once enableVisiblePersistence() is invoked, load() must keep it ON for session.
+    sessionVisiblePersistenceEnabled = false,
+
     data = {
         ui = {}, -- uiId -> { enabled=bool, visible=bool|nil }
         options = {
@@ -204,6 +208,34 @@ local function _ensureRec(uiId)
     return rec
 end
 
+local function _getVisiblePersistenceEnabledNow()
+    if type(_state.data) == "table"
+        and type(_state.data.options) == "table"
+        and _state.data.options.visiblePersistenceEnabled == true
+    then
+        return true
+    end
+    return false
+end
+
+local function _mergeSessionVisible(oldData, newData, forceVisible)
+    if not forceVisible then return end
+    if type(oldData) ~= "table" or type(newData) ~= "table" then return end
+    if type(oldData.ui) ~= "table" or type(newData.ui) ~= "table" then return end
+
+    -- Preserve per-ui visible flags that existed in-memory (noSave) if newly loaded rec has nil visible.
+    for uiId, oldRec in pairs(oldData.ui) do
+        if type(uiId) == "string" and type(oldRec) == "table" then
+            local newRec = newData.ui[uiId]
+            if type(newRec) == "table" then
+                if newRec.visible == nil and (oldRec.visible == true or oldRec.visible == false) then
+                    newRec.visible = oldRec.visible
+                end
+            end
+        end
+    end
+end
+
 function M.getModuleVersion() return M.VERSION end
 
 function M.getSchemaVersion() return M.SCHEMA_VERSION end
@@ -215,7 +247,19 @@ function M.isLoaded() return _state.loaded == true end
 function M.load(opts)
     opts = opts or {}
     local relPath = _resolveRelPath(opts)
-    local forceVisible = (type(opts) == "table" and opts.visiblePersistenceEnabled == true) and true or false
+
+    -- Force visible persistence if:
+    -- 1) caller explicitly asks, OR
+    -- 2) session flag already enabled, OR
+    -- 3) current in-memory options already has it enabled
+    local forceVisible = (
+        (type(opts) == "table" and opts.visiblePersistenceEnabled == true) or
+        (_state.sessionVisiblePersistenceEnabled == true) or
+        (_getVisiblePersistenceEnabledNow() == true)
+    ) and true or false
+
+    -- Keep a copy of previous in-memory state to preserve noSave visible flags across reloads.
+    local oldData = _state.data
 
     local okStore, store, storeErr = _getStoreBestEffort()
     if not okStore then
@@ -233,6 +277,7 @@ function M.load(opts)
         _state.loaded = true
         _state.relPath = relPath
         _state.data = _normalizeLoadedData(nil, forceVisible)
+        _mergeSessionVisible(oldData, _state.data, forceVisible)
         _state.lastLoadAt = os.time()
         _state.lastError = nil
         return true, nil
@@ -244,6 +289,7 @@ function M.load(opts)
     _state.loaded = true
     _state.relPath = relPath
     _state.data = _normalizeLoadedData(envData, forceVisible)
+    _mergeSessionVisible(oldData, _state.data, forceVisible)
     _state.lastLoadAt = os.time()
     _state.lastError = nil
 
@@ -294,10 +340,6 @@ function M.save(opts)
     return false, _state.lastError
 end
 
--- NEW: UI module seeding
--- - Creates record if missing.
--- - Does NOT overwrite existing record.
--- - Does NOT save unless opts.save=true.
 function M.register(uiId, defaults, opts)
     if type(uiId) ~= "string" or uiId == "" then
         return false, "uiId invalid"
@@ -346,13 +388,11 @@ function M.register(uiId, defaults, opts)
 end
 
 function M.isEnabled(uiId, default)
-    -- invalid uiId: return caller default if given; else safe fallback = false
     if type(uiId) ~= "string" or uiId == "" then
         if default ~= nil then return (default == true) end
         return false
     end
 
-    -- explicit record wins
     if type(_state.data) == "table" and type(_state.data.ui) == "table" then
         local rec = _state.data.ui[uiId]
         if type(rec) == "table" and rec.enabled ~= nil then
@@ -360,12 +400,10 @@ function M.isEnabled(uiId, default)
         end
     end
 
-    -- if caller provides default, use it
     if default ~= nil then
         return (default == true)
     end
 
-    -- otherwise follow options.enabledDefault when available
     if type(_state.data) == "table"
         and type(_state.data.options) == "table"
         and _state.data.options.enabledDefault ~= nil
@@ -373,7 +411,6 @@ function M.isEnabled(uiId, default)
         return (_state.data.options.enabledDefault == true)
     end
 
-    -- final safe fallback
     return false
 end
 
@@ -407,9 +444,15 @@ function M.getVisible(uiId, default)
     if type(_state.data) == "table" and type(_state.data.options) == "table" then
         if _state.data.options.visiblePersistenceEnabled == true then
             local rec = (type(_state.data.ui) == "table") and _state.data.ui[uiId] or nil
-            if type(rec) == "table" and rec.visible ~= nil then
-                return (rec.visible == true)
+            if type(rec) == "table" then
+                if rec.visible ~= nil then
+                    return (rec.visible == true)
+                end
+                -- Visible persistence ON but value unset: return visibleDefault.
+                return (_state.data.options.visibleDefault == true)
             end
+            -- No record: return visibleDefault when persistence ON.
+            return (_state.data.options.visibleDefault == true)
         end
     end
 
@@ -418,6 +461,9 @@ end
 
 function M.enableVisiblePersistence(opts)
     opts = opts or {}
+
+    -- Sticky for runtime session even if opts.noSave=true.
+    _state.sessionVisiblePersistenceEnabled = true
 
     if _state.loaded ~= true then
         local okLoad, err = M.load({ quiet = true, visiblePersistenceEnabled = true })
@@ -468,7 +514,36 @@ function M.list()
     if type(_state.data) ~= "table" or type(_state.data.ui) ~= "table" then
         return {}
     end
-    return _deepCopyUi(_state.data.ui)
+
+    local opts = (type(_state.data.options) == "table") and _state.data.options or {}
+    local visOn = (opts.visiblePersistenceEnabled == true)
+    local visDefault = (opts.visibleDefault == true)
+
+    local out = {}
+    for uiId, rec in pairs(_state.data.ui) do
+        if type(uiId) == "string" and type(rec) == "table" then
+            local v = nil
+            if visOn then
+                -- When persistence is ON, list() must always show an explicit boolean.
+                if rec.visible == true then
+                    v = true
+                elseif rec.visible == false then
+                    v = false
+                else
+                    v = visDefault
+                end
+            else
+                v = nil
+            end
+
+            out[uiId] = {
+                enabled = (rec.enabled == true),
+                visible = v,
+            }
+        end
+    end
+
+    return out
 end
 
 function M.status()
@@ -485,6 +560,7 @@ function M.status()
         uiCount = uiCount,
         options = (type(_state.data) == "table" and type(_state.data.options) == "table") and
             _copyTableShallow(_state.data.options) or {},
+        sessionVisiblePersistenceEnabled = (_state.sessionVisiblePersistenceEnabled == true),
         lastLoadAt = _state.lastLoadAt,
         lastSaveAt = _state.lastSaveAt,
         lastError = _state.lastError,
