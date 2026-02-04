@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-03C
+-- Version     : v2026-02-04B
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-03C"
+M.VERSION = "v2026-02-04B"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -62,6 +62,29 @@ local SUITES = {
         },
     },
 
+    -- NEW: RoomFeed prompt-prefix + header capture regression guard
+    roomfeed_promptprefix_no_restart = {
+        title = "roomfeed_promptprefix_no_restart",
+        description =
+        "RoomFeed regression: prompt+header on same line must start capture; look block must NOT trigger mid-capture restart on wrapped description lines; expect lastOkTs non-nil and lastAbortReason != abort:restart_header_seen.",
+        delay = 0.40,
+        steps = {
+            { cmd = "dwroom watch off", note = "Ensure clean start: remove passive capture trigger." },
+            { cmd = "dwroom watch on",  note = "Install passive capture trigger." },
+
+            -- NOTE: allow enough time for the trailing prompt line to arrive so finalize occurs.
+            { cmd = "look",             delay = 1.80,                                                note = "Trigger look output (header may be prefixed by prompt). Wait for prompt to ensure finalize occurs." },
+
+            {
+                cmd =
+                'lua do local C=require("dwkit.capture.roomfeed_capture"); local s=C.getDebugState(); local kind=tostring(s.lastHeaderSeenKind or ""); if kind:sub(1,6)~="strong" then error("Expected lastHeaderSeenKind strong*; got "..kind) end; local eff=tostring(s.lastHeaderSeenEffectiveClean or ""); if eff=="" or not eff:lower():find("board room",1,true) then error("Expected effective header to contain Board Room; got "..eff) end; if tostring(s.lastAbortReason or "")=="abort:restart_header_seen" then error("Unexpected restart_header_seen (wrapped text misdetected as title).") end; if s.lastOkTs==nil then error("Expected lastOkTs non-nil after look finalize; stillCapturing="..tostring(s.snapCapturing).." hasExits="..tostring(s.snapHasExits).." bufLen="..tostring(s.snapBufLen).." lastLine="..tostring(s.lastLineSeenClean)) end; print(string.format("[dwverify-roomfeed] PASS kind=%s okTs=%s abort=%s", kind, tostring(s.lastOkTs), tostring(s.lastAbortReason))) end',
+                note = "ASSERT: no false restart; finalize succeeded; header classification strong.",
+            },
+
+            { cmd = "dwroom status", note = "Human confirmation: Room feed capture status should show lastOkTs updated and no restart abort." },
+        },
+    },
+
     -- NEW: Gate force-open on watcher header trigger (regression guard)
     whostore_gate_force_open_on_header = {
         title = "whostore_gate_force_open_on_header",
@@ -95,7 +118,7 @@ local SUITES = {
                 note = "ASSERT: gate was forced open + ingest happened (PASS/FAIL).",
             },
 
-            { cmd = "dwwho status", note = "Human confirmation: should show autoCaptureEnabled=true and updated timestamp/source." },
+            { cmd = "dwwho status",   note = "Human confirmation: should show autoCaptureEnabled=true and updated timestamp/source." },
         },
     },
 
@@ -162,7 +185,7 @@ local SUITES = {
         description = "WhoStore live clear: clear snapshot + assert empty + human confirm (no WHO send)",
         delay = 0.30,
         steps = {
-            { cmd = "dwwho clear", note = "Clear WhoStore snapshot (no WHO send)." },
+            { cmd = "dwwho clear",  note = "Clear WhoStore snapshot (no WHO send)." },
 
             {
                 cmd =
@@ -195,8 +218,8 @@ local SUITES = {
                 note = "Expect WhoStore summary to reflect latest capture (players count may be 0 if nobody online).",
             },
 
-            { cmd = "dwwho list",   note = "If players exist, expect parsed entries listed (names/classes/etc per contract)." },
-            { cmd = "dwwho status", note = "Human confirmation: refresh guard + watcher lastErr=nil; source should reflect latest update." },
+            { cmd = "dwwho list",         note = "If players exist, expect parsed entries listed (names/classes/etc per contract)." },
+            { cmd = "dwwho status",       note = "Human confirmation: refresh guard + watcher lastErr=nil; source should reflect latest update." },
         },
     },
 
@@ -211,13 +234,13 @@ local SUITES = {
 
             {
                 cmd = "dwwho refresh",
-                delay = 2.60, -- wait after refresh so CAP.expectTtlSec (2s) expires before the manual who
+                delay = 2.60,
                 note = "Do refresh (source should be dwwho:refresh). Then wait >2s so refresh expectations expire.",
             },
 
             {
                 cmd = "who",
-                delay = 0.80, -- allow watcher capture + ingest to complete
+                delay = 0.80,
                 note = "Manual WHO after TTL expiry: should be captured/ingested as dwwho:auto (quiet).",
             },
 
@@ -227,7 +250,7 @@ local SUITES = {
                 note = "Assert: WhoStore source is dwwho:auto after manual who (FAIL if still dwwho:refresh).",
             },
 
-            { cmd = "dwwho status", note = "Human confirmation: source should show dwwho:auto now." },
+            { cmd = "dwwho status",       note = "Human confirmation: source should show dwwho:auto now." },
         },
     },
 
@@ -238,7 +261,7 @@ local SUITES = {
         "B4 regression lock-in: establish baseline via refresh, disable watcher, record OFF-baseline, then manual 'who' must NOT update WhoStore after OFF-baseline (lastUpdatedTs/source unchanged). Restores watcher ON at end.",
         delay = 0.45,
         steps = {
-            { cmd = "dwwho watch on", note = "Precondition: ensure watcher ON so baseline refresh definitely captures/ingests." },
+            { cmd = "dwwho watch on",     note = "Precondition: ensure watcher ON so baseline refresh definitely captures/ingests." },
 
             {
                 cmd = "dwwho refresh",
@@ -264,7 +287,8 @@ local SUITES = {
             {
                 cmd = "who",
                 delay = 0.80,
-                note = "Manual WHO while watcher OFF: should NOT ingest/update WhoStore (no state change after OFF-baseline).",
+                note =
+                "Manual WHO while watcher OFF: should NOT ingest/update WhoStore (no state change after OFF-baseline).",
             },
 
             {
@@ -276,46 +300,6 @@ local SUITES = {
             { cmd = "dwwho status",       note = "Human confirmation: watcher disabled; source/ts unchanged from OFF-baseline." },
             { cmd = "dwwho watch on",     note = "Restore watcher ON for normal operation." },
             { cmd = "dwwho watch status", note = "Human confirmation: watcher enabled; singleton installed; lastErr=nil." },
-        },
-    },
-
-    -- NEW: Watch OFF must stop ingesting manual WHO (no snapshot change)
-    whostore_watch_off_no_ingest = {
-        title = "whostore_watch_off_no_ingest",
-        description =
-        "Watcher off: record lastUpdatedTs, disable watcher, manual 'who' should NOT update WhoStore; then re-enable watcher.",
-        delay = 0.45,
-        steps = {
-            { cmd = "dwwho watch on", note = "Ensure watcher is ON before setting baseline." },
-
-            {
-                cmd = "dwwho refresh",
-                delay = 0.80, -- let refresh capture + ingest settle
-                note = "Create a known baseline snapshot via refresh (source=dwwho:refresh).",
-            },
-
-            {
-                cmd =
-                'lua do local S=require("dwkit.services.whostore_service"); if type(S)~="table" or type(S.getState)~="function" then error("WhoStoreService.getState missing") end; local st=S.getState(); _G.DWVERIFY_WHO_TS=st.lastUpdatedTs; _G.DWVERIFY_WHO_SRC=st.source; print(string.format("[dwverify-whostore] baseline lastUpdatedTs=%s source=%s", tostring(_G.DWVERIFY_WHO_TS), tostring(_G.DWVERIFY_WHO_SRC))) end',
-                note = "Record baseline lastUpdatedTs + source into _G (used for later assert).",
-            },
-
-            { cmd = "dwwho watch off", note = "Disable watcher. Manual 'who' should no longer ingest." },
-
-            {
-                cmd = "who",
-                delay = 0.80, -- allow any accidental ingest to happen (should NOT)
-                note = "Manual WHO while watcher OFF: should NOT update WhoStore.",
-            },
-
-            {
-                cmd =
-                'lua do local S=require("dwkit.services.whostore_service"); if type(S)~="table" or type(S.getState)~="function" then error("WhoStoreService.getState missing") end; local st=S.getState(); if tostring(st.lastUpdatedTs)~=tostring(_G.DWVERIFY_WHO_TS) then error("Expected lastUpdatedTs unchanged while watcher OFF; before="..tostring(_G.DWVERIFY_WHO_TS).." after="..tostring(st.lastUpdatedTs)) end; if tostring(st.source)~=tostring(_G.DWVERIFY_WHO_SRC) then error("Expected source unchanged while watcher OFF; before="..tostring(_G.DWVERIFY_WHO_SRC).." after="..tostring(st.source)) end end',
-                note = "Assert: lastUpdatedTs + source unchanged while watcher OFF (FAIL if changed).",
-            },
-
-            { cmd = "dwwho watch on", note = "Re-enable watcher for normal operation." },
-            { cmd = "dwwho status",   note = "Human confirmation: watcher enabled; state stable." },
         },
     },
 
@@ -331,8 +315,6 @@ local SUITES = {
     },
 
     -- UI smoke suite (console visible state; no screenshots)
-    -- IMPORTANT: UI modules' apply() uses gui_settings for enabled/visible; opts passed to apply() are ignored.
-    -- This suite sets gui_settings (noSave) then calls apply({}) and prints pasteable state.
     ui_smoke = {
         title = "ui_smoke",
         description = "UI smoke: set gui_settings then apply; print visible true/false (no screenshots)",
@@ -373,7 +355,7 @@ local SUITES = {
                 'lua do local gs=require("dwkit.config.gui_settings"); local m=gs.list(); local rec=m["roomentities_ui"]; if type(rec)~="table" then error("Expected gui_settings record for roomentities_ui") end; if rec.enabled~=false then error("Expected enabled=false after disable; got "..tostring(rec.enabled)) end; if rec.visible~=false then error("Expected visible=false after disable; got "..tostring(rec.visible)) end; print("[dwverify-ui] PASS gui_settings enabled=false visible=false after disable") end',
                 note = "ASSERT: gui_settings shows enabled=false and visible=false after dwgui disable.",
             },
-            { cmd = "dwgui status", note = "Human confirmation: list should show roomentities_ui enabled=OFF visible=OFF." },
+            { cmd = "dwgui status",                  note = "Human confirmation: list should show roomentities_ui enabled=OFF visible=OFF." },
         },
     },
 
@@ -400,7 +382,8 @@ local SUITES = {
             {
                 cmd =
                 'lua do local gs=require("dwkit.config.gui_settings"); gs.setEnabled("roomentities_ui",false,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("roomentities_ui",{source="dwverify:matrix"}); if ok==false then error("applyOne(roomentities_ui) failed: "..tostring(err)) end; local R=require("dwkit.ui.roomentities_ui"); local st=R.getState(); local okState=(st.visible==false) or (st.enabled==false) or (st.inited==false); if not okState then error("Expected roomentities_ui to stand down (visible/enabled/inited false); got visible="..tostring(st.visible).." enabled="..tostring(st.enabled).." inited="..tostring(st.inited)) end; print("[dwverify-ui] PASS matrix step3 roomentities_ui stood down best-effort") end',
-                note = "Disable roomentities_ui; applyOne; accept any of: visible=false OR enabled=false OR inited=false (best-effort stand-down).",
+                note =
+                "Disable roomentities_ui; applyOne; accept any of: visible=false OR enabled=false OR inited=false (best-effort stand-down).",
             },
         },
     },

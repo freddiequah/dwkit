@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.capture.roomfeed_capture
 -- Owner       : Capture
--- Version     : v2026-02-03E
+-- Version     : v2026-02-04B
 -- Purpose     :
 --   - Passive capture of room output blocks (movement room header, look output)
 --     without GMCP and without sending any commands.
@@ -38,6 +38,21 @@
 --       * sanity-check remaining title text
 --   - Add "seenLineCount/lastLineSeen*" silent diagnostics to confirm the trigger is receiving output.
 --
+-- Feb 2026 fix (v2026-02-04A):
+--   - Mudlet can print prompt + room header on the same line, e.g.:
+--       (i54) <812hp 100mp 83mv> The Board Room (#1204) [ INDOORS IMMROOM ]
+--     Previously, prompt-noise detection rejected this line entirely.
+--     We now:
+--       * treat prompt as "noise" only when the line is essentially just the prompt (no trailing content)
+--       * strip a leading prompt segment for parsing decisions when trailing content exists
+--       * record lastHeaderSeenKind + lastHeaderSeenEffectiveClean for diagnostics
+--
+-- Feb 2026 fix (v2026-02-04B):
+--   - Prevent mid-capture false restarts from wrapped room description lines:
+--       * tighten fallback title: must start with uppercase; reject any '.' in line
+--       * during capture, only restart on STRONG headers (never fallback titles)
+--   - Clear lastAbortReason on successful finalize (avoid stale abort in debugState)
+--
 -- Public API  :
 --   - getVersion() -> string
 --   - install(opts?) -> boolean ok, string|nil err
@@ -58,7 +73,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-03E"
+M.VERSION = "v2026-02-04B"
 
 local function _nowTs()
     return os.time()
@@ -132,10 +147,47 @@ local function _cleanLine(ln)
     return _stripAnsi(tostring(ln or ""))
 end
 
-local function _isPromptNoise(lnClean)
+-- Detect and optionally strip a leading prompt segment for parsing decisions.
+-- Supports optional "(iNN)" prefix, then "<...hp ...mp ...mv>" prompt, then trailing content.
+--
+-- Returns:
+--   hasPromptPrefix (bool), effectiveLineClean (string), promptOnly (bool)
+local function _splitPromptPrefix(lnClean)
     local ln = tostring(lnClean or "")
-    if ln == "" then return false end
-    if ln:find("<%d") and (ln:lower():find("hp") or ln:lower():find("mp") or ln:lower():find("mv")) then
+    if ln == "" then
+        return false, ln, false
+    end
+
+    -- Optional "(i54)" style prefix, then prompt
+    local _, inside, rest = ln:match("^%s*(%(%a%d+%))%s*<([^>]*)>%s*(.*)$")
+    if inside then
+        local low = tostring(inside):lower()
+        if low:find("hp", 1, true) or low:find("mp", 1, true) or low:find("mv", 1, true) then
+            rest = tostring(rest or "")
+            rest = _trim(rest)
+            local promptOnly = (rest == "")
+            return true, rest, promptOnly
+        end
+    end
+
+    -- Prompt without "(iNN)" prefix
+    inside, rest = ln:match("^%s*<([^>]*)>%s*(.*)$")
+    if inside then
+        local low = tostring(inside):lower()
+        if low:find("hp", 1, true) or low:find("mp", 1, true) or low:find("mv", 1, true) then
+            rest = tostring(rest or "")
+            rest = _trim(rest)
+            local promptOnly = (rest == "")
+            return true, rest, promptOnly
+        end
+    end
+
+    return false, ln, false
+end
+
+local function _isPromptNoise(lnClean)
+    local has, _, promptOnly = _splitPromptPrefix(lnClean)
+    if has and promptOnly then
         return true
     end
     return false
@@ -162,8 +214,16 @@ local function _isExitEntryLine(lnClean)
     if not dir then return false end
 
     local okDir = {
-        north=true, south=true, east=true, west=true, up=true, down=true,
-        northeast=true, northwest=true, southeast=true, southwest=true,
+        north = true,
+        south = true,
+        east = true,
+        west = true,
+        up = true,
+        down = true,
+        northeast = true,
+        northwest = true,
+        southeast = true,
+        southwest = true,
     }
 
     if okDir[dir] ~= true then
@@ -173,64 +233,44 @@ local function _isExitEntryLine(lnClean)
     return true
 end
 
--- Strong header (works for immortal + normal):
---   "Corner of Falgo and Straight (#11952) [ NOBITS ]"
---   "Some Room [ INDOORS ]"
---   "Foo Bar [ INDOORS ] [ SAFE ]"
---
--- We now detect headers stepwise instead of a single brittle pattern:
---   1) require at least one trailing [ ... ] block
---   2) strip trailing [ ... ] blocks (supports multiple)
---   3) strip optional "(#12345)" at end
---   4) sanity-check remaining title
+-- Strong header detection (see prior notes).
 local function _isRoomHeaderStrong(lnClean)
     local t = _trim(lnClean)
     if t == "" then return false end
     if _isPromptNoise(t) then return false end
 
-    -- avoid bracket/system lines: "[ X has connected. ]"
     if t:match("^%[") then return false end
-
-    -- speech/flavor lines often include quotes; never treat as header
     if t:find('"', 1, true) then return false end
-
-    -- must not be an exits entry line
     if _isExitEntryLine(t) then return false end
 
-    -- must not be command echo lines / kit invocations
     local lower = t:lower()
     if lower:match("^dw[%w_%-]") then return false end
     if lower:match("^lua%s") then return false end
 
-    -- Require at least one trailing [ ... ] flags block (balanced bracket)
     if not t:match("%b[]%s*$") then
         return false
     end
 
-    -- Strip ALL trailing [ ... ] blocks
     local base = t
     local guard = 0
     while base:match("%s*%b[]%s*$") do
         base = base:gsub("%s*%b[]%s*$", "")
         guard = guard + 1
-        if guard > 8 then break end -- defensive
+        if guard > 8 then break end
     end
     base = _trim(base)
     if base == "" then return false end
 
-    -- Strip optional "(#12345)" if it is at the end of base
     base = base:gsub("%s*%(%#%d+%)%s*$", "")
     base = _trim(base)
     if base == "" then return false end
 
-    -- Basic "title-ish" sanity
     if base:match("[%:%.%!%?]$") then return false end
     local len = #base
     if len < 4 or len > 72 then return false end
     if not base:match("[%a]") then return false end
     if not base:match("%u") then return false end
 
-    -- Avoid obvious non-title lines
     local baseLower = base:lower()
     if baseLower:match("^you are ") then return false end
     if baseLower:match("^at the ") then return false end
@@ -239,7 +279,7 @@ local function _isRoomHeaderStrong(lnClean)
     return true
 end
 
--- Fallback title detection remains available, but we keep primary detection strong header first.
+-- Fallback title detection: tightened to avoid wrapped description lines.
 local function _isRoomTitleCandidate(lnClean)
     local ln = tostring(lnClean or "")
     if ln == "" then return false end
@@ -251,79 +291,86 @@ local function _isRoomTitleCandidate(lnClean)
     local t = _trim(ln)
     if t == "" then return false end
 
-    -- avoid bracket/system lines: "[ X has connected. ]"
     if t:match("^%[") then return false end
 
     local lower = t:lower()
 
-    -- never treat exits line or exit-entry line as a title
     if _isExitsLine(t) then return false end
     if _isExitEntryLine(t) then return false end
 
-    -- avoid command echo lines / kit invocations
     if lower:match("^dw[%w_%-]") then return false end
     if lower:match("^lua%s") then return false end
 
-    -- avoid obvious non-title lines
     if lower:match("^you are ") then return false end
     if lower:match("^at the ") then return false end
     if lower:find(" has connected") or lower:find(" has quit") or lower:find(" un%-renting") then return false end
 
-    -- avoid look-description / object lines commonly in room output
     if lower:find(" hangs here") then return false end
     if lower:find(" is here") then return false end
     if lower:find(" are here") then return false end
     if lower:find(" is mounted") then return false end
     if lower:find(" are mounted") then return false end
 
-    -- avoid arrive/leave chatter being mistaken as title
     if lower:find(" arrives") or lower:find(" leaves") or lower:find(" appears") then return false end
 
-    -- typical room title should not end with punctuation (most of your room titles don't)
     if t:match("[%:%.%!%?]$") then return false end
 
-    -- length bounds (title-ish)
+    -- tighten: room titles should start with uppercase
+    if not t:match("^%u") then return false end
+
+    -- tighten: reject any '.' anywhere (wrapped description lines frequently contain periods)
+    if t:find("%.", 1, true) then return false end
+
     local len = #t
     if len < 4 or len > 72 then return false end
-
-    -- must contain at least one letter
     if not t:match("[%a]") then return false end
-
-    -- critical: require at least one uppercase letter to avoid matching command echos (usually lowercase)
     if not t:match("%u") then return false end
 
     return true
 end
 
--- IMPORTANT:
--- Strong header first; only use fallback when strong header is not present.
-local function _isRoomHeaderAny(lnClean)
-    return _isRoomHeaderStrong(lnClean) or _isRoomTitleCandidate(lnClean)
+-- Header classification with prompt-prefix stripping (for parsing decisions only).
+-- Returns: ok(bool), kind(string|nil), effectiveClean(string)
+local function _classifyRoomHeader(lnClean)
+    local original = tostring(lnClean or "")
+    local hasPrompt, effective, promptOnly = _splitPromptPrefix(original)
+
+    if hasPrompt and promptOnly then
+        return false, nil, effective
+    end
+
+    local eff = effective
+    local usedStripped = (hasPrompt and eff ~= original)
+
+    if _isRoomHeaderStrong(eff) then
+        return true, usedStripped and "strong_stripped" or "strong", eff
+    end
+    if _isRoomTitleCandidate(eff) then
+        return true, usedStripped and "fallback_stripped" or "fallback", eff
+    end
+
+    return false, nil, eff
 end
 
 local function _tryParseArriveLeave(lnClean)
     local ln = _trim(lnClean)
     if ln == "" then return nil end
 
-    -- ARRIVE (standard)
     local name = ln:match("^([%a][%w%-%']*)%s+arrives")
     if name then
         return { kind = "arrive", name = name }
     end
 
-    -- ARRIVE (teleport/relocation styles seen in your logs)
     name = ln:match("^([%a][%w%-%']*)%s+appears%s+out%s+of%s+thin%s+air%.$")
     if name then
         return { kind = "arrive", name = name }
     end
 
-    -- (optional but common) "X arrives suddenly."
     name = ln:match("^([%a][%w%-%']*)%s+arrives%s+suddenly%.$")
     if name then
         return { kind = "arrive", name = name }
     end
 
-    -- LEAVE
     name = ln:match("^([%a][%w%-%']*)%s+leaves")
     if name then
         return { kind = "leave", name = name }
@@ -431,6 +478,8 @@ local ROOT = {
     -- silent diagnostics (no prints)
     lastHeaderSeenTs = nil,
     lastHeaderSeenClean = nil,
+    lastHeaderSeenEffectiveClean = nil,
+    lastHeaderSeenKind = nil,
     lastSnapStartTs = nil,
     lastSnapStartClean = nil,
 
@@ -452,23 +501,18 @@ local function _resetSnap()
     ROOT.snapSeenLines = 0
 end
 
-local function _beginSnap(lnRaw, lnClean)
+local function _beginSnap(lnRaw, lnCleanEffective)
     _resetSnap()
     ROOT.snapCapturing = true
     ROOT.snapStartTs = _nowTs()
     ROOT.snapStartLineRaw = tostring(lnRaw or "")
-    ROOT.snapStartLineClean = tostring(lnClean or "")
+    ROOT.snapStartLineClean = tostring(lnCleanEffective or "")
     ROOT.snapBuf[#ROOT.snapBuf + 1] = tostring(lnRaw or "")
     ROOT.snapSeenLines = 1
 
     -- silent diagnostics
     ROOT.lastSnapStartTs = ROOT.snapStartTs
     ROOT.lastSnapStartClean = ROOT.snapStartLineClean
-
-    -- defensive: if snapshot begins on exits line, mark it immediately
-    if _isExitsLine(ROOT.snapStartLineClean) then
-        ROOT.snapHasExits = true
-    end
 end
 
 local function _abortSnap(reason)
@@ -504,6 +548,7 @@ local function _finalizeSnap()
     end
 
     ROOT.lastOkTs = ts
+    ROOT.lastAbortReason = nil -- IMPORTANT: clear stale abort after successful finalize
     _resetSnap()
 
     if okS then
@@ -516,9 +561,7 @@ local function _handleArriveLeave(lnClean)
     if not parsed then return end
 
     local name = tostring(parsed.name or "")
-    if name == "" then
-        return
-    end
+    if name == "" then return end
 
     local okR, RoomSvc = _resolveRoomSvc()
     if not okR then return end
@@ -570,12 +613,14 @@ function M.install(opts)
         end
 
         if ROOT.snapCapturing ~= true then
-            if _isRoomHeaderAny(lnClean) then
-                -- silent diagnostics
+            local okHeader, kind, eff = _classifyRoomHeader(lnClean)
+            if okHeader then
                 ROOT.lastHeaderSeenTs = _nowTs()
                 ROOT.lastHeaderSeenClean = _trim(lnClean)
+                ROOT.lastHeaderSeenEffectiveClean = _trim(eff)
+                ROOT.lastHeaderSeenKind = tostring(kind or "unknown")
 
-                _beginSnap(lnRaw, lnClean)
+                _beginSnap(lnRaw, eff)
                 return
             end
             return
@@ -592,11 +637,16 @@ function M.install(opts)
             return
         end
 
-        -- If a new header/title starts mid-capture, restart (best-effort).
-        if _isRoomHeaderAny(lnClean) and tostring(lnClean or "") ~= tostring(ROOT.snapStartLineClean or "") then
-            _abortSnap("abort:restart_header_seen")
-            _beginSnap(lnRaw, lnClean)
-            return
+        -- During capture: restart ONLY on STRONG headers (fallback titles are too risky mid-block).
+        local okHeader, kind, eff = _classifyRoomHeader(lnClean)
+        if okHeader then
+            local k = tostring(kind or "")
+            local isStrong = (k:find("^strong", 1, true) == 1)
+            if isStrong and tostring(eff or "") ~= tostring(ROOT.snapStartLineClean or "") then
+                _abortSnap("abort:restart_header_seen")
+                _beginSnap(lnRaw, eff)
+                return
+            end
         end
 
         if _isExitsLine(lnClean) then
@@ -654,13 +704,13 @@ function M.status(opts)
         lastAbortReason = ROOT.lastAbortReason,
         lastDegradedReason = ROOT.lastDegradedReason,
 
-        -- silent diagnostics
         lastHeaderSeenTs = ROOT.lastHeaderSeenTs,
         lastHeaderSeenClean = ROOT.lastHeaderSeenClean,
+        lastHeaderSeenEffectiveClean = ROOT.lastHeaderSeenEffectiveClean,
+        lastHeaderSeenKind = ROOT.lastHeaderSeenKind,
         lastSnapStartTs = ROOT.lastSnapStartTs,
         lastSnapStartClean = ROOT.lastSnapStartClean,
 
-        -- line receipt diagnostics
         seenLineCount = ROOT.seenLineCount,
         lastLineSeenTs = ROOT.lastLineSeenTs,
         lastLineSeenClean = ROOT.lastLineSeenClean,
@@ -671,7 +721,8 @@ function M.status(opts)
         for _, k in ipairs({
             "installed", "lineTriggerId", "snapCapturing", "snapHasExits", "snapBufLen",
             "lastOkTs", "lastAbortReason", "lastDegradedReason",
-            "lastHeaderSeenTs", "lastHeaderSeenClean", "lastSnapStartTs", "lastSnapStartClean",
+            "lastHeaderSeenTs", "lastHeaderSeenClean", "lastHeaderSeenEffectiveClean", "lastHeaderSeenKind",
+            "lastSnapStartTs", "lastSnapStartClean",
             "seenLineCount", "lastLineSeenTs", "lastLineSeenClean",
         }) do
             _out(string.format("  %s=%s", k, tostring(s[k])))
