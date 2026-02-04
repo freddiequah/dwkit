@@ -1,3 +1,4 @@
+-- FILE: src/dwkit/capture/roomfeed_capture.lua
 -- #########################################################################
 -- Module Name : dwkit.capture.roomfeed_capture
 -- Owner       : Capture
@@ -20,17 +21,17 @@
 --   - Tightened: fallback title detection rejects exit-entry lines (e.g. "East - ...") and
 --     common look-description lines like "hangs here", "is here", "mounted on", etc.
 --
--- Mar 2026 fix (v2026-02-03B):
+-- Feb 2026 fix (v2026-02-03B):
 --   - Add silent debug fields (queried via status({quiet=true})) to confirm whether
 --     headers are being recognized and whether snapshots begin.
 --   - Strong header matches one-or-more [ ... ] flag blocks, with optional (#id).
 --
--- Mar 2026 fix (v2026-02-03C):
+-- Feb 2026 fix (v2026-02-03C):
 --   - Some servers/clients include non-ANSI invisible control chars / NBSP that survive ANSI stripping.
 --     These break header matching. We now normalize NBSP -> space and strip remaining ASCII control chars
 --     (0x00-0x1F, 0x7F) after ANSI removal, for parsing decisions only.
 --
--- Mar 2026 fix (v2026-02-03E):
+-- Feb 2026 fix (v2026-02-03E):
 --   - Header detection was still not matching in live output (lines are seen, but no header recognized).
 --     Replace brittle single-pattern header matching with a stepwise approach:
 --       * require trailing one-or-more [ ... ] flag blocks

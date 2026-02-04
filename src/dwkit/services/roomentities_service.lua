@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.roomentities_service
 -- Owner       : Services
--- Version     : v2026-02-01B
+-- Version     : v2026-02-04C
 -- Purpose     :
 --   - SAFE, profile-portable RoomEntitiesService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
@@ -15,6 +15,29 @@
 --           When WhoStore player set updates, we re-bucket current entities
 --           (unknown/mobs/items -> players) when names are now known players,
 --           and emit RoomEntities Updated only if state actually changes.
+--
+--   - FIX (v2026-02-04A):
+--       - Broaden entity parsing for real-world LOOK lines:
+--           * Accept "is here," in addition to "is here."
+--           * Accept "is <posture> here," in addition to "is <posture> here."
+--           * Conservative heuristic for lines like:
+--               "A beastly fido ... here ... ."
+--             Extract leading noun phrase (e.g., "A beastly fido") and bucket as
+--             mobs/items (item keyword check), rather than dropping the line.
+--
+--   - FIX (v2026-02-04B):
+--       - Recognize common item lines: "<thing> lies here." (with optional trailing tags)
+--         Example:
+--           "Achilles' breastplate lies here. (glowing) (damaged)"
+--         These were previously ignored, causing items=0 in many rooms.
+--
+--   - FIX (v2026-02-04C):
+--       - Recognize common encounter lines where "here" is NOT the end of line:
+--           * "<thing> is here <doing something>."
+--           * "<thing> is here, <doing something>..."
+--           * "<thing> stands here <doing something>."
+--           * "<thing> is <verb/posture> here <...>."
+--         This fixes the majority of missed encounters in real movement logs.
 --
 --   - NEW (v2026-01-17E):
 --       - Known-player prefix matching:
@@ -113,7 +136,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-01B"
+M.VERSION = "v2026-02-04C"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -511,7 +534,7 @@ local function _extractKnownPlayersIndexFromWhoStoreState(wState)
 
     -- Prefer docs-first snapshot entries which preserve display-case (entry.name).
     -- This avoids treating WhoStore Option-A lowercase legacy players map as canonical.
-	    do
+    do
         local snap = wState.snapshot
         if type(snap) ~= "table" and type(wState.byName) == "table" then
             -- caller might have passed a snapshot directly
@@ -626,6 +649,8 @@ local function _isProbablyItemPhrase(phraseLower)
         "portal", "sign", "plaque", "statue", "fountain", "table", "chair",
         "bench", "door", "gate", "lever", "switch", "chest", "bag",
         "scroll", "potion", "sword", "shield", "corpse",
+        "breastplate", "helmet", "armor", "armour", "gauntlet", "greave",
+        "boot", "cloak", "ring", "amulet", "necklace", "bracelet",
     }
 
     for _, k in ipairs(itemKeys) do
@@ -640,15 +665,20 @@ end
 local function _isEntityishPostureLine(lowerTrimmed)
     if type(lowerTrimmed) ~= "string" then return false end
 
-    if lowerTrimmed:find("is here%.", 1, true) ~= nil then
+    -- accept "is here," / "is here." / "is here <more...>"
+    if lowerTrimmed:match("^.-%s+is%s+here[%s,%.]") ~= nil then
         return true
     end
 
-    local posture = lowerTrimmed:match("^.-%s+is%s+(%a+)%s+here%.$")
-    if type(posture) == "string" and posture ~= "" then
-        if POSTURES[posture] == true then
-            return true
-        end
+    -- accept "stands here <...>"
+    if lowerTrimmed:match("^.-%s+stands%s+here[%s,%.]") ~= nil then
+        return true
+    end
+
+    -- accept "is <word> here," / "is <word> here." / "is <word> here <more...>"
+    local w = lowerTrimmed:match("^.-%s+is%s+(%a+)%s+here[%s,%.]")
+    if type(w) == "string" and w ~= "" then
+        return true
     end
 
     return false
@@ -723,9 +753,8 @@ local function _classifyLookLine(line, opts, knownPlayersIdx)
         return nil, nil
     end
 
-    -- NEW: common room-object lines:
-    --   "<thing> hangs here ..." -> items
-	    do
+    -- "<thing> hangs here ..." -> items
+    do
         local phrase = lineClean:match("^(.-)%s+hangs%s+here")
         if type(phrase) == "string" then
             phrase = _trim(phrase)
@@ -735,8 +764,7 @@ local function _classifyLookLine(line, opts, knownPlayersIdx)
         end
     end
 
-    -- NEW: common room-object lines:
-    --   "<thing> is mounted here ..." -> items
+    -- "<thing> is mounted here ..." -> items
     do
         local phrase = lineClean:match("^(.-)%s+is%s+mounted%s+here")
         if type(phrase) == "string" then
@@ -747,70 +775,140 @@ local function _classifyLookLine(line, opts, knownPlayersIdx)
         end
     end
 
-	    do
-	        -- Allow trailing descriptors after the first period, e.g. "X is here. (glowing)"
-	        local phrase, posture = lineClean:match("^(.-)%s+is%s+(%a+)%s+here%.")
-	        if type(phrase) == "string" and type(posture) == "string" then
-	            posture = posture:lower()
-	            if POSTURES[posture] == true then
-	                phrase = _trim(phrase)
-	                if phrase ~= "" then
-	                    local conf = _confidenceForName(phrase, knownPlayersIdx)
-	                    if conf == "exact" then
-	                        return "players", _asKey(phrase)
-	                    end
+    -- FIX (v2026-02-04B): "<thing> lies here." -> items
+    do
+        local phrase = lineClean:match("^(.-)%s+lies%s+here[%,%.]")
+        if type(phrase) == "string" then
+            phrase = _trim(phrase)
+            if phrase ~= "" then
+                return "items", _asKey(phrase)
+            end
+        end
+    end
 
-	                    -- Candidate but not exact: prefer unknown (safe).
-	                    if conf == "candidate" then
-	                        return "unknown", _asKey(phrase)
-	                    end
+    -- NEW (v2026-02-04C): "<thing> stands here ..." (with any trailing text)
+    do
+        local phrase = lineClean:match("^(.-)%s+stands%s+here[%s,%.]")
+        if type(phrase) == "string" then
+            phrase = _trim(phrase)
+            if phrase ~= "" then
+                local conf = _confidenceForName(phrase, knownPlayersIdx)
+                if conf == "exact" then
+                    return "players", _asKey(phrase)
+                end
+                if conf == "candidate" then
+                    return "unknown", _asKey(phrase)
+                end
 
-	                    if opts.assumeCapitalizedAsPlayer == true then
-	                        local first = phrase:sub(1, 1)
-	                        if first:match("%u") then
-	                            return "players", _asKey(phrase)
-	                        end
-	                    end
+                if lower:find("corpse") then
+                    return "items", _asKey(phrase)
+                end
 
-	                    return "unknown", _asKey(phrase)
-	                end
-	            end
-	        end
-	    end
+                local pLower = phrase:lower()
+                if pLower:match("^(a%s+)") or pLower:match("^(an%s+)") or pLower:match("^(the%s+)") then
+                    if _isProbablyItemPhrase(pLower) then
+                        return "items", _asKey(phrase)
+                    end
+                    return "mobs", _asKey(phrase)
+                end
 
-	    do
-	        -- Allow trailing descriptors after the first period, e.g. "X is here. (glowing)"
-	        local phrase = lineClean:match("^(.-)%s+is%s+here%.")
-	        if type(phrase) == "string" then
-	            phrase = _trim(phrase)
-	            if phrase ~= "" then
-	                local conf = _confidenceForName(phrase, knownPlayersIdx)
-	                if conf == "exact" then
-	                    return "players", _asKey(phrase)
-	                end
+                return "unknown", _asKey(phrase)
+            end
+        end
+    end
 
-	                -- Candidate but not exact: prefer unknown (safe).
-	                if conf == "candidate" then
-	                    return "unknown", _asKey(phrase)
-	                end
+    -- posture-ish / verb-ish line: "X is <word> here ..." (comma/period/space after here)
+    do
+        local phrase, posture = lineClean:match("^(.-)%s+is%s+(%a+)%s+here[%s,%.]")
+        if type(phrase) == "string" and type(posture) == "string" then
+            phrase = _trim(phrase)
+            posture = posture:lower()
+            if phrase ~= "" then
+                local conf = _confidenceForName(phrase, knownPlayersIdx)
+                if conf == "exact" then
+                    return "players", _asKey(phrase)
+                end
+                if conf == "candidate" then
+                    return "unknown", _asKey(phrase)
+                end
 
-	                if lower:find("corpse") then
-	                    return "items", _asKey(phrase)
-	                end
+                if lower:find("corpse") then
+                    return "items", _asKey(phrase)
+                end
 
-	                local pLower = phrase:lower()
+                -- If it looks like a normal player posture, still prefer unknown unless known.
+                -- For non-postures (grazing/floating/etc), treat as mob/item/unknown by heuristics.
+                local pLower = phrase:lower()
+                if pLower:match("^(a%s+)") or pLower:match("^(an%s+)") or pLower:match("^(the%s+)") then
+                    if _isProbablyItemPhrase(pLower) then
+                        return "items", _asKey(phrase)
+                    end
+                    return "mobs", _asKey(phrase)
+                end
 
-	                if pLower:match("^(a%s+)") or pLower:match("^(an%s+)") or pLower:match("^(the%s+)") then
-	                    if _isProbablyItemPhrase(pLower) then
-	                        return "items", _asKey(phrase)
-	                    end
-	                    return "mobs", _asKey(phrase)
-	                end
+                if opts.assumeCapitalizedAsPlayer == true and POSTURES[posture] == true then
+                    local first = phrase:sub(1, 1)
+                    if first:match("%u") then
+                        return "players", _asKey(phrase)
+                    end
+                end
 
-	                return "unknown", _asKey(phrase)
-	            end
-	        end
-	    end
+                return "unknown", _asKey(phrase)
+            end
+        end
+    end
+
+    -- "X is here ..." (with any trailing text)
+    do
+        local phrase = lineClean:match("^(.-)%s+is%s+here[%s,%.]")
+        if type(phrase) == "string" then
+            phrase = _trim(phrase)
+            if phrase ~= "" then
+                local conf = _confidenceForName(phrase, knownPlayersIdx)
+                if conf == "exact" then
+                    return "players", _asKey(phrase)
+                end
+                if conf == "candidate" then
+                    return "unknown", _asKey(phrase)
+                end
+
+                if lower:find("corpse") then
+                    return "items", _asKey(phrase)
+                end
+
+                local pLower = phrase:lower()
+
+                if pLower:match("^(a%s+)") or pLower:match("^(an%s+)") or pLower:match("^(the%s+)") then
+                    if _isProbablyItemPhrase(pLower) then
+                        return "items", _asKey(phrase)
+                    end
+                    return "mobs", _asKey(phrase)
+                end
+
+                return "unknown", _asKey(phrase)
+            end
+        end
+    end
+
+    -- Conservative: "A/An/The <noun> ... here ... ."
+    do
+        if not lower:find("%sis%s", 1, true) then
+            if (lower:match("^(a%s+)") or lower:match("^(an%s+)") or lower:match("^(the%s+)")) and lower:find("%shere%s", 1, true) and lower:match("%.%s*$") then
+                local noun = lineClean:match("^(An?%s+.-)%s+%a+%s")
+                if type(noun) ~= "string" or noun == "" then
+                    noun = lineClean:match("^(The%s+.-)%s+%a+%s")
+                end
+                noun = _trim(noun or "")
+                if noun ~= "" then
+                    local nLower = noun:lower()
+                    if _isProbablyItemPhrase(nLower) then
+                        return "items", _asKey(noun)
+                    end
+                    return "mobs", _asKey(noun)
+                end
+            end
+        end
+    end
 
     if lower:find("corpse") then
         return "items", _asKey(lineClean)
@@ -868,13 +966,11 @@ local function _reclassifyBucketsWithKnownPlayers(current, knownIdx)
             return
         end
 
-        -- Candidate but not exact: prefer unknown for safety.
         if conf == "candidate" then
             next.unknown[name] = true
             return
         end
 
-        -- No signal: keep original bucket (except we demote unconfirmed players to unknown).
         if originalBucket == "players" then
             next.unknown[name] = true
         elseif originalBucket == "mobs" then
@@ -990,12 +1086,9 @@ local function _ensureWhoStoreSubscription()
     return true, nil
 end
 
--- Best-effort arming of WhoStore subscription so callers don't need to remember to
--- call reclassifyFromWhoStore() before expecting WhoStore update events to trigger.
 local function _armWhoStoreSubscriptionBestEffort()
     local ok, err = _ensureWhoStoreSubscription()
     if ok ~= true then
-        -- Do not fail callers; just record the reason for diagnostics.
         _who.lastErr = tostring(err or _who.lastErr or "WhoStore subscribe failed")
     end
 end
