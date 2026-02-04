@@ -10,7 +10,7 @@
 --   - Persistent visibility changes should be done via dwgui visible <uiId> on|off.
 
 local M = {}
-M.VERSION = "v2026-02-03E"
+M.VERSION = "v2026-02-04F"
 
 local U = require("dwkit.ui.ui_base")
 local Window = require("dwkit.ui.ui_window")
@@ -22,6 +22,12 @@ local G = rawget(_G, "Geyser")
 
 local UI_ID = "launchpad_ui"
 local UI_LABEL = "LaunchPad"
+
+-- Internal / non-user surfaces to hide from LaunchPad
+local HIDDEN_UI_IDS = {
+    [UI_ID] = true,           -- never list self
+    ["ui_manager_ui"] = true, -- manager surface should not appear on LaunchPad
+}
 
 local _frame = nil
 local _listRoot = nil
@@ -62,6 +68,13 @@ local function _sortedKeys(t)
     return keys
 end
 
+local function _copyArray(arr)
+    if type(arr) ~= "table" then return {} end
+    local out = {}
+    for i = 1, #arr do out[i] = arr[i] end
+    return out
+end
+
 local function _disposeFrame()
     if _frame then
         pcall(function() _frame:hide() end)
@@ -94,6 +107,19 @@ local function _forceSelfHiddenNoSave(gs)
     pcall(gs.setVisible, UI_ID, false, { noSave = true })
 end
 
+local function _filterEligible(uiIds)
+    if type(uiIds) ~= "table" then return {} end
+    local out = {}
+    for i = 1, #uiIds do
+        local uiId = uiIds[i]
+        if type(uiId) == "string" and uiId ~= "" and HIDDEN_UI_IDS[uiId] ~= true then
+            out[#out + 1] = uiId
+        end
+    end
+    table.sort(out)
+    return out
+end
+
 -- Authoritative source: gui_settings.list() -> { uiId -> {enabled=bool, visible=bool} }
 local function _getEnabledUiIdsFromSettings()
     local gs = U.getGuiSettingsBestEffort()
@@ -110,7 +136,7 @@ local function _getEnabledUiIdsFromSettings()
     local keys = _sortedKeys(uiMap)
     for _, uiId in ipairs(keys) do
         uiId = tostring(uiId)
-        if uiId ~= UI_ID then
+        if HIDDEN_UI_IDS[uiId] ~= true then
             local rec = uiMap[uiId]
             if type(rec) == "table" and rec.enabled == true then
                 out[#out + 1] = uiId
@@ -157,7 +183,7 @@ local function _getEnabledUiIdsFallback()
             uiId = item.uiId or item.id
         end
         uiId = (type(uiId) == "string") and uiId or nil
-        if uiId and uiId ~= UI_ID then
+        if uiId and HIDDEN_UI_IDS[uiId] ~= true then
             out[#out + 1] = uiId
         end
     end
@@ -314,7 +340,6 @@ local function _renderList(uiIds)
             local gs2 = U.getGuiSettingsBestEffort()
             if type(gs2) ~= "table" then return end
 
-            -- Ensure visible persistence for this session, but do not save (LaunchPad is temporary)
             if type(gs2.enableVisiblePersistence) == "function" then
                 pcall(gs2.enableVisiblePersistence, { noSave = true })
             end
@@ -372,14 +397,16 @@ function M.apply(opts)
         return true
     end
 
-    local enabledUiIds, src = _getEnabledUiIds()
-    _state.debug.lastEnabledUiIds = enabledUiIds
+    local enabledUiIdsRaw, src = _getEnabledUiIds()
+    local enabledUiIds = _filterEligible(enabledUiIdsRaw)
+
+    _state.debug.lastEnabledUiIds = _copyArray(enabledUiIds)
     _state.debug.lastReason = "enabledSource=" .. tostring(src)
 
-    _state.renderedUiIds = enabledUiIds
+    _state.renderedUiIds = _copyArray(enabledUiIds)
     _state.widgets.rowCount = #enabledUiIds
 
-    -- Governance: only appear if at least 1 other UI enabled.
+    -- Governance: only appear if at least 1 other eligible UI enabled.
     if #enabledUiIds == 0 then
         _forceSelfHiddenNoSave(gs)
         _state.visible = false
@@ -405,7 +432,7 @@ function M.apply(opts)
     _renderList(enabledUiIds)
 
     _state.widgets.rowCount = #enabledUiIds
-    _state.renderedUiIds = enabledUiIds
+    _state.renderedUiIds = _copyArray(enabledUiIds)
 
     return true
 end
@@ -432,8 +459,11 @@ function M.getState()
             hasFrame = _state.widgets.hasFrame,
             rowCount = _state.widgets.rowCount,
         },
-        renderedUiIds = _state.renderedUiIds,
-        debug = _state.debug,
+        renderedUiIds = _copyArray(_state.renderedUiIds),
+        debug = {
+            lastEnabledUiIds = _copyArray(_state.debug.lastEnabledUiIds),
+            lastReason = _state.debug.lastReason,
+        },
     }
 end
 

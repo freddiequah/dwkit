@@ -1,13 +1,19 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_manager
 -- Owner       : UI
--- Version     : v2026-02-03H
+-- Version     : v2026-02-04D
 -- Purpose     :
 --   - SAFE dispatcher for applying UI modules registered in gui_settings.
 --   - Provides manual-only "apply all" and "apply one" capability.
 --   - Best-effort require() of dwkit.ui.<uiId> with safe skipping when missing.
 --   - Does NOT send gameplay commands.
 --   - Does NOT start timers or automation.
+--
+--   - NEW (v2026-02-04D):
+--       * Dependency-safe lifecycle wiring (enabled-based, not visible-based):
+--           - When a UI is enabled, claim required providers via ui_dependency_service.ensureUi().
+--           - When a UI is disabled, release claims via ui_dependency_service.releaseUi().
+--         NOTE: Provider lifecycle is tied to "enabled", not "visible".
 --
 -- Public API  :
 --   - getModuleVersion() -> string
@@ -32,7 +38,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-03H"
+M.VERSION = "v2026-02-04D"
 
 local function _rawOut(line)
     line = tostring(line or "")
@@ -163,6 +169,79 @@ local function _clearModuleCache(modName)
     return true, nil
 end
 
+-- -------------------------------------------------------------------------
+-- Dependency wiring (enabled-based)
+-- -------------------------------------------------------------------------
+
+-- Model A: enabled UI -> requires passive provider(s).
+-- NOTE: Dependencies are tied to enabled, not visible.
+local UI_PROVIDER_DEPS = {
+    roomentities_ui = { "roomfeed_watch" },
+}
+
+local function _getProvidersForUi(uiId, uiMod)
+    uiId = tostring(uiId or "")
+    local list = UI_PROVIDER_DEPS[uiId]
+
+    -- Optional UI module override/extension: getRequiredProviders() -> {string}
+    if type(uiMod) == "table" and type(uiMod.getRequiredProviders) == "function" then
+        local ok, v = pcall(uiMod.getRequiredProviders)
+        if ok and type(v) == "table" then
+            list = v
+        end
+    end
+
+    if type(list) ~= "table" then
+        return {}
+    end
+    return list
+end
+
+local function _getUiDepServiceBestEffort()
+    local ok, dep = _safeRequire("dwkit.services.ui_dependency_service")
+    if ok and type(dep) == "table"
+        and type(dep.ensureUi) == "function"
+        and type(dep.releaseUi) == "function"
+    then
+        return dep
+    end
+    return nil
+end
+
+local function _ensureDepsIfAny(uiId, uiMod, opts)
+    local dep = _getUiDepServiceBestEffort()
+    if type(dep) ~= "table" then
+        return true, nil -- dependency service optional (safe skip)
+    end
+
+    local providers = _getProvidersForUi(uiId, uiMod)
+    if type(providers) ~= "table" or #providers == 0 then
+        return true, nil
+    end
+
+    local ok, err = dep.ensureUi(uiId, providers,
+        { source = (opts and opts.source) or "ui_manager:deps:ensure", quiet = true })
+    if not ok then
+        return false, tostring(err)
+    end
+    return true, nil
+end
+
+local function _releaseDepsIfAny(uiId, opts)
+    local dep = _getUiDepServiceBestEffort()
+    if type(dep) ~= "table" then
+        return true, nil -- dependency service optional (safe skip)
+    end
+
+    local ok, err = dep.releaseUi(uiId, { source = (opts and opts.source) or "ui_manager:deps:release", quiet = true })
+    if not ok then
+        return false, tostring(err)
+    end
+    return true, nil
+end
+
+-- -------------------------------------------------------------------------
+
 local function _ppValue(v)
     local tv = type(v)
     if tv == "string" then
@@ -261,20 +340,36 @@ function M.applyOne(uiId, opts)
         return false, tostring(loadErr)
     end
 
-    if not _isEnabled(gs, uiId) then
+    local enabled = _isEnabled(gs, uiId)
+
+    -- If disabled: release deps (enabled-based), then stand down best-effort.
+    if not enabled then
         _out("[DWKit UI] SKIP uiId=" .. tostring(uiId) .. " (disabled)", opts)
+
+        local okRel, errRel = _releaseDepsIfAny(uiId, { source = opts.source or "ui_manager:disabled", quiet = true })
+        if not okRel then
+            _err("dependency release failed uiId=" .. tostring(uiId) .. " err=" .. tostring(errRel), opts)
+        end
+
         _standDownIfDisabled(uiId, opts)
         return true, nil
     end
 
+    -- Enabled: best-effort require module (may not exist yet).
     local modName = "dwkit.ui." .. tostring(uiId)
     local okR, modOrErr = _safeRequire(modName)
-    if not okR or type(modOrErr) ~= "table" then
+    local ui = (okR and type(modOrErr) == "table") and modOrErr or nil
+
+    -- Ensure dependencies for enabled UI even if module isn't implemented yet.
+    local okDep, errDep = _ensureDepsIfAny(uiId, ui, { source = opts.source or "ui_manager:applyOne", quiet = true })
+    if not okDep then
+        return false, "dependency ensure failed: " .. tostring(errDep)
+    end
+
+    if type(ui) ~= "table" then
         _out("[DWKit UI] SKIP uiId=" .. tostring(uiId) .. " (no module yet)", opts)
         return true, nil
     end
-
-    local ui = modOrErr
 
     if type(ui.init) == "function" then
         _callModuleBestEffort(ui, "init", opts)
@@ -515,6 +610,7 @@ function M.stateOne(uiId, opts)
     _out("  hasApply=" .. tostring(type(ui.apply) == "function"), opts)
     _out("  hasDispose=" .. tostring(type(ui.dispose) == "function"), opts)
     _out("  hasGetState=" .. tostring(type(ui.getState) == "function"), opts)
+    _out("  hasGetRequiredProviders=" .. tostring(type(ui.getRequiredProviders) == "function"), opts)
 
     if type(ui.getState) ~= "function" then
         _out("  note=getState() not implemented by UI module", opts)
@@ -533,13 +629,15 @@ function M.stateOne(uiId, opts)
     end
 
     _out("{", opts)
-    _ppTable(stateOrErr, { maxDepth = opts.maxDepth or 4, maxItems = opts.maxItems or 80, quiet = opts.quiet }, 0, "", nil, nil)
+    _ppTable(stateOrErr, { maxDepth = opts.maxDepth or 4, maxItems = opts.maxItems or 80, quiet = opts.quiet }, 0, "",
+        nil, nil)
     _out("}", opts)
 
     return true, nil
 end
 
 function M.printState(uiId, opts) return M.stateOne(uiId, opts) end
+
 function M.state(uiId, opts) return M.stateOne(uiId, opts) end
 
 -- Defaults for registered UI ids (seed only; does not overwrite existing records)
@@ -686,12 +784,22 @@ function M.getState(opts)
         end
     end
 
+    local depState = nil
+    local dep = _getUiDepServiceBestEffort()
+    if type(dep) == "table" and type(dep.getState) == "function" then
+        local ok, st = pcall(dep.getState)
+        if ok and type(st) == "table" then
+            depState = st
+        end
+    end
+
     local records = M.listAll({ records = true })
     return {
         moduleVersion = M.VERSION,
         uiCount = #records,
         ui = records,
         guiSettingsStatus = gsStatus,
+        dependencyState = depState,
         note = "ui_manager is a dispatcher; dwkit.ui.ui_manager_ui is the UI surface",
     }
 end

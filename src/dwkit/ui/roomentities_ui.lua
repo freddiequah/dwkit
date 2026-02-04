@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-02-03A
+-- Version     : v2026-02-04D
 -- Purpose     :
 --   - SAFE RoomEntities UI (consumer-only) that renders a per-entity ROW LIST with
 --     sections: Players / Mobs / Items-Objects / Unknown.
@@ -47,13 +47,24 @@
 --
 --   - NEW (v2026-02-03A):
 --       * Quiet-aware logging: apply() output respects opts.quiet (for ui_manager applyAll/applyOne).
+--
+--   - NEW (v2026-02-04D):
+--       * Declare required passive providers for enabled-mode dependency management.
+--         NOTE: Actual provider lifecycle is managed by ui_manager + ui_dependency_service.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-03A"
+M.VERSION = "v2026-02-04D"
 M.UI_ID = "roomentities_ui"
 M.id = M.UI_ID -- convenience alias (some tooling/debug expects ui.id)
+
+-- Enabled-mode dependencies (Model A). Provider lifecycle is managed externally (ui_manager).
+M.REQUIRED_PROVIDERS = { "roomfeed_watch" }
+
+function M.getRequiredProviders()
+    return M.REQUIRED_PROVIDERS
+end
 
 local U = require("dwkit.ui.ui_base")
 local W = require("dwkit.ui.ui_window")
@@ -1191,6 +1202,7 @@ function M.getState()
         inited = (_state.inited == true),
         enabled = _state.enabled,
         visible = _state.visible,
+        requiredProviders = M.REQUIRED_PROVIDERS,
         lastApply = _state.lastApply,
         lastError = _state.lastError,
         subscriptions = {
