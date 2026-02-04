@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-04B
+-- Version     : v2026-02-04D
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-04B"
+M.VERSION = "v2026-02-04D"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -338,6 +338,52 @@ local SUITES = {
         },
     },
 
+    -- NEW: UI dependency lifecycle suite (Model A) for roomfeed_watch
+    ui_dependency_roomfeed_watch_claim_release = {
+        title = "ui_dependency_roomfeed_watch_claim_release",
+        description =
+        "Dependency lifecycle: enabling roomentities_ui claims roomfeed_watch; disabling releases and stops provider (unless externally installed).",
+        delay = 0.40,
+        steps = {
+            { cmd = "dwroom watch off", note = "Start clean: ensure roomfeed watcher is not installed." },
+
+            {
+                cmd =
+                'lua do local Dep=require("dwkit.services.ui_dependency_service"); Dep.releaseUi("roomentities_ui",{source="dwverify:ui_dep:reset",quiet=true}); local C=require("dwkit.capture.roomfeed_capture"); local installed=false; if type(C.getDebugState)=="function" then local s=C.getDebugState(); installed=(s and s.installed==true) end; local st=Dep.getState(); local rc=0; if type(st)=="table" and type(st.refs)=="table" then rc=tonumber(st.refs["roomfeed_watch"] or 0) or 0 end; print(string.format("[dwverify-ui-dep] reset installed=%s refcount=%s", tostring(installed), tostring(rc))) end',
+                note = "Reset dependency claims best-effort and print baseline state.",
+            },
+
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui",true,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("roomentities_ui",{source="dwverify:ui_dep:enable"}); if ok==false then error("applyOne(roomentities_ui) failed: "..tostring(err)) end; local Dep=require("dwkit.services.ui_dependency_service"); local st=Dep.getState(); local rc=0; if type(st)=="table" and type(st.refs)=="table" then rc=tonumber(st.refs["roomfeed_watch"] or 0) or 0 end; local C=require("dwkit.capture.roomfeed_capture"); local installed=false; if type(C.getDebugState)=="function" then local s=C.getDebugState(); installed=(s and s.installed==true) end; if rc<1 then error("Expected refcount>=1 after enable; got "..tostring(rc)) end; if installed~=true then error("Expected roomfeed_capture installed=true after enable; got "..tostring(installed)) end; print(string.format("[dwverify-ui-dep] PASS enable rc=%s installed=%s", tostring(rc), tostring(installed))) end',
+                note = "Enable (visible OFF) then applyOne; ASSERT: dependency claimed and provider installed.",
+            },
+
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.setEnabled("roomentities_ui",false,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("roomentities_ui",{source="dwverify:ui_dep:disable"}); if ok==false then error("applyOne(roomentities_ui) failed: "..tostring(err)) end; local Dep=require("dwkit.services.ui_dependency_service"); local st=Dep.getState(); local rc=0; if type(st)=="table" and type(st.refs)=="table" then rc=tonumber(st.refs["roomfeed_watch"] or 0) or 0 end; local C=require("dwkit.capture.roomfeed_capture"); local installed=false; if type(C.getDebugState)=="function" then local s=C.getDebugState(); installed=(s and s.installed==true) end; if rc~=0 then error("Expected refcount=0 after disable; got "..tostring(rc)) end; if installed==true then error("Expected provider uninstalled after disable (manager-owned); installed still true") end; print(string.format("[dwverify-ui-dep] PASS disable rc=%s installed=%s", tostring(rc), tostring(installed))) end',
+                note = "Disable then applyOne; ASSERT: refcount=0 and provider uninstalled (when manager-owned).",
+            },
+
+            { cmd = "dwroom watch on",  note = "External install: user turns on watcher manually (external-owned)." },
+
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.setEnabled("roomentities_ui",true,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("roomentities_ui",{source="dwverify:ui_dep:enable_external"}); if ok==false then error("applyOne(roomentities_ui) failed: "..tostring(err)) end; local Dep=require("dwkit.services.ui_dependency_service"); local st=Dep.getState(); local rc=0; local ext=false; local started=false; if type(st)=="table" and type(st.refs)=="table" then rc=tonumber(st.refs["roomfeed_watch"] or 0) or 0 end; if type(st)=="table" and type(st.providers)=="table" and type(st.providers["roomfeed_watch"])=="table" then ext=(st.providers["roomfeed_watch"].externalInstalled==true); started=(st.providers["roomfeed_watch"].startedByManager==true) end; local C=require("dwkit.capture.roomfeed_capture"); local installed=false; if type(C.getDebugState)=="function" then local s=C.getDebugState(); installed=(s and s.installed==true) end; if rc<1 then error("Expected refcount>=1 after enable; got "..tostring(rc)) end; if installed~=true then error("Expected installed=true after enable; got "..tostring(installed)) end; print(string.format("[dwverify-ui-dep] enable(external) rc=%s installed=%s externalInstalled=%s startedByManager=%s", tostring(rc), tostring(installed), tostring(ext), tostring(started))) end',
+                note =
+                "Enable again while externally installed; informational print of externalInstalled/startedByManager.",
+            },
+
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.setEnabled("roomentities_ui",false,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("roomentities_ui",{source="dwverify:ui_dep:disable_external"}); if ok==false then error("applyOne(roomentities_ui) failed: "..tostring(err)) end; local Dep=require("dwkit.services.ui_dependency_service"); local st=Dep.getState(); local rc=0; if type(st)=="table" and type(st.refs)=="table" then rc=tonumber(st.refs["roomfeed_watch"] or 0) or 0 end; local C=require("dwkit.capture.roomfeed_capture"); local installed=false; if type(C.getDebugState)=="function" then local s=C.getDebugState(); installed=(s and s.installed==true) end; if rc~=0 then error("Expected refcount=0 after disable; got "..tostring(rc)) end; if installed~=true then error("Expected provider still installed after disable (external-owned); got installed="..tostring(installed)) end; print(string.format("[dwverify-ui-dep] PASS disable(external) rc=%s installed=%s", tostring(rc), tostring(installed))) end',
+                note = "Disable while external-owned; ASSERT: refcount=0 but provider remains installed.",
+            },
+
+            { cmd = "dwroom watch off", note = "Cleanup: turn off watcher manually." },
+        },
+    },
+
     -- NEW: Locked semantics verification (Objective 1)
     ui_disable_forces_visible_off = {
         title = "ui_disable_forces_visible_off",
@@ -395,7 +441,7 @@ local SUITES = {
         steps = {
             {
                 cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); if type(gs.register)=="function" then pcall(gs.register,"launchpad_ui",{enabled=true,visible=true},{save=false}); pcall(gs.register,"presence_ui",{enabled=false,visible=false},{save=false}); pcall(gs.register,"roomentities_ui",{enabled=false,visible=false},{save=false}); end; gs.setEnabled("presence_ui",false,{noSave=true}); gs.setVisible("presence_ui",false,{noSave=true}); gs.setEnabled("roomentities_ui",false,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); gs.setEnabled("launchpad_ui",true,{noSave=true}); gs.setVisible("launchpad_ui",true,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)=="table" and type(UM.applyOne)=="function" then UM.applyOne("launchpad_ui",{source="dwverify:launchpad"}) else local L=require("dwkit.ui.launchpad_ui"); if type(L.apply)=="function" then L.apply({}) end end; local L=require("dwkit.ui.launchpad_ui"); local st=L.getState(); local rowCount=(st.widgets and st.widgets.rowCount) or (st.rowCount) or 0; if st.visible~=false then error("Expected launchpad visible=false when no other UI enabled; got "..tostring(st.visible)) end; if tonumber(rowCount)~=0 then error("Expected launchpad rowCount=0 when none enabled; got "..tostring(rowCount)) end; print("[dwverify-ui] PASS launchpad step1 hidden when none enabled (rowCount=0)") end',
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); if type(gs.register)=="function" then pcall(gs.register,"launchpad_ui",{enabled=true,visible=true},{save=false}); pcall(gs.register,"presence_ui",{enabled=false,visible=false},{save=false}); pcall(gs.register,"roomentities_ui",{enabled=false,visible=false},{save=false}); end; gs.setEnabled("presence_ui",false,{noSave=true}); gs.setVisible("presence_ui",false,{noSave=true}); gs.setEnabled("roomentities_ui",false,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); gs.setEnabled("launchpad_ui",true,{noSave=true}); gs.setVisible("launchpad_ui",true,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)=="table" and type(UM.applyOne)=="function" then UM.applyOne("launchpad_ui",{source="dwverify:launchpad"}) else local L=require("dwkit.ui.launchpad_ui"); if type(L.apply)=="function" then L.apply({}) end end; local L=require("dwkit.ui.launchpad_ui"); local st=L.getState(); local rowCount=(st.widgets and st.widgets.rowCount) or st.rowCount or 0; if st.visible~=false then error("Expected launchpad visible=false when no other UI enabled; got "..tostring(st.visible)) end; if tonumber(rowCount)~=0 then error("Expected launchpad rowCount=0 when none enabled; got "..tostring(rowCount)) end; print("[dwverify-ui] PASS launchpad step1 hidden when none enabled (rowCount=0)") end',
                 note = "No enabled UIs (besides LaunchPad itself). Expect LaunchPad forces itself hidden and 0 rows.",
             },
             {
