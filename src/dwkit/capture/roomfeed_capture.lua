@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.capture.roomfeed_capture
 -- Owner       : Capture
--- Version     : v2026-02-04B
+-- Version     : v2026-02-04C
 -- Purpose     :
 --   - Passive capture of room output blocks (movement room header, look output)
 --     without GMCP and without sending any commands.
@@ -54,6 +54,12 @@
 --       * during capture, only restart on STRONG headers (never fallback titles)
 --   - Clear lastAbortReason on successful finalize (avoid stale abort in debugState)
 --
+-- Feb 2026 fix (v2026-02-04C):
+--   - IMPORTANT: Keep arrive/leave updates in the SAME bucket shape as RoomEntitiesService.
+--     RoomEntities buckets are SET-MAPS: { ["Name"]=true }.
+--     We now copy/modify/apply arrive/leave using set-maps (defensive conversion from arrays if needed),
+--     and apply via RoomSvc.setState(...,{forceEmit=true,...}) to avoid poisoning state shape.
+--
 -- Public API  :
 --   - getVersion() -> string
 --   - install(opts?) -> boolean ok, string|nil err
@@ -74,7 +80,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-04B"
+M.VERSION = "v2026-02-04C"
 
 local function _nowTs()
     return os.time()
@@ -386,6 +392,7 @@ local function _resolveRoomSvc()
         and type(modOrErr.getState) == "function"
         and type(modOrErr.ingestLookLines) == "function"
         and type(modOrErr.update) == "function"
+        and type(modOrErr.setState) == "function"
     then
         return true, modOrErr, nil
     end
@@ -404,35 +411,104 @@ local function _resolveStatusSvc()
     return false, nil, tostring(modOrErr)
 end
 
-local function _copyBuckets(state)
-    state = (type(state) == "table") and state or {}
-    local out = { players = {}, mobs = {}, items = {}, unknown = {} }
-    for _, k in ipairs({ "players", "mobs", "items", "unknown" }) do
-        local tt = state[k]
-        if type(tt) == "table" then
-            for i = 1, #tt do out[k][i] = tostring(tt[i]) end
+-- #########################################################################
+-- Bucket-shape helpers (v2026-02-04C)
+-- RoomEntitiesService buckets are SET-MAPS: { ["Name"]=true }.
+-- We defensively accept array-shaped buckets and normalize them into set-maps.
+-- #########################################################################
+
+local function _newBucketSet()
+    return {}
+end
+
+local function _normalizeBucketToSet(src)
+    local out = _newBucketSet()
+    if type(src) ~= "table" then return out end
+
+    for k, v in pairs(src) do
+        -- canonical set-map shape: ["Name"]=true
+        if type(k) == "string" and v == true then
+            out[k] = true
+
+        -- array of strings: { "Name", "Other" }
+        elseif type(k) == "number" and type(v) == "string" and v ~= "" then
+            out[v] = true
+
+        -- array of objects with .name: { {name="X"}, ... }
+        elseif type(k) == "number" and type(v) == "table" and type(v.name) == "string" and v.name ~= "" then
+            out[v.name] = true
         end
     end
+
     return out
 end
 
-local function _removeFromBuckets(buckets, name)
+local function _copyBuckets(state)
+    state = (type(state) == "table") and state or {}
+    return {
+        players = _normalizeBucketToSet(state.players),
+        mobs    = _normalizeBucketToSet(state.mobs),
+        items   = _normalizeBucketToSet(state.items),
+        unknown = _normalizeBucketToSet(state.unknown),
+    }
+end
+
+local function _ensureBucketsPresent(buckets)
+    buckets = (type(buckets) == "table") and buckets or {}
+    if type(buckets.players) ~= "table" then buckets.players = {} end
+    if type(buckets.mobs) ~= "table" then buckets.mobs = {} end
+    if type(buckets.items) ~= "table" then buckets.items = {} end
+    if type(buckets.unknown) ~= "table" then buckets.unknown = {} end
+    return buckets
+end
+
+local function _hasNameAnywhere(buckets, name)
+    buckets = _ensureBucketsPresent(buckets)
     name = tostring(name or "")
     if name == "" then return false end
+
+    if buckets.players[name] == true then return true end
+    if buckets.mobs[name] == true then return true end
+    if buckets.items[name] == true then return true end
+    if buckets.unknown[name] == true then return true end
+
+    -- defensive: if any bucket still has array remnants, scan values
+    for _, k in ipairs({ "players", "mobs", "items", "unknown" }) do
+        local tt = buckets[k]
+        if type(tt) == "table" then
+            for kk, vv in pairs(tt) do
+                if type(kk) == "number" and tostring(vv) == name then
+                    return true
+                end
+            end
+        end
+    end
+
+    return false
+end
+
+local function _removeFromBuckets(buckets, name)
+    buckets = _ensureBucketsPresent(buckets)
+    name = tostring(name or "")
+    if name == "" then return false end
+
     local changed = false
 
     for _, k in ipairs({ "players", "mobs", "items", "unknown" }) do
         local tt = buckets[k]
         if type(tt) == "table" then
-            local nextT = {}
-            for i = 1, #tt do
-                if tostring(tt[i]) ~= name then
-                    nextT[#nextT + 1] = tt[i]
-                else
+            if tt[name] == true then
+                tt[name] = nil
+                changed = true
+            end
+
+            -- defensive: remove any array remnants that match
+            for kk, vv in pairs(tt) do
+                if type(kk) == "number" and tostring(vv) == name then
+                    tt[kk] = nil
                     changed = true
                 end
             end
-            buckets[k] = nextT
         end
     end
 
@@ -440,22 +516,15 @@ local function _removeFromBuckets(buckets, name)
 end
 
 local function _addToUnknown(buckets, name)
+    buckets = _ensureBucketsPresent(buckets)
     name = tostring(name or "")
     if name == "" then return false end
 
-    for _, k in ipairs({ "players", "mobs", "items", "unknown" }) do
-        local tt = buckets[k]
-        if type(tt) == "table" then
-            for i = 1, #tt do
-                if tostring(tt[i]) == name then
-                    return false
-                end
-            end
-        end
+    if _hasNameAnywhere(buckets, name) then
+        return false
     end
 
-    buckets.unknown = (type(buckets.unknown) == "table") and buckets.unknown or {}
-    buckets.unknown[#buckets.unknown + 1] = name
+    buckets.unknown[name] = true
     return true
 end
 
@@ -567,6 +636,7 @@ local function _handleArriveLeave(lnClean)
     local okR, RoomSvc = _resolveRoomSvc()
     if not okR then return end
 
+    -- IMPORTANT: normalize current state into set-maps, and keep it as set-maps.
     local current = RoomSvc.getState()
     local buckets = _copyBuckets(current)
     local changed = false
@@ -578,7 +648,8 @@ local function _handleArriveLeave(lnClean)
     end
 
     if changed then
-        RoomSvc.update(buckets, { forceEmit = true, source = "roomfeed_arriveleave", ts = _nowTs() })
+        -- Prefer setState to apply the whole normalized bucket set (avoid poisoning shape).
+        RoomSvc.setState(buckets, { forceEmit = true, source = "roomfeed_arriveleave" })
     end
 end
 
