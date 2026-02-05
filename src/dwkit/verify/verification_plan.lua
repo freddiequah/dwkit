@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-04D
+-- Version     : v2026-02-04E
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-04D"
+M.VERSION = "v2026-02-04E"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -66,7 +66,7 @@ local SUITES = {
     roomfeed_promptprefix_no_restart = {
         title = "roomfeed_promptprefix_no_restart",
         description =
-        "RoomFeed regression: prompt+header on same line must start capture; look block must NOT trigger mid-capture restart on wrapped description lines; expect lastOkTs non-nil and lastAbortReason != abort:restart_header_seen.",
+        "RoomFeed regression: prompt+header on same line must start capture; look block must NOT trigger mid-capture restart on wrapped description lines; works for both Immortal (id/flags) and normal rooms (title-only). Expect lastOkTs non-nil and lastAbortReason != abort:restart_header_seen.",
         delay = 0.40,
         steps = {
             { cmd = "dwroom watch off", note = "Ensure clean start: remove passive capture trigger." },
@@ -77,8 +77,8 @@ local SUITES = {
 
             {
                 cmd =
-                'lua do local C=require("dwkit.capture.roomfeed_capture"); local s=C.getDebugState(); local kind=tostring(s.lastHeaderSeenKind or ""); if kind:sub(1,6)~="strong" then error("Expected lastHeaderSeenKind strong*; got "..kind) end; local eff=tostring(s.lastHeaderSeenEffectiveClean or ""); if eff=="" or not eff:lower():find("board room",1,true) then error("Expected effective header to contain Board Room; got "..eff) end; if tostring(s.lastAbortReason or "")=="abort:restart_header_seen" then error("Unexpected restart_header_seen (wrapped text misdetected as title).") end; if s.lastOkTs==nil then error("Expected lastOkTs non-nil after look finalize; stillCapturing="..tostring(s.snapCapturing).." hasExits="..tostring(s.snapHasExits).." bufLen="..tostring(s.snapBufLen).." lastLine="..tostring(s.lastLineSeenClean)) end; print(string.format("[dwverify-roomfeed] PASS kind=%s okTs=%s abort=%s", kind, tostring(s.lastOkTs), tostring(s.lastAbortReason))) end',
-                note = "ASSERT: no false restart; finalize succeeded; header classification strong.",
+                'lua do local C=require("dwkit.capture.roomfeed_capture"); local s=C.getDebugState(); local kind=tostring(s.lastHeaderSeenKind or ""); local isStrong=(kind:sub(1,6)=="strong"); local isFallback=(kind:sub(1,8)=="fallback"); if (not isStrong) and (not isFallback) then error("Expected lastHeaderSeenKind strong* OR fallback*; got "..kind) end; local eff=tostring(s.lastHeaderSeenEffectiveClean or ""); if eff=="" then error("Expected non-empty effective header; got empty") end; if isStrong then local hasId=(eff:find("#",1,true)~=nil); local hasFlags=(eff:find("[",1,true)~=nil and eff:find("]",1,true)~=nil); if (not hasId) and (not hasFlags) then error("Expected strong header to include id (#) or flags ([..]); got "..eff) end end; if tostring(s.lastAbortReason or "")=="abort:restart_header_seen" then error("Unexpected restart_header_seen (wrapped text misdetected as header).") end; if s.lastOkTs==nil then error("Expected lastOkTs non-nil after look finalize; stillCapturing="..tostring(s.snapCapturing).." hasExits="..tostring(s.snapHasExits).." bufLen="..tostring(s.snapBufLen).." lastLine="..tostring(s.lastLineSeenClean)) end; print(string.format("[dwverify-roomfeed] PASS kind=%s okTs=%s abort=%s eff=%s", kind, tostring(s.lastOkTs), tostring(s.lastAbortReason), eff)) end',
+                note = "ASSERT: finalize succeeded; no false restart; header classification allows Immortal strong OR normal fallback; strong implies id/flags present.",
             },
 
             { cmd = "dwroom status", note = "Human confirmation: Room feed capture status should show lastOkTs updated and no restart abort." },
