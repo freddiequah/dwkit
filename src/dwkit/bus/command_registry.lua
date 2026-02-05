@@ -41,7 +41,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-26B"
+M.VERSION = "v2026-02-05A"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -190,6 +190,25 @@ local REG = {
                 "Backed by DWKit.config.guiSettings (dwkit.config.gui_settings).",
                 "This command only changes stored flags; it does NOT show/hide UI elements directly.",
                 "Visible control requires visible persistence to be enabled in guiSettings; dwgui enables it on-demand for visible subcommands.",
+            },
+        },
+
+        dwui = {
+            command     = "dwui",
+            aliases     = {},
+            ownerModule = "dwkit.commands.dwui",
+            description = "Opens the UI Manager UI surface (ui_manager_ui).",
+            syntax      = "dwui  (or: dwui open)",
+            examples    = {
+                "dwui",
+                "dwui open",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Typed alias implemented by dwkit.services.command_aliases.",
+                "Ensures ui_manager_ui enabled=ON (persisted) and visible=ON (session-only) then applies via ui_manager if available.",
             },
         },
 
