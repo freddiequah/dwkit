@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.presence_ui
 -- Owner       : UI
--- Version     : v2026-02-03A
+-- Version     : v2026-02-05D
 -- Purpose     :
 --   - SAFE Presence UI scaffold with live render from PresenceService (data only).
 --   - Creates a small Geyser container + label.
@@ -20,7 +20,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-03A"
+M.VERSION = "v2026-02-05D"
 M.UI_ID = "presence_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -67,7 +67,6 @@ local function _formatPresenceState(state)
     lines[#lines + 1] = "DWKit presence_ui"
     lines[#lines + 1] = "keys=" .. tostring(#keys)
 
-    -- Friendly fields if present
     if type(state.selfName) == "string" and state.selfName ~= "" then
         lines[#lines + 1] = "self=" .. tostring(state.selfName)
     end
@@ -77,7 +76,6 @@ local function _formatPresenceState(state)
         lines[#lines + 1] = "nearbyPlayers=" .. tostring(cnt)
     end
 
-    -- Show first few keys as a quick debug view
     local shown = 0
     for _, k in ipairs(keys) do
         if shown >= 4 then break end
@@ -97,23 +95,141 @@ local _state = {
     enabled = nil,
     visible = nil,
 
-    -- Centralized subscription record (from U.subscribeServiceUpdates)
     subscription = nil,
 
     widgets = {
         container = nil,
         label = nil,
+        content = nil,
+        panel = nil,
     },
 }
 
--- QUIET-AWARE output helper:
--- - suppresses normal info logs when opts.quiet == true
 local function _out(line, opts)
     opts = (type(opts) == "table") and opts or {}
     if opts.quiet == true then
         return
     end
     U.out(line)
+end
+
+local function _applyViaUiManagerBestEffort(source)
+    local okM, mgr = pcall(require, "dwkit.ui.ui_manager")
+    if okM and type(mgr) == "table" and type(mgr.applyOne) == "function" then
+        pcall(function()
+            mgr.applyOne(M.UI_ID, { source = source or "presence_ui:onClose", quiet = true })
+        end)
+    end
+end
+
+local function _refreshUiManagerUiBestEffort(source)
+    local okU, uiMgrUi = pcall(require, "dwkit.ui.ui_manager_ui")
+    if okU and type(uiMgrUi) == "table" and type(uiMgrUi.apply) == "function" then
+        pcall(function()
+            uiMgrUi.apply({ source = source or "presence_ui:onClose", quiet = true })
+        end)
+    end
+end
+
+-- Deep best-effort patching for gui_settings implementations that store ui records
+-- in internal tables which setVisible() does not touch (or signature mismatch).
+local function _forceVisibleFalseDeep(gs)
+    if type(gs) ~= "table" then return false end
+    local uiId = M.UI_ID
+    local changed = false
+
+    local function patchRecord(rec)
+        if type(rec) ~= "table" then return end
+        if rec.visible ~= nil and rec.visible ~= false then
+            rec.visible = false
+            changed = true
+        elseif rec.visible == nil then
+            -- Some stores only have enabled; still set visible defensively
+            rec.visible = false
+            changed = true
+        end
+    end
+
+    local function scanTable(t, depth, visited)
+        if type(t) ~= "table" then return end
+        visited = visited or {}
+        if visited[t] then return end
+        visited[t] = true
+        depth = depth or 0
+        if depth > 4 then return end
+
+        -- Direct map by uiId
+        if type(t[uiId]) == "table" then
+            patchRecord(t[uiId])
+        end
+
+        for k, v in pairs(t) do
+            -- Common shapes:
+            -- t.records[uiId] = { enabled=..., visible=... }
+            if type(v) == "table" then
+                if type(v[uiId]) == "table" then
+                    patchRecord(v[uiId])
+                end
+                -- Recurse a bit to catch nested stores
+                scanTable(v, depth + 1, visited)
+            end
+        end
+    end
+
+    scanTable(gs, 0, nil)
+    return changed
+end
+
+-- Robustly set gui_settings.visible=false WITHOUT assuming the setVisible signature.
+-- Also aligns our local _state.visible so UI doesn’t render when hidden.
+local function _setVisibleOffSessionBestEffort()
+    local okGS, gs = pcall(require, "dwkit.config.gui_settings")
+    if not okGS or type(gs) ~= "table" then
+        _state.visible = false
+        return
+    end
+
+    -- best-effort: visible persistence noSave (various signatures)
+    if type(gs.enableVisiblePersistence) == "function" then
+        pcall(gs.enableVisiblePersistence, { noSave = true })
+        pcall(gs.enableVisiblePersistence, true)
+        pcall(gs.enableVisiblePersistence, { save = false })
+    end
+
+    local okSet = false
+
+    if type(gs.setVisible) == "function" then
+        if pcall(gs.setVisible, M.UI_ID, false, { noSave = true }) then okSet = true end
+        if (not okSet) and pcall(gs.setVisible, M.UI_ID, false, { save = false }) then okSet = true end
+        if (not okSet) and pcall(gs.setVisible, M.UI_ID, false, false) then okSet = true end
+        if (not okSet) and pcall(gs.setVisible, M.UI_ID, false) then okSet = true end
+    end
+
+    if (not okSet) and type(gs.set) == "function" then
+        if pcall(gs.set, M.UI_ID, "visible", false, { noSave = true }) then okSet = true end
+        if (not okSet) and pcall(gs.set, M.UI_ID, "visible", false, { save = false }) then okSet = true end
+        if (not okSet) and pcall(gs.set, M.UI_ID, "visible", false, false) then okSet = true end
+        if (not okSet) and pcall(gs.set, M.UI_ID, "visible", false) then okSet = true end
+    end
+
+    -- Some builds may treat register as an upsert/patch (save=false keeps session-only).
+    if (not okSet) and type(gs.register) == "function" then
+        pcall(gs.register, M.UI_ID, { visible = false }, { save = false })
+        pcall(gs.register, M.UI_ID, { visible = false }, { noSave = true })
+    end
+
+    -- If getVisible still reads true, force patch internal store tables.
+    if type(gs.getVisible) == "function" then
+        local okV, v = pcall(gs.getVisible, M.UI_ID, nil)
+        if okV and v == true then
+            _forceVisibleFalseDeep(gs)
+        end
+    else
+        -- Even without getVisible, still attempt deep patch.
+        _forceVisibleFalseDeep(gs)
+    end
+
+    _state.visible = false
 end
 
 local function _ensureWidgets()
@@ -123,7 +239,6 @@ local function _ensureWidgets()
             return nil
         end
 
-        -- Create standard DWKit window frame (Adjustable when available)
         local bundle = W.create({
             uiId = M.UI_ID,
             title = "Presence",
@@ -133,7 +248,10 @@ local function _ensureWidgets()
             height = 260,
             padding = 6,
             onClose = function(b)
-                -- Default close behavior: just hide
+                _setVisibleOffSessionBestEffort()
+                _applyViaUiManagerBestEffort("presence_ui:x")
+                _refreshUiManagerUiBestEffort("presence_ui:x")
+
                 if type(b) == "table" and type(b.frame) == "table" then
                     U.safeHide(b.frame)
                 end
@@ -184,7 +302,6 @@ end
 local function _setLabelText(txt)
     local label = _state.widgets.label
 
-    -- Prefer HTML-safe rendering so \n always displays nicely
     if type(label) == "table" and type(label.setText) == "function" then
         pcall(function()
             label:setText(ListKit.toPreHtml(txt))
@@ -192,7 +309,6 @@ local function _setLabelText(txt)
         return
     end
 
-    -- Fallback
     U.safeSetLabelText(label, txt)
 end
 
@@ -245,8 +361,7 @@ local function _ensureSubscription()
         return false, "Presence updated event name not available"
     end
 
-    local handlerFn = function(payload)
-        -- Only render when we are supposed to be visible.
+    local handlerFn = function(_payload)
         if _state.enabled == true and _state.visible == true and type(_state.widgets.label) == "table" then
             _renderFromService()
         end
@@ -354,7 +469,6 @@ function M.apply(opts)
         U.safeHide(_state.widgets.container)
     end
 
-    -- IMPORTANT: quiet-aware
     _out(string.format("[DWKit UI] apply uiId=%s enabled=%s visible=%s action=%s",
         tostring(M.UI_ID),
         tostring(enabled),
@@ -390,7 +504,6 @@ end
 function M.dispose(opts)
     opts = (type(opts) == "table") and opts or {}
 
-    -- Best-effort centralized unsubscribe
     U.unsubscribeServiceUpdates(_state.subscription)
     _state.subscription = nil
 
@@ -401,6 +514,8 @@ function M.dispose(opts)
 
     _state.widgets.label = nil
     _state.widgets.container = nil
+    _state.widgets.content = nil
+    _state.widgets.panel = nil
 
     _state.inited = false
     _state.lastError = nil
