@@ -14,7 +14,7 @@
 --   - Writes only when user clicks Enable/Disable or Show/Hide.
 
 local M = {}
-M.VERSION = "v2026-02-03B"
+M.VERSION = "v2026-02-05C"
 
 local U = require("dwkit.ui.ui_base")
 local Window = require("dwkit.ui.ui_window")
@@ -102,8 +102,6 @@ local function _ensureFrame()
         return false
     end
 
-    -- Window.create returns bundle {frame, content, closeLabel, meta}
-    -- but some code passes the "frame" directly; handle both.
     local root = bundle.content or bundle.frame or bundle
     if not root then
         _state.debug.lastReason = "window_root_missing"
@@ -120,7 +118,6 @@ local function _ensureFrame()
         end
     end)
 
-    -- List root area
     local okList, listRoot = pcall(function()
         if type(ListKit.newListRoot) == "function" then
             return ListKit.newListRoot(root, {
@@ -166,7 +163,6 @@ local function _getAllUiRecords()
 
     for _, uiId in ipairs(keys) do
         uiId = tostring(uiId)
-        -- include everything except self by default (avoid self-lockout surprises)
         if uiId ~= UI_ID then
             outIds[#outIds + 1] = uiId
         end
@@ -182,7 +178,67 @@ local function _applyOneBestEffort(uiId, source)
     end
 end
 
--- Public helper for tests and click handlers
+-- ===== Runtime visibility (truth) =========================================
+
+local function _tryContainerVisibleBestEffort(c)
+    if type(c) ~= "table" then return nil end
+    local ok, v = pcall(function()
+        if type(c.isVisible) == "function" then
+            return c:isVisible()
+        end
+        if c.hidden ~= nil then
+            return not c.hidden
+        end
+        return nil
+    end)
+    if ok then return v end
+    return nil
+end
+
+local function _tryModuleStateVisibleBestEffort(uiId)
+    uiId = tostring(uiId or "")
+    if uiId == "" then return nil end
+
+    local okMod, mod = pcall(require, "dwkit.ui." .. uiId)
+    if not okMod or type(mod) ~= "table" then return nil end
+
+    if type(mod.getState) == "function" then
+        local okS, st = pcall(mod.getState, { quiet = true })
+        if okS and type(st) == "table" then
+            if st.visible ~= nil then return st.visible == true end
+            if st.isVisible ~= nil then return st.isVisible == true end
+            -- common nested shapes
+            if type(st.widgets) == "table" then
+                if st.widgets.visible ~= nil then return st.widgets.visible == true end
+            end
+            -- fallback: if module exposes container/frame in state
+            local c = st.container or st.frame
+            local cv = _tryContainerVisibleBestEffort(c)
+            if cv ~= nil then return cv end
+        end
+    end
+
+    return nil
+end
+
+local function _getRuntimeVisibleBestEffort(uiId)
+    -- 1) module state (best-effort)
+    local mv = _tryModuleStateVisibleBestEffort(uiId)
+    if mv ~= nil then return mv end
+
+    -- 2) ui_base store container/frame (best-effort)
+    local e = (type(U.getUiStoreEntry) == "function") and U.getUiStoreEntry(uiId) or nil
+    if type(e) == "table" then
+        local c = e.container or e.frame
+        local cv = _tryContainerVisibleBestEffort(c)
+        if cv ~= nil then return cv end
+    end
+
+    return nil
+end
+
+-- ==========================================================================
+
 function M.setUiEnabled(uiId, enabled, opts)
     opts = (type(opts) == "table") and opts or {}
     if type(uiId) ~= "string" or uiId == "" then
@@ -194,7 +250,6 @@ function M.setUiEnabled(uiId, enabled, opts)
         return false, "guiSettings not available"
     end
 
-    -- Ensure visible persistence exists so we can force visible OFF when disabling.
     if type(gs.enableVisiblePersistence) == "function" then
         pcall(gs.enableVisiblePersistence, { noSave = true })
     end
@@ -208,7 +263,6 @@ function M.setUiEnabled(uiId, enabled, opts)
         return false, tostring(errE)
     end
 
-    -- When disabling: force visible OFF best-effort (matches your locked semantics)
     if enabled ~= true then
         if type(gs.setVisible) == "function" then
             pcall(gs.setVisible, uiId, false, (opts.noSave == true) and { noSave = true } or nil)
@@ -230,12 +284,10 @@ function M.setUiVisible(uiId, visible, opts)
         return false, "guiSettings not available"
     end
 
-    -- Visible needs persistence ON (session, noSave OK)
     if type(gs.enableVisiblePersistence) == "function" then
         pcall(gs.enableVisiblePersistence, { noSave = true })
     end
 
-    -- Guard: visible toggle only meaningful if enabled=true
     if type(gs.isEnabled) == "function" then
         local okE, v = pcall(gs.isEnabled, uiId, false)
         if okE and v ~= true then
@@ -273,7 +325,7 @@ local function _renderList(uiIds)
         local uiId = uiIds[i]
 
         local enabled = false
-        local visible = false
+        local cfgVisible = false
 
         if type(gs.isEnabled) == "function" then
             local okE, v = pcall(gs.isEnabled, uiId, false)
@@ -281,10 +333,22 @@ local function _renderList(uiIds)
         end
         if type(gs.getVisible) == "function" then
             local okV, v = pcall(gs.getVisible, uiId, false)
-            if okV then visible = (v == true) end
+            if okV then cfgVisible = (v == true) end
         end
 
-        local row = { uiId = uiId, enabled = enabled, visible = visible }
+        -- Runtime truth (best-effort)
+        local runtimeVisible = _getRuntimeVisibleBestEffort(uiId)
+
+        -- What UI Manager shows is runtime-first; fallback to config
+        local shownVisible = (runtimeVisible ~= nil) and runtimeVisible or cfgVisible
+
+        local row = {
+            uiId = uiId,
+            enabled = enabled,
+            visible = cfgVisible,
+            runtimeVisible = runtimeVisible,
+            shownVisible = shownVisible,
+        }
 
         row.container = G.Container:new({
             name = "DWKit_UIManager_Row_" .. tostring(uiId),
@@ -300,7 +364,6 @@ local function _renderList(uiIds)
             end
         end)
 
-        -- Left label: uiId + status
         row.label = G.Label:new({
             name = "DWKit_UIManager_Label_" .. tostring(uiId),
             x = 8,
@@ -309,7 +372,8 @@ local function _renderList(uiIds)
             height = rowH - 10,
         }, row.container)
 
-        local text = string.format("%s  [en:%s vis:%s]", uiId, enabled and "ON" or "OFF", visible and "ON" or "OFF")
+        local rtText = (runtimeVisible == nil) and "?" or (runtimeVisible and "ON" or "OFF")
+        local text = string.format("%s  [en:%s cfg:%s rt:%s]", uiId, enabled and "ON" or "OFF", cfgVisible and "ON" or "OFF", rtText)
         pcall(function()
             if type(ListKit.applyRowTextStyle) == "function" then
                 ListKit.applyRowTextStyle(row.label)
@@ -317,7 +381,6 @@ local function _renderList(uiIds)
             row.label:echo(text)
         end)
 
-        -- Button 1: Enable/Disable
         local btnEnLabel = enabled and "Disable" or "Enable"
         row.btnEnable = G.Label:new({
             name = "DWKit_UIManager_BtnEnable_" .. tostring(uiId),
@@ -332,8 +395,8 @@ local function _renderList(uiIds)
             row.btnEnable:echo(btnEnLabel)
         end)
 
-        -- Button 2: Show/Hide (only active when enabled)
-        local btnVisLabel = visible and "Hide" or "Show"
+        -- IMPORTANT: label uses runtime-truth if known
+        local btnVisLabel = row.shownVisible and "Hide" or "Show"
         row.btnVisible = G.Label:new({
             name = "DWKit_UIManager_BtnVisible_" .. tostring(uiId),
             x = "-110px",
@@ -365,11 +428,11 @@ local function _renderList(uiIds)
 
         local function _onToggleVisible()
             if enabled ~= true then
-                -- Guard: disabled UI cannot be shown
                 return
             end
 
-            local newVisible = not visible
+            -- Toggle is still config-driven (intent), but label is runtime-truth
+            local newVisible = not cfgVisible
             _state.debug.lastAction = string.format("toggle-visible %s -> %s", tostring(uiId), tostring(newVisible))
 
             local okSet, errSet = M.setUiVisible(uiId, newVisible, { source = "ui_manager_ui:toggleVisible" })
@@ -428,7 +491,6 @@ function M.apply(opts)
     _state.renderedUiIds = uiIds
     _state.widgets.rowCount = #uiIds
 
-    -- If visible OFF: keep hidden but keep state updated.
     if _state.visible ~= true then
         _clearRows()
         if _frame then pcall(function() _frame:hide() end) end

@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_base
 -- Owner       : UI
--- Version     : v2026-01-16B
+-- Version     : v2026-02-06A
 -- Purpose     :
 --   - Shared SAFE helper utilities for DWKit UI modules.
 --   - Avoids copy/paste across UI modules (store, widgets, show/hide/delete, etc).
@@ -15,6 +15,9 @@
 --   - getGuiSettingsBestEffort() -> table|nil
 --   - getGeyser() -> table|nil
 --   - getUiStore() -> table|nil
+--   - getUiStoreEntry(uiId) -> table|nil
+--   - ensureUiStoreEntry(uiId) -> table|nil
+--   - setUiRuntime(uiId, rt) -> boolean ok
 --   - safeHide(widget)
 --   - safeShow(widget)
 --   - safeDelete(widget)
@@ -33,7 +36,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-16B"
+M.VERSION = "v2026-02-06A"
 
 local function _isNonEmptyString(s)
     return type(s) == "string" and s ~= ""
@@ -83,6 +86,63 @@ function M.getUiStore()
         _G.DWKit._uiStore = {}
     end
     return _G.DWKit._uiStore
+end
+
+-- Stable accessor (may return nil if not created yet)
+function M.getUiStoreEntry(uiId)
+    if not _isNonEmptyString(uiId) then return nil end
+    local store = M.getUiStore()
+    if type(store) ~= "table" then return nil end
+    local e = store[uiId]
+    if type(e) == "table" then return e end
+    return nil
+end
+
+-- Deterministic entry creator (never returns non-table)
+function M.ensureUiStoreEntry(uiId)
+    if not _isNonEmptyString(uiId) then return nil end
+    local store = M.getUiStore()
+    if type(store) ~= "table" then return nil end
+
+    local e = store[uiId]
+    if type(e) ~= "table" then
+        -- If legacy code stored a non-table, preserve it in __legacy
+        local legacy = e
+        e = {}
+        if legacy ~= nil then
+            e.__legacy = legacy
+        end
+        store[uiId] = e
+    end
+
+    -- Ensure deterministic identity fields exist
+    if e.uiId == nil then e.uiId = uiId end
+    if e.createdAt == nil then
+        e.createdAt = (type(_G.getEpoch) == "function" and _G.getEpoch()) or os.time()
+    end
+    e.updatedAt = (type(_G.getEpoch) == "function" and _G.getEpoch()) or os.time()
+
+    return e
+end
+
+-- Store runtime handles deterministically (frame/container/nameFrame/etc)
+-- rt = { frame=?, container=?, nameFrame=?, nameContent=?, meta=? }
+function M.setUiRuntime(uiId, rt)
+    if not _isNonEmptyString(uiId) then return false end
+    if type(rt) ~= "table" then return false end
+
+    local e = M.ensureUiStoreEntry(uiId)
+    if type(e) ~= "table" then return false end
+
+    -- Merge without destroying existing widget keys from ensureWidgets users
+    if rt.frame ~= nil then e.frame = rt.frame end
+    if rt.container ~= nil then e.container = rt.container end
+    if _isNonEmptyString(rt.nameFrame) then e.nameFrame = rt.nameFrame end
+    if _isNonEmptyString(rt.nameContent) then e.nameContent = rt.nameContent end
+    if type(rt.meta) == "table" then e.meta = rt.meta end
+
+    e.runtimeUpdatedAt = (type(_G.getEpoch) == "function" and _G.getEpoch()) or os.time()
+    return true
 end
 
 function M.clearUiStoreEntry(uiId)
@@ -137,10 +197,41 @@ local function _hasRequiredKeys(t, requiredKeys)
     return true
 end
 
+local function _stampIdentityFieldsBestEffort(e, uiId)
+    if type(e) ~= "table" then return end
+    e.uiId = e.uiId or uiId
+    if e.createdAt == nil then
+        e.createdAt = (type(_G.getEpoch) == "function" and _G.getEpoch()) or os.time()
+    end
+    e.updatedAt = (type(_G.getEpoch) == "function" and _G.getEpoch()) or os.time()
+end
+
+local function _mergeIntoEntryBestEffort(entry, widgets)
+    if type(entry) ~= "table" or type(widgets) ~= "table" then
+        return false
+    end
+
+    -- Merge: do not wipe existing keys (runtime identity, etc).
+    for k, v in pairs(widgets) do
+        entry[k] = v
+    end
+
+    return true
+end
+
 -- ensureWidgets
 -- - Reuses widgets from global store if present and valid
 -- - Otherwise creates new via createFn()
 -- Returns: ok, widgets, err
+--
+-- NOTE:
+--   store[uiId] remains a TABLE to preserve compatibility.
+--   We allow additional runtime/meta keys (frame/container/nameFrame/etc) on the same table.
+--
+-- IMPORTANT (v2026-02-06A):
+--   We now MERGE newly created widgets into an existing store entry (if any)
+--   instead of replacing store[uiId] with a new table. This prevents loss of
+--   runtime identity fields set by ui_window (nameFrame/meta/closeLabel/etc).
 function M.ensureWidgets(uiId, requiredKeys, createFn)
     if not _isNonEmptyString(uiId) then
         return false, nil, "uiId invalid"
@@ -150,27 +241,43 @@ function M.ensureWidgets(uiId, requiredKeys, createFn)
     end
 
     local store = M.getUiStore()
+
+    -- If an entry exists and already has required keys, reuse it.
     if type(store) == "table" and type(store[uiId]) == "table" then
         local cached = store[uiId]
         if _hasRequiredKeys(cached, requiredKeys) then
+            _stampIdentityFieldsBestEffort(cached, uiId)
             return true, cached, nil
         end
     end
 
     local okCreate, widgetsOrErr = pcall(createFn)
     if not okCreate or type(widgetsOrErr) ~= "table" then
+        -- Still ensure deterministic store entry exists for debugging
+        M.ensureUiStoreEntry(uiId)
         return false, nil, "createFn failed"
     end
 
     if not _hasRequiredKeys(widgetsOrErr, requiredKeys) then
+        M.ensureUiStoreEntry(uiId)
         return false, nil, "createFn returned incomplete widgets"
     end
 
-    if type(store) == "table" then
-        store[uiId] = widgetsOrErr
+    -- Ensure we have a stable entry table, then merge created widgets into it.
+    local entry = M.ensureUiStoreEntry(uiId)
+    if type(entry) ~= "table" then
+        return false, nil, "store entry missing"
     end
 
-    return true, widgetsOrErr, nil
+    _mergeIntoEntryBestEffort(entry, widgetsOrErr)
+    _stampIdentityFieldsBestEffort(entry, uiId)
+
+    -- Ensure store points to the stable entry (defensive)
+    if type(store) == "table" then
+        store[uiId] = entry
+    end
+
+    return true, entry, nil
 end
 
 -- =========================================================================

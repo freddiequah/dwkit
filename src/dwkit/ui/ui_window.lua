@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_window
 -- Owner       : UI
--- Version     : v2026-02-05D
+-- Version     : v2026-02-05E
 -- Purpose     :
 --   - Shared DWKit "frame" creator:
 --       * Prefer Adjustable.Container (movable/resizable + autoSave/autoLoad)
@@ -36,7 +36,7 @@ local Theme = require("dwkit.ui.ui_theme")
 
 local M = {}
 
-M.VERSION = "v2026-02-05D"
+M.VERSION = "v2026-02-05E"
 
 local function _pcall(fn, ...)
     local ok, res = pcall(fn, ...)
@@ -91,6 +91,42 @@ local function _applyHideViaUiManagerBestEffort(uiId)
         pcall(function()
             UM.applyOne(uiId, { source = "ui_window:x", quiet = true })
         end)
+    end
+end
+
+-- Best-effort: register runtime frame in Geyser maps + store into ui_base
+local function _registerRuntimeBestEffort(bundle)
+    if type(bundle) ~= "table" or type(bundle.meta) ~= "table" then return end
+    local uiId = tostring(bundle.meta.uiId or "")
+    local nameFrame = tostring(bundle.meta.nameFrame or "")
+    local nameContent = tostring(bundle.meta.nameContent or "")
+    local frame = bundle.frame
+
+    -- 1) Geyser maps for discoverability (best-effort only)
+    local G = _G.Geyser
+    if type(G) == "table" and nameFrame ~= "" and type(frame) == "table" then
+        if type(G.windows) == "table" then
+            pcall(function() G.windows[nameFrame] = frame end)
+        end
+        if type(G.containers) == "table" then
+            pcall(function() G.containers[nameFrame] = frame end)
+        end
+    end
+
+    -- 2) Deterministic store entry (best-effort only)
+    if uiId ~= "" then
+        local okU, U = pcall(require, "dwkit.ui.ui_base")
+        if okU and type(U) == "table" and type(U.setUiRuntime) == "function" then
+            pcall(function()
+                U.setUiRuntime(uiId, {
+                    frame = frame,
+                    container = frame,
+                    nameFrame = (nameFrame ~= "" and nameFrame) or nil,
+                    nameContent = (nameContent ~= "" and nameContent) or nil,
+                    meta = bundle.meta,
+                })
+            end)
+        end
     end
 end
 
@@ -328,6 +364,9 @@ function M.create(opts)
         bundle.closeLabel = close
         bundle.meta.adjustable = false
     end
+
+    -- IMPORTANT: make runtime discoverable + stored deterministically
+    _registerRuntimeBestEffort(bundle)
 
     local onClose = opts.onClose
     if type(onClose) ~= "function" then
