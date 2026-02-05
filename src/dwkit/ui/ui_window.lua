@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_window
 -- Owner       : UI
--- Version     : v2026-01-28A
+-- Version     : v2026-02-05D
 -- Purpose     :
 --   - Shared DWKit "frame" creator:
 --       * Prefer Adjustable.Container (movable/resizable + autoSave/autoLoad)
@@ -36,7 +36,7 @@ local Theme = require("dwkit.ui.ui_theme")
 
 local M = {}
 
-M.VERSION = "v2026-01-28A"
+M.VERSION = "v2026-02-05D"
 
 local function _pcall(fn, ...)
     local ok, res = pcall(fn, ...)
@@ -44,12 +44,60 @@ local function _pcall(fn, ...)
     return false, res
 end
 
+-- -------------------------------------------------------------------------
+-- X button semantics:
+--   Clicking X is a "Hide" action (session-only), NOT "Disable".
+--   We (1) set gui_settings.visible=false with noSave, then (2) best-effort
+--   route the hide through ui_manager.applyOne(uiId) so module runtime state
+--   and UI Manager rows stay consistent immediately.
+-- -------------------------------------------------------------------------
+
+local function _getGuiSettingsSingletonBestEffort()
+    if type(_G.DWKit) == "table"
+        and type(_G.DWKit.config) == "table"
+        and type(_G.DWKit.config.guiSettings) == "table"
+    then
+        return _G.DWKit.config.guiSettings
+    end
+    local okGS, gsOrErr = pcall(require, "dwkit.config.gui_settings")
+    if okGS and type(gsOrErr) == "table" then
+        return gsOrErr
+    end
+    return nil
+end
+
+local function _syncVisibleOffSessionBestEffort(uiId)
+    uiId = tostring(uiId or "")
+    if uiId == "" then return end
+
+    local gs = _getGuiSettingsSingletonBestEffort()
+    if type(gs) ~= "table" then return end
+
+    if type(gs.enableVisiblePersistence) == "function" then
+        pcall(gs.enableVisiblePersistence, { noSave = true })
+    end
+
+    if type(gs.setVisible) == "function" then
+        pcall(gs.setVisible, uiId, false, { noSave = true })
+    end
+end
+
+local function _applyHideViaUiManagerBestEffort(uiId)
+    uiId = tostring(uiId or "")
+    if uiId == "" then return end
+
+    local okUM, UM = pcall(require, "dwkit.ui.ui_manager")
+    if okUM and type(UM) == "table" and type(UM.applyOne) == "function" then
+        pcall(function()
+            UM.applyOne(uiId, { source = "ui_window:x", quiet = true })
+        end)
+    end
+end
+
 function M.getProfileTagBestEffort()
-    -- Prefer Mudlet profile name if available
     if type(_G.getProfileName) == "function" then
         local ok, v = _pcall(_G.getProfileName)
         if ok and type(v) == "string" and v ~= "" then
-            -- Normalize to something filename-ish / widget-name-safe
             v = v:gsub("%s+", "_")
             v = v:gsub("[^%w_%-]", "")
             if v ~= "" then return v end
@@ -79,16 +127,13 @@ function M.hideMinimizeChromeBestEffort(container)
 end
 
 local function _getAdjustableBestEffort()
-    -- Most Mudlet installs expose Adjustable as a global when installed.
     if type(_G.Adjustable) == "table" and type(_G.Adjustable.Container) == "table" then
         return _G.Adjustable
     end
 
-    -- Best-effort require
     if type(_G.require) == "function" then
         local ok, mod = pcall(require, "Adjustable.Container")
         if ok and mod then
-            -- Some versions return the module directly; some return a table with .Container
             if type(mod) == "table" and type(mod.Container) == "table" then
                 return mod
             end
@@ -102,10 +147,6 @@ local function _getAdjustableBestEffort()
 end
 
 local function _resolveInsideParent(frame)
-    -- dwkit.txt pattern:
-    --   parentForContent =
-    --     (frame.window and (frame.window.Inside or frame.window.inside or frame.window))
-    --     or frame.Inside or frame.inside or frame
     if type(frame) ~= "table" then return frame end
 
     if type(frame.window) == "table" then
@@ -126,6 +167,31 @@ local function _applyFrameStyleBestEffort(frame)
     if type(frame.window) == "table" and type(frame.window.setStyleSheet) == "function" then
         pcall(function() frame.window:setStyleSheet(Theme.frameStyle()) end)
     end
+end
+
+local function _wireClickBestEffort(labelObj, fn)
+    if type(labelObj) ~= "table" or type(fn) ~= "function" then return false end
+
+    local wired = false
+
+    if type(labelObj.setClickCallback) == "function" then
+        local ok = pcall(function()
+            labelObj:setClickCallback(fn)
+        end)
+        wired = wired or (ok == true)
+    end
+
+    if not wired then
+        local name = tostring(labelObj.name or "")
+        if name ~= "" and type(_G.setLabelClickCallback) == "function" then
+            local ok = pcall(function()
+                _G.setLabelClickCallback(name, fn)
+            end)
+            wired = wired or (ok == true)
+        end
+    end
+
+    return wired
 end
 
 function M.create(opts)
@@ -168,7 +234,6 @@ function M.create(opts)
 
     local Adjustable = _getAdjustableBestEffort()
     if type(Adjustable) == "table" and type(Adjustable.Container) == "table" and type(Adjustable.Container.new) == "function" then
-        -- Use Adjustable.Container (movable/resizable)
         local frame = Adjustable.Container:new({
             name = nameFrame,
             x = opts.x or 30,
@@ -196,6 +261,9 @@ function M.create(opts)
 
         if type(frame) == "table" then
             bundle.closeLabel = frame.closeLabel
+            if type(bundle.closeLabel) ~= "table" and type(frame.window) == "table" then
+                bundle.closeLabel = frame.window.closeLabel
+            end
         end
 
         _applyFrameStyleBestEffort(frame)
@@ -212,7 +280,6 @@ function M.create(opts)
 
         bundle.content = content
     else
-        -- Fallback: plain container (still themed)
         local frame = G.Container:new({
             name = nameFrame,
             x = opts.x or 30,
@@ -262,7 +329,6 @@ function M.create(opts)
         bundle.meta.adjustable = false
     end
 
-    -- Wire close action
     local onClose = opts.onClose
     if type(onClose) ~= "function" then
         onClose = function(b)
@@ -272,12 +338,15 @@ function M.create(opts)
         end
     end
 
-    if type(bundle.closeLabel) == "table" and type(bundle.closeLabel.setClickCallback) == "function" then
-        pcall(function()
-            bundle.closeLabel:setClickCallback(function()
-                onClose(bundle)
-            end)
-        end)
+    local function _onXClicked()
+        local id = (bundle.meta and bundle.meta.uiId) or uiId
+        _syncVisibleOffSessionBestEffort(id)
+        _applyHideViaUiManagerBestEffort(id)
+        onClose(bundle)
+    end
+
+    if type(bundle.closeLabel) == "table" then
+        _wireClickBestEffort(bundle.closeLabel, _onXClicked)
     end
 
     return bundle

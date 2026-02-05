@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.config.gui_settings
 -- Owner       : Config
--- Version     : v2026-02-03D
+-- Version     : v2026-02-03E
 -- Purpose     :
 --   - Provide per-profile GUI settings storage for DWKit UI modules.
 --   - Owns "enabled" (mandatory) and "visible" (optional) flags per UI id.
@@ -41,11 +41,34 @@
 --       * if a record has explicit visible=true/false, use it
 --       * if a record has visible=nil (unset), return options.visibleDefault (default false)
 --     This avoids "third state" nil surprises (e.g., disable expects visible=OFF).
+--
+-- SINGLETON NOTE (v2026-02-03E):
+--   - gui_settings must be a singleton for the entire session.
+--   - Some manual reload workflows clear package.loaded[...] which can accidentally create a
+--     second instance, causing UI Manager and checks to disagree.
+--   - If _G.DWKit.config.guiSettings already exists, return it instead of creating a new instance.
 -- #########################################################################
+
+-- -------------------------------------------------------------------------
+-- Singleton guard: if a canonical instance exists, always return it.
+-- -------------------------------------------------------------------------
+do
+    local DW = (type(_G.DWKit) == "table") and _G.DWKit or nil
+    local cfg = (DW and type(DW.config) == "table") and DW.config or nil
+    local existing = (cfg and type(cfg.guiSettings) == "table") and cfg.guiSettings or nil
+    if type(existing) == "table"
+        and type(existing.getModuleVersion) == "function"
+        and type(existing.load) == "function"
+        and type(existing.isEnabled) == "function"
+        and type(existing.getVisible) == "function"
+    then
+        return existing
+    end
+end
 
 local M = {}
 
-M.VERSION = "v2026-02-03D"
+M.VERSION = "v2026-02-03E"
 M.SCHEMA_VERSION = "v0.1"
 
 local ID = require("dwkit.core.identity")
@@ -223,7 +246,6 @@ local function _mergeSessionVisible(oldData, newData, forceVisible)
     if type(oldData) ~= "table" or type(newData) ~= "table" then return end
     if type(oldData.ui) ~= "table" or type(newData.ui) ~= "table" then return end
 
-    -- Preserve per-ui visible flags that existed in-memory (noSave) if newly loaded rec has nil visible.
     for uiId, oldRec in pairs(oldData.ui) do
         if type(uiId) == "string" and type(oldRec) == "table" then
             local newRec = newData.ui[uiId]
@@ -248,17 +270,12 @@ function M.load(opts)
     opts = opts or {}
     local relPath = _resolveRelPath(opts)
 
-    -- Force visible persistence if:
-    -- 1) caller explicitly asks, OR
-    -- 2) session flag already enabled, OR
-    -- 3) current in-memory options already has it enabled
     local forceVisible = (
         (type(opts) == "table" and opts.visiblePersistenceEnabled == true) or
         (_state.sessionVisiblePersistenceEnabled == true) or
         (_getVisiblePersistenceEnabledNow() == true)
     ) and true or false
 
-    -- Keep a copy of previous in-memory state to preserve noSave visible flags across reloads.
     local oldData = _state.data
 
     local okStore, store, storeErr = _getStoreBestEffort()
@@ -448,10 +465,8 @@ function M.getVisible(uiId, default)
                 if rec.visible ~= nil then
                     return (rec.visible == true)
                 end
-                -- Visible persistence ON but value unset: return visibleDefault.
                 return (_state.data.options.visibleDefault == true)
             end
-            -- No record: return visibleDefault when persistence ON.
             return (_state.data.options.visibleDefault == true)
         end
     end
@@ -462,7 +477,6 @@ end
 function M.enableVisiblePersistence(opts)
     opts = opts or {}
 
-    -- Sticky for runtime session even if opts.noSave=true.
     _state.sessionVisiblePersistenceEnabled = true
 
     if _state.loaded ~= true then
@@ -524,7 +538,6 @@ function M.list()
         if type(uiId) == "string" and type(rec) == "table" then
             local v = nil
             if visOn then
-                -- When persistence is ON, list() must always show an explicit boolean.
                 if rec.visible == true then
                     v = true
                 elseif rec.visible == false then
@@ -617,6 +630,15 @@ function M.selfTestPersistenceSmoke(opts)
 
     pcall(store.delete, relPath)
     return true, nil
+end
+
+-- -------------------------------------------------------------------------
+-- Publish canonical singleton reference
+-- -------------------------------------------------------------------------
+do
+    _G.DWKit = (type(_G.DWKit) == "table") and _G.DWKit or {}
+    _G.DWKit.config = (type(_G.DWKit.config) == "table") and _G.DWKit.config or {}
+    _G.DWKit.config.guiSettings = M
 end
 
 return M
