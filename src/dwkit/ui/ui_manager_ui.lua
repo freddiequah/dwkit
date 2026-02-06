@@ -12,9 +12,25 @@
 --   - No gameplay commands.
 --   - No timers/automation.
 --   - Writes only when user clicks Enable/Disable or Show/Hide.
+--
+-- Key Fixes:
+--   v2026-02-06E:
+--     - Added refresh(): redraw rows without enforcing gui_settings.visible(ui_manager_ui).
+--       This prevents "refresh" calls from closing the UI Manager window.
+--   v2026-02-06F:
+--     - FIX: Always use dwkit.config.gui_settings module instance for list/get/set.
+--   v2026-02-06G:
+--     - FIX: Self-heal if gs.list() returns empty at render time (bootstrap from ui_manager runtime registry).
+--   v2026-02-06H:
+--     - FIX: Treat "list has ONLY ui_manager_ui" as effectively empty, then bootstrap.
+--     - Add debug capture of raw gs.list keys and filtered ids to explain rowCount=0 cases.
+--   v2026-02-06I:
+--     - FIX: _clearRows() was resetting state (rowCount/renderedUiIds) during redraw, making getState() report 0 rows.
+--       Now: redraw-clear keeps state; rowCount is set after rendering.
+--     - HARDEN: do not call GS.load() on every access if already loaded (prevents accidental registry wipe on redraw).
 
 local M = {}
-M.VERSION = "v2026-02-05C"
+M.VERSION = "v2026-02-06I"
 
 local U = require("dwkit.ui.ui_base")
 local Window = require("dwkit.ui.ui_window")
@@ -44,8 +60,34 @@ local _state = {
     debug = {
         lastReason = nil,
         lastAction = nil,
+        lastBootstrap = nil,
+
+        -- deep diagnostics
+        lastGsListCount = nil,
+        lastGsListKeys = nil,  -- comma string
+        lastFilteredCount = nil,
+        lastFilteredIds = nil, -- comma string
     },
 }
+
+local function _getGuiSettingsModuleBestEffort()
+    local ok, GS = pcall(require, "dwkit.config.gui_settings")
+    if ok and type(GS) == "table" then
+        -- Important: avoid calling load() repeatedly during redraw.
+        local loaded = nil
+        if type(GS.isLoaded) == "function" then
+            local okL, v = pcall(GS.isLoaded)
+            if okL then loaded = (v == true) end
+        end
+
+        if loaded ~= true and type(GS.load) == "function" then
+            pcall(GS.load)
+        end
+
+        return GS
+    end
+    return nil
+end
 
 local function _sortedKeys(t)
     local keys = {}
@@ -70,15 +112,21 @@ local function _disposeFrame()
     _state.renderedUiIds = {}
 end
 
-local function _clearRows()
+local function _clearRows(opts)
+    opts = (type(opts) == "table") and opts or {}
+    local keepState = (opts.keepState == true)
+
     for _, row in ipairs(_rows) do
         if row and row.container then
             pcall(function() row.container:delete() end)
         end
     end
     _rows = {}
-    _state.widgets.rowCount = 0
-    _state.renderedUiIds = {}
+
+    if not keepState then
+        _state.widgets.rowCount = 0
+        _state.renderedUiIds = {}
+    end
 end
 
 local function _ensureFrame()
@@ -147,27 +195,113 @@ local function _ensureFrame()
     return true
 end
 
-local function _getAllUiRecords()
-    local gs = U.getGuiSettingsBestEffort()
+-- -----------------------------------------------------------------------------
+-- Self-heal bootstrap from ui_manager runtime registry.
+-- "Effectively empty" means:
+--   - gs.list() truly empty, OR
+--   - gs.list() contains ONLY ui_manager_ui.
+-- -----------------------------------------------------------------------------
+local function _bootstrapUiRecordsBestEffort(gs, listKeys)
     if type(gs) ~= "table" or type(gs.list) ~= "function" then
+        return false, "gs_invalid"
+    end
+
+    listKeys = (type(listKeys) == "table") and listKeys or {}
+
+    local onlySelf = (#listKeys == 1 and tostring(listKeys[1]) == UI_ID) or false
+    local isEmpty = (#listKeys == 0) or false
+    if not isEmpty and not onlySelf then
+        _state.debug.lastBootstrap = "skip_nonempty"
+        return false, "skip_nonempty"
+    end
+
+    local okMgr, mgr = pcall(require, "dwkit.ui.ui_manager")
+    if not okMgr or type(mgr) ~= "table" then
+        _state.debug.lastBootstrap = "mgr_missing"
+        return false, "mgr_missing"
+    end
+
+    local st = nil
+    if type(mgr.getState) == "function" then
+        local okS, v = pcall(mgr.getState, { quiet = true })
+        if okS and type(v) == "table" then st = v end
+    end
+
+    local uis = (type(st) == "table") and st.uis or nil
+    if type(uis) ~= "table" then
+        _state.debug.lastBootstrap = "mgr_uis_missing"
+        return false, "mgr_uis_missing"
+    end
+
+    if type(gs.register) ~= "function" then
+        _state.debug.lastBootstrap = "gs_register_missing"
+        return false, "gs_register_missing"
+    end
+
+    local seeded = 0
+    for uiId, _ in pairs(uis) do
+        uiId = tostring(uiId or "")
+        if uiId ~= "" and uiId ~= UI_ID then
+            local okR = pcall(gs.register, uiId, { enabled = false }, { save = false })
+            if okR then seeded = seeded + 1 end
+        end
+    end
+
+    -- Ensure UI Manager itself exists too (in case other code expects it)
+    pcall(gs.register, UI_ID, { enabled = true }, { save = false })
+
+    _state.debug.lastBootstrap = "seeded_" .. tostring(seeded) .. (onlySelf and "_from_onlySelf" or "_from_empty")
+    return true, _state.debug.lastBootstrap
+end
+
+local function _captureListDebug(keys, filtered)
+    local function _join(t)
+        if type(t) ~= "table" or #t == 0 then return "" end
+        return table.concat(t, ",")
+    end
+    _state.debug.lastGsListCount = (type(keys) == "table") and #keys or 0
+    _state.debug.lastGsListKeys = _join(keys)
+    _state.debug.lastFilteredCount = (type(filtered) == "table") and #filtered or 0
+    _state.debug.lastFilteredIds = _join(filtered)
+end
+
+local function _getAllUiRecords()
+    local gs = _getGuiSettingsModuleBestEffort()
+    if type(gs) ~= "table" or type(gs.list) ~= "function" then
+        _captureListDebug({}, {})
         return {}
     end
 
+    -- 1) Read raw list
     local ok, uiMap = pcall(gs.list)
     if not ok or type(uiMap) ~= "table" then
+        _captureListDebug({}, {})
         return {}
     end
 
     local keys = _sortedKeys(uiMap)
+
+    -- 2) Bootstrap if empty or only-self
+    pcall(_bootstrapUiRecordsBestEffort, gs, keys)
+
+    -- 3) Re-read after bootstrap attempt
+    local ok2, uiMap2 = pcall(gs.list)
+    if not ok2 or type(uiMap2) ~= "table" then
+        _captureListDebug(keys, {})
+        return {}
+    end
+
+    local keys2 = _sortedKeys(uiMap2)
     local outIds = {}
 
-    for _, uiId in ipairs(keys) do
+    for _, uiId in ipairs(keys2) do
         uiId = tostring(uiId)
         if uiId ~= UI_ID then
             outIds[#outIds + 1] = uiId
         end
     end
 
+    _captureListDebug(keys2, outIds)
     return outIds
 end
 
@@ -195,6 +329,16 @@ local function _tryContainerVisibleBestEffort(c)
     return nil
 end
 
+local function _tryStoreVisibleBestEffort(uiId)
+    if type(U.getUiStoreEntry) ~= "function" then return nil end
+    local okE, e = pcall(U.getUiStoreEntry, uiId)
+    if not okE or type(e) ~= "table" then return nil end
+    local c = e.container or e.frame
+    local cv = _tryContainerVisibleBestEffort(c)
+    if cv ~= nil then return cv end
+    return nil
+end
+
 local function _tryModuleStateVisibleBestEffort(uiId)
     uiId = tostring(uiId or "")
     if uiId == "" then return nil end
@@ -207,11 +351,9 @@ local function _tryModuleStateVisibleBestEffort(uiId)
         if okS and type(st) == "table" then
             if st.visible ~= nil then return st.visible == true end
             if st.isVisible ~= nil then return st.isVisible == true end
-            -- common nested shapes
-            if type(st.widgets) == "table" then
-                if st.widgets.visible ~= nil then return st.widgets.visible == true end
+            if type(st.widgets) == "table" and st.widgets.visible ~= nil then
+                return st.widgets.visible == true
             end
-            -- fallback: if module exposes container/frame in state
             local c = st.container or st.frame
             local cv = _tryContainerVisibleBestEffort(c)
             if cv ~= nil then return cv end
@@ -222,17 +364,11 @@ local function _tryModuleStateVisibleBestEffort(uiId)
 end
 
 local function _getRuntimeVisibleBestEffort(uiId)
-    -- 1) module state (best-effort)
+    local sv = _tryStoreVisibleBestEffort(uiId)
+    if sv ~= nil then return sv end
+
     local mv = _tryModuleStateVisibleBestEffort(uiId)
     if mv ~= nil then return mv end
-
-    -- 2) ui_base store container/frame (best-effort)
-    local e = (type(U.getUiStoreEntry) == "function") and U.getUiStoreEntry(uiId) or nil
-    if type(e) == "table" then
-        local c = e.container or e.frame
-        local cv = _tryContainerVisibleBestEffort(c)
-        if cv ~= nil then return cv end
-    end
 
     return nil
 end
@@ -245,7 +381,7 @@ function M.setUiEnabled(uiId, enabled, opts)
         return false, "uiId invalid"
     end
 
-    local gs = U.getGuiSettingsBestEffort()
+    local gs = _getGuiSettingsModuleBestEffort()
     if type(gs) ~= "table" then
         return false, "guiSettings not available"
     end
@@ -279,7 +415,7 @@ function M.setUiVisible(uiId, visible, opts)
         return false, "uiId invalid"
     end
 
-    local gs = U.getGuiSettingsBestEffort()
+    local gs = _getGuiSettingsModuleBestEffort()
     if type(gs) ~= "table" then
         return false, "guiSettings not available"
     end
@@ -310,11 +446,14 @@ end
 
 local function _renderList(uiIds)
     if not _listRoot then return end
-    _clearRows()
 
-    local gs = U.getGuiSettingsBestEffort()
+    -- Redraw clear should NOT reset renderedUiIds/rowCount mid-flight.
+    _clearRows({ keepState = true })
+
+    local gs = _getGuiSettingsModuleBestEffort()
     if type(gs) ~= "table" then
         _state.debug.lastReason = "guiSettings_missing"
+        _state.widgets.rowCount = 0
         return
     end
 
@@ -336,10 +475,7 @@ local function _renderList(uiIds)
             if okV then cfgVisible = (v == true) end
         end
 
-        -- Runtime truth (best-effort)
         local runtimeVisible = _getRuntimeVisibleBestEffort(uiId)
-
-        -- What UI Manager shows is runtime-first; fallback to config
         local shownVisible = (runtimeVisible ~= nil) and runtimeVisible or cfgVisible
 
         local row = {
@@ -373,7 +509,8 @@ local function _renderList(uiIds)
         }, row.container)
 
         local rtText = (runtimeVisible == nil) and "?" or (runtimeVisible and "ON" or "OFF")
-        local text = string.format("%s  [en:%s cfg:%s rt:%s]", uiId, enabled and "ON" or "OFF", cfgVisible and "ON" or "OFF", rtText)
+        local text = string.format("%s  [en:%s cfg:%s rt:%s]", uiId, enabled and "ON" or "OFF",
+            cfgVisible and "ON" or "OFF", rtText)
         pcall(function()
             if type(ListKit.applyRowTextStyle) == "function" then
                 ListKit.applyRowTextStyle(row.label)
@@ -395,7 +532,6 @@ local function _renderList(uiIds)
             row.btnEnable:echo(btnEnLabel)
         end)
 
-        -- IMPORTANT: label uses runtime-truth if known
         local btnVisLabel = row.shownVisible and "Hide" or "Show"
         row.btnVisible = G.Label:new({
             name = "DWKit_UIManager_BtnVisible_" .. tostring(uiId),
@@ -417,9 +553,11 @@ local function _renderList(uiIds)
             local okSet, errSet = M.setUiEnabled(uiId, newEnabled, { source = "ui_manager_ui:toggleEnabled" })
             if not okSet then
                 if type(cecho) == "function" then
-                    cecho("[DWKit UI] ui_manager_ui: enable toggle failed uiId=" .. tostring(uiId) .. " err=" .. tostring(errSet) .. "\n")
+                    cecho("[DWKit UI] ui_manager_ui: enable toggle failed uiId=" ..
+                        tostring(uiId) .. " err=" .. tostring(errSet) .. "\n")
                 else
-                    print("[DWKit UI] ui_manager_ui: enable toggle failed uiId=" .. tostring(uiId) .. " err=" .. tostring(errSet))
+                    print("[DWKit UI] ui_manager_ui: enable toggle failed uiId=" ..
+                        tostring(uiId) .. " err=" .. tostring(errSet))
                 end
             end
 
@@ -431,16 +569,17 @@ local function _renderList(uiIds)
                 return
             end
 
-            -- Toggle is still config-driven (intent), but label is runtime-truth
             local newVisible = not cfgVisible
             _state.debug.lastAction = string.format("toggle-visible %s -> %s", tostring(uiId), tostring(newVisible))
 
             local okSet, errSet = M.setUiVisible(uiId, newVisible, { source = "ui_manager_ui:toggleVisible" })
             if not okSet then
                 if type(cecho) == "function" then
-                    cecho("[DWKit UI] ui_manager_ui: visible toggle failed uiId=" .. tostring(uiId) .. " err=" .. tostring(errSet) .. "\n")
+                    cecho("[DWKit UI] ui_manager_ui: visible toggle failed uiId=" ..
+                        tostring(uiId) .. " err=" .. tostring(errSet) .. "\n")
                 else
-                    print("[DWKit UI] ui_manager_ui: visible toggle failed uiId=" .. tostring(uiId) .. " err=" .. tostring(errSet))
+                    print("[DWKit UI] ui_manager_ui: visible toggle failed uiId=" ..
+                        tostring(uiId) .. " err=" .. tostring(errSet))
                 end
             end
 
@@ -462,13 +601,35 @@ local function _renderList(uiIds)
         _rows[#_rows + 1] = row
         y = y + rowH
     end
+
+    -- After render: reflect truth for dwtest FINAL gate.
+    _state.widgets.rowCount = #uiIds
+end
+
+function M.refresh(opts)
+    opts = (type(opts) == "table") and opts or {}
+    _state.lastApplySource = opts.source or _state.lastApplySource
+
+    if not _frame or _state.inited ~= true then
+        _state.debug.lastReason = "refresh_not_open"
+        return false, "not_open"
+    end
+
+    local uiIds = _getAllUiRecords()
+    _state.renderedUiIds = uiIds
+
+    pcall(function() _frame:show() end)
+    _renderList(uiIds)
+
+    _state.debug.lastReason = "refresh_ok"
+    return true
 end
 
 function M.apply(opts)
     opts = (type(opts) == "table") and opts or {}
     _state.lastApplySource = opts.source or "unknown"
 
-    local gs = U.getGuiSettingsBestEffort()
+    local gs = _getGuiSettingsModuleBestEffort()
     if type(gs) == "table" then
         if type(gs.isEnabled) == "function" then
             local okE, v = pcall(gs.isEnabled, UI_ID, true)
@@ -489,10 +650,9 @@ function M.apply(opts)
 
     local uiIds = _getAllUiRecords()
     _state.renderedUiIds = uiIds
-    _state.widgets.rowCount = #uiIds
 
     if _state.visible ~= true then
-        _clearRows()
+        _clearRows({ keepState = false })
         if _frame then pcall(function() _frame:hide() end) end
         _state.debug.lastReason = "visible_off"
         return true
@@ -507,10 +667,7 @@ function M.apply(opts)
     pcall(function() _frame:show() end)
     _renderList(uiIds)
 
-    _state.widgets.rowCount = #uiIds
-    _state.renderedUiIds = uiIds
     _state.debug.lastReason = "render_ok"
-
     return true
 end
 
