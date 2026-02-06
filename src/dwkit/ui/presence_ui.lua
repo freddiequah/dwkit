@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.presence_ui
 -- Owner       : UI
--- Version     : v2026-02-06A
+-- Version     : v2026-02-06B
 -- Purpose     :
 --   - SAFE Presence UI scaffold with live render from PresenceService (data only).
 --   - Creates a small window frame via ui_window + content panel + label.
@@ -9,17 +9,13 @@
 --   - Subscribes to PresenceService "updated" event to auto-refresh when state changes.
 --   - No timers, no send(), no automation.
 --
--- Key Fixes (2026-02-06A):
---   1) Store integrity: ensureWidgets() previously promoted ONLY widget keys into store,
---      which can overwrite ui_window runtime identity (nameFrame/meta/closeLabel) if
---      gui_store entry is replaced. We now RETURN those runtime fields together with
---      widget handles so the stored entry preserves nameFrame/meta/etc.
---   2) Deterministic close: add an in-content close button (works regardless of
---      Adjustable.Container closeLabel wiring differences). Clicking it:
---        - sets cfg visible OFF (session-only best-effort)
---        - routes apply via ui_manager
---        - refreshes ui_manager_ui
---        - hides the frame
+-- Key Fixes (2026-02-06B):
+--   1) Single X rule: remove the in-content close button so ONLY the title-bar X remains.
+--   2) Status correctness: rely on ui_window title-bar X wiring to:
+--        - set cfg visible OFF (session-only best-effort)
+--        - route apply via ui_manager
+--        - refresh ui_manager_ui
+--      so UI Manager reflects the correct "Show" state immediately.
 --
 -- Public API  :
 --   - getModuleVersion() -> string
@@ -32,7 +28,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-06A"
+M.VERSION = "v2026-02-06B"
 M.UI_ID = "presence_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -114,7 +110,6 @@ local _state = {
         label = nil,
         content = nil,
         panel = nil,
-        closeBtn = nil,
     },
 }
 
@@ -236,32 +231,8 @@ local function _setVisibleOffSessionBestEffort()
     _state.visible = false
 end
 
-local function _wireClickBestEffort(labelObj, fn)
-    if type(labelObj) ~= "table" or type(fn) ~= "function" then return false end
-
-    local wired = false
-    if type(labelObj.setClickCallback) == "function" then
-        local ok = pcall(function()
-            labelObj:setClickCallback(fn)
-        end)
-        wired = wired or (ok == true)
-    end
-
-    if not wired then
-        local name = tostring(labelObj.name or "")
-        if name ~= "" and type(_G.setLabelClickCallback) == "function" then
-            local ok = pcall(function()
-                _G.setLabelClickCallback(name, fn)
-            end)
-            wired = wired or (ok == true)
-        end
-    end
-
-    return wired
-end
-
 local function _ensureWidgets()
-    local ok, widgets, err = U.ensureWidgets(M.UI_ID, { "container", "label", "content", "panel", "closeBtn" }, function()
+    local ok, widgets, err = U.ensureWidgets(M.UI_ID, { "container", "label", "content", "panel" }, function()
         local G = U.getGeyser()
         if not G then
             return nil
@@ -276,9 +247,8 @@ local function _ensureWidgets()
             height = 260,
             padding = 6,
             onClose = function(b)
-                -- NOTE: This runs only if ui_window’s own X wiring fired.
-                -- We still keep it for compatibility, but we ALSO create an
-                -- in-content closeBtn that is guaranteed to work (below).
+                -- ui_window X should already do cfg visible OFF + ui_manager.applyOne().
+                -- We still keep this onClose as a compatibility net (hide frame).
                 _setVisibleOffSessionBestEffort()
                 _applyViaUiManagerBestEffort("presence_ui:x")
                 _refreshUiManagerUiBestEffort("presence_ui:x")
@@ -307,41 +277,15 @@ local function _ensureWidgets()
 
         ListKit.applyPanelStyle(panel)
 
-        -- Deterministic close button INSIDE the content panel (works even if Adjustable closeLabel wiring differs)
-        local closeBtn = G.Label:new({
-            name = "__DWKit_presence_ui_close_btn",
-            x = "-26px",
-            y = 0,
-            width = "26px",
-            height = "24px",
-        }, panel)
-
-        pcall(function()
-            -- Reuse list text styling (best-effort) so it doesn’t look alien.
-            -- If you later want a dedicated close style, we can switch to ui_theme.
-            if type(ListKit.applyTextLabelStyle) == "function" then
-                ListKit.applyTextLabelStyle(closeBtn)
-            end
-            closeBtn:echo("X")
-        end)
-
         local label = G.Label:new({
             name = "__DWKit_presence_ui_label",
             x = 0,
-            y = 24,
+            y = 0,
             width = "100%",
-            height = "-24px",
+            height = "100%",
         }, panel)
 
         ListKit.applyTextLabelStyle(label)
-
-        local function _onCloseClicked()
-            _setVisibleOffSessionBestEffort()
-            _applyViaUiManagerBestEffort("presence_ui:closeBtn")
-            _refreshUiManagerUiBestEffort("presence_ui:closeBtn")
-            U.safeHide(container)
-        end
-        _wireClickBestEffort(closeBtn, _onCloseClicked)
 
         -- IMPORTANT:
         -- Return runtime identity fields along with widget handles so the stored entry
@@ -361,7 +305,6 @@ local function _ensureWidgets()
             -- widgets
             panel = panel,
             label = label,
-            closeBtn = closeBtn,
         }
     end)
 
@@ -373,7 +316,6 @@ local function _ensureWidgets()
     _state.widgets.content = widgets.content
     _state.widgets.panel = widgets.panel
     _state.widgets.label = widgets.label
-    _state.widgets.closeBtn = widgets.closeBtn
     return true, nil
 end
 
@@ -461,6 +403,7 @@ local function _ensureSubscription()
 end
 
 function M.getModuleVersion() return M.VERSION end
+
 function M.getUiId() return M.UI_ID end
 
 function M.init(opts)
@@ -574,7 +517,6 @@ function M.getState()
         widgets = {
             hasContainer = (type(_state.widgets.container) == "table"),
             hasLabel = (type(_state.widgets.label) == "table"),
-            hasCloseBtn = (type(_state.widgets.closeBtn) == "table"),
         },
     }
 end
@@ -587,12 +529,10 @@ function M.dispose(opts)
 
     U.clearUiStoreEntry(M.UI_ID)
 
-    U.safeDelete(_state.widgets.closeBtn)
     U.safeDelete(_state.widgets.label)
     U.safeDelete(_state.widgets.panel)
     U.safeDelete(_state.widgets.container)
 
-    _state.widgets.closeBtn = nil
     _state.widgets.label = nil
     _state.widgets.container = nil
     _state.widgets.content = nil

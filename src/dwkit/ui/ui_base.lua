@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_base
 -- Owner       : UI
--- Version     : v2026-02-06A
+-- Version     : v2026-02-06B
 -- Purpose     :
 --   - Shared SAFE helper utilities for DWKit UI modules.
 --   - Avoids copy/paste across UI modules (store, widgets, show/hide/delete, etc).
@@ -36,7 +36,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-06A"
+M.VERSION = "v2026-02-06B"
 
 local function _isNonEmptyString(s)
     return type(s) == "string" and s ~= ""
@@ -152,10 +152,25 @@ function M.clearUiStoreEntry(uiId)
     store[uiId] = nil
 end
 
+-- Internal hide SHOULD NOT be treated as "user clicked X".
+-- We suppress ui_window hide-hook sync during safeHide (dispose/reload/apply internals).
+local function _setSuppressHideHookBestEffort(w, v)
+    if type(w) ~= "table" then return end
+    w._dwkitSuppressHideHook = (v == true)
+
+    -- Adjustable often uses frame.window as the real widget; suppress both.
+    if type(w.window) == "table" then
+        w.window._dwkitSuppressHideHook = (v == true)
+    end
+end
+
 function M.safeHide(w)
     if type(w) ~= "table" then return end
     if type(w.hide) == "function" then
-        pcall(w.hide, w)
+        _setSuppressHideHookBestEffort(w, true)
+        local ok = pcall(w.hide, w)
+        _setSuppressHideHookBestEffort(w, false)
+        return ok
     end
 end
 

@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_window
 -- Owner       : UI
--- Version     : v2026-02-05E
+-- Version     : v2026-02-06J
 -- Purpose     :
 --   - Shared DWKit "frame" creator:
 --       * Prefer Adjustable.Container (movable/resizable + autoSave/autoLoad)
@@ -9,48 +9,37 @@
 --   - Applies centralized theme for header/close and frame border.
 --   - Returns { frame, content, closeLabel, meta } for UI modules to build into.
 --
--- Public API  :
---   - create(opts) -> table|nil frameBundle
---       opts = {
---           uiId        = string (required)
---           title       = string (required)
---           x,y,width,height = number|string (optional; defaults provided by caller)
---           padding     = number (optional; default 6)
---           buttonSize  = number (optional; default 18)
---           buttonFontSize = number (optional; default 9)
---           profileTag  = string (optional)
---           onClose     = function(bundle) (optional)
---       }
---   - getProfileTagBestEffort() -> string
---   - hideMinimizeChromeBestEffort(container)
---
--- Events Emitted   : None
--- Events Consumed  : None
--- Automation Policy: Manual only
--- Dependencies     :
---   - Geyser (Mudlet)
---   - Optional: Adjustable.Container (Mudlet package)
+-- Key Fixes:
+--   v2026-02-06D:
+--     - Wrapped frame:hide() to sync visible=false and call ui_manager.applyOne().
+--       (This introduced recursion: ui_manager.applyOne -> presence_ui.apply -> safeHide -> frame:hide -> loop.)
+--   v2026-02-06E:
+--     - FIX: hide-hook no longer calls ui_manager.applyOne() or ui_manager_ui.apply().
+--       It ONLY syncs gui_settings.visible=false (noSave best-effort) to avoid recursion and login spam.
+--   v2026-02-06F:
+--     - FIX: hide-hook respects internal hides via _dwkitSuppressHideHook (set by ui_base.safeHide).
+--   v2026-02-06H:
+--     - FIX: UI Manager refresh must occur AFTER hide/close runs.
+--   v2026-02-06I:
+--     - Attempted: keep UI Manager visible by forcing cfg visible=true then calling apply().
+--       This is NOT safe because apply() enforces cfg and can still close UI Manager.
+--   v2026-02-06J:
+--     - FIX: ui_window MUST NEVER call ui_manager_ui.apply() as a "refresh".
+--       apply() enforces gui_settings.visible(ui_manager_ui) and can hide/close UI Manager.
+--       Now: refresh path calls ui_manager_ui.refresh() (rows-only) if available; otherwise no-op.
 -- #########################################################################
 
 local Theme = require("dwkit.ui.ui_theme")
 
 local M = {}
 
-M.VERSION = "v2026-02-05E"
+M.VERSION = "v2026-02-06J"
 
 local function _pcall(fn, ...)
     local ok, res = pcall(fn, ...)
     if ok then return true, res end
     return false, res
 end
-
--- -------------------------------------------------------------------------
--- X button semantics:
---   Clicking X is a "Hide" action (session-only), NOT "Disable".
---   We (1) set gui_settings.visible=false with noSave, then (2) best-effort
---   route the hide through ui_manager.applyOne(uiId) so module runtime state
---   and UI Manager rows stay consistent immediately.
--- -------------------------------------------------------------------------
 
 local function _getGuiSettingsSingletonBestEffort()
     if type(_G.DWKit) == "table"
@@ -82,15 +71,70 @@ local function _syncVisibleOffSessionBestEffort(uiId)
     end
 end
 
-local function _applyHideViaUiManagerBestEffort(uiId)
-    uiId = tostring(uiId or "")
-    if uiId == "" then return end
+local function _tryContainerVisibleBestEffort(c)
+    if type(c) ~= "table" then return nil end
+    local ok, v = pcall(function()
+        if type(c.isVisible) == "function" then
+            return c:isVisible()
+        end
+        if c.hidden ~= nil then
+            return not c.hidden
+        end
+        return nil
+    end)
+    if ok then return v end
+    return nil
+end
 
-    local okUM, UM = pcall(require, "dwkit.ui.ui_manager")
-    if okUM and type(UM) == "table" and type(UM.applyOne) == "function" then
-        pcall(function()
-            UM.applyOne(uiId, { source = "ui_window:x", quiet = true })
-        end)
+local function _getUiManagerRuntimeVisibleBestEffort()
+    -- Prefer ui_manager_ui.getState() if available
+    local okU, uiMgrUi = pcall(require, "dwkit.ui.ui_manager_ui")
+    if okU and type(uiMgrUi) == "table" then
+        if type(uiMgrUi.getState) == "function" then
+            local okS, st = pcall(uiMgrUi.getState)
+            if okS and type(st) == "table" and st.visible ~= nil then
+                return st.visible == true
+            end
+        end
+    end
+
+    -- Fallback: check ui_base store entry
+    local okB, U = pcall(require, "dwkit.ui.ui_base")
+    if okB and type(U) == "table" and type(U.getUiStoreEntry) == "function" then
+        local okE, e = pcall(U.getUiStoreEntry, "ui_manager_ui")
+        if okE and type(e) == "table" then
+            local c = e.container or e.frame
+            local cv = _tryContainerVisibleBestEffort(c)
+            if cv ~= nil then return cv end
+        end
+    end
+
+    return nil
+end
+
+local function _refreshUiManagerUiBestEffort(source, targetUiId)
+    targetUiId = tostring(targetUiId or "")
+    if targetUiId == "ui_manager_ui" then
+        return
+    end
+
+    -- Only refresh if UI Manager is already open (runtime-visible best-effort).
+    local isOpen = _getUiManagerRuntimeVisibleBestEffort()
+    if isOpen ~= true then
+        return
+    end
+
+    -- CRITICAL:
+    -- ui_window must NEVER call ui_manager_ui.apply() as a refresh.
+    -- apply() enforces gui_settings.visible(ui_manager_ui) and can hide/close UI Manager.
+    -- Refresh should ONLY redraw rows while it is already open.
+    local okU, uiMgrUi = pcall(require, "dwkit.ui.ui_manager_ui")
+    if okU and type(uiMgrUi) == "table" then
+        if type(uiMgrUi.refresh) == "function" then
+            pcall(function()
+                uiMgrUi.refresh({ source = source or "ui_window", quiet = true })
+            end)
+        end
     end
 end
 
@@ -230,6 +274,177 @@ local function _wireClickBestEffort(labelObj, fn)
     return wired
 end
 
+local function _safeEchoX(lbl)
+    if type(lbl) ~= "table" then return end
+    pcall(function()
+        if type(lbl.setStyleSheet) == "function" then
+            lbl:setStyleSheet(Theme.closeStyle())
+        end
+        if type(lbl.echo) == "function" then
+            lbl:echo("X")
+        end
+    end)
+end
+
+local function _createFallbackCloseLabel(G, parent, name, headerH)
+    if type(G) ~= "table" or type(parent) ~= "table" then return nil end
+    local h = tonumber(headerH or 24) or 24
+
+    local close = G.Label:new({
+        name = name,
+        x = "-28px",
+        y = 0,
+        width = "28px",
+        height = h,
+    }, parent)
+
+    _safeEchoX(close)
+    return close
+end
+
+local function _callOrigBestEffort(fn, selfObj, ...)
+    if type(fn) ~= "function" then return nil end
+    local ok, r1, r2, r3, r4 = pcall(fn, selfObj, ...)
+    if ok then
+        return r1, r2, r3, r4
+    end
+    return nil
+end
+
+-- -------------------------------------------------------------------------
+-- Adjustable close/hide hook:
+-- Wrap frame:hide() (and close if present) so title-bar X updates DWKit
+-- visible state (gui_settings.visible=false noSave) even if closeLabel callbacks do not fire.
+--
+-- Rules:
+--   - DO NOT call ui_manager.applyOne() here (no recursion).
+--   - DO respect _dwkitSuppressHideHook (internal hides).
+--   - DO refresh ui_manager_ui AFTER the hide/close actually ran.
+--   - DO NOT call ui_manager_ui.apply() from refresh path (use refresh()).
+-- -------------------------------------------------------------------------
+local function _installAdjustableHideHookBestEffort(frame, bundle)
+    if type(frame) ~= "table" or type(bundle) ~= "table" or type(bundle.meta) ~= "table" then
+        return false
+    end
+
+    local uiId = tostring(bundle.meta.uiId or "")
+    if uiId == "" then return false end
+
+    local origHide = (type(frame.hide) == "function") and frame.hide or nil
+    local origClose = (type(frame.close) == "function") and frame.close or nil
+
+    local win = (type(frame.window) == "table") and frame.window or nil
+    local origWinHide = (type(win) == "table" and type(win.hide) == "function") and win.hide or nil
+    local origWinClose = (type(win) == "table" and type(win.close) == "function") and win.close or nil
+
+    if type(origHide) ~= "function" then
+        return false
+    end
+
+    if frame._dwkitHideWrapped == true then
+        return true
+    end
+    frame._dwkitHideWrapped = true
+
+    frame._dwkitCloseInFlight = false
+
+    local function _isSuppressed(obj)
+        if type(obj) ~= "table" then return false end
+        if obj._dwkitSuppressHideHook == true then return true end
+        if type(obj.window) == "table" and obj.window._dwkitSuppressHideHook == true then return true end
+        return false
+    end
+
+    local function _postHideUpdate(source, suppressed)
+        if suppressed then
+            return
+        end
+        _syncVisibleOffSessionBestEffort(uiId)
+        _refreshUiManagerUiBestEffort("ui_window:hidehook:" .. tostring(source or "hide"), uiId)
+    end
+
+    frame.hide = function(self, ...)
+        if frame._dwkitCloseInFlight == true then
+            return _callOrigBestEffort(origHide, self, ...)
+        end
+        frame._dwkitCloseInFlight = true
+
+        local suppressed = _isSuppressed(self)
+        local r1, r2, r3, r4 = _callOrigBestEffort(origHide, self, ...)
+
+        -- AFTER hide
+        _postHideUpdate("frame.hide", suppressed)
+
+        frame._dwkitCloseInFlight = false
+        return r1, r2, r3, r4
+    end
+
+    if type(origClose) == "function" then
+        frame.close = function(self, ...)
+            if frame._dwkitCloseInFlight == true then
+                return _callOrigBestEffort(origClose, self, ...)
+            end
+            frame._dwkitCloseInFlight = true
+
+            local suppressed = _isSuppressed(self)
+            local r1, r2, r3, r4 = _callOrigBestEffort(origClose, self, ...)
+
+            -- AFTER close
+            _postHideUpdate("frame.close", suppressed)
+
+            frame._dwkitCloseInFlight = false
+            return r1, r2, r3, r4
+        end
+    end
+
+    if type(win) == "table" and type(origWinHide) == "function" then
+        if win._dwkitHideWrapped ~= true then
+            win._dwkitHideWrapped = true
+
+            win.hide = function(self, ...)
+                if frame._dwkitCloseInFlight == true then
+                    return _callOrigBestEffort(origWinHide, self, ...)
+                end
+                frame._dwkitCloseInFlight = true
+
+                local suppressed = _isSuppressed(self)
+                local r1, r2, r3, r4 = _callOrigBestEffort(origWinHide, self, ...)
+
+                -- AFTER hide
+                _postHideUpdate("frame.window.hide", suppressed)
+
+                frame._dwkitCloseInFlight = false
+                return r1, r2, r3, r4
+            end
+
+            if type(origWinClose) == "function" then
+                win.close = function(self, ...)
+                    if frame._dwkitCloseInFlight == true then
+                        return _callOrigBestEffort(origWinClose, self, ...)
+                    end
+                    frame._dwkitCloseInFlight = true
+
+                    local suppressed = _isSuppressed(self)
+                    local r1, r2, r3, r4 = _callOrigBestEffort(origWinClose, self, ...)
+
+                    -- AFTER close
+                    _postHideUpdate("frame.window.close", suppressed)
+
+                    frame._dwkitCloseInFlight = false
+                    return r1, r2, r3, r4
+                end
+            end
+        end
+    end
+
+    bundle.meta._dwkitOrigHide = origHide
+    bundle.meta._dwkitOrigClose = origClose
+    bundle.meta._dwkitOrigWinHide = origWinHide
+    bundle.meta._dwkitOrigWinClose = origWinClose
+
+    return true
+end
+
 function M.create(opts)
     opts = (type(opts) == "table") and opts or {}
     local uiId = tostring(opts.uiId or "")
@@ -269,7 +484,10 @@ function M.create(opts)
     }
 
     local Adjustable = _getAdjustableBestEffort()
-    if type(Adjustable) == "table" and type(Adjustable.Container) == "table" and type(Adjustable.Container.new) == "function" then
+    if type(Adjustable) == "table"
+        and type(Adjustable.Container) == "table"
+        and type(Adjustable.Container.new) == "function"
+    then
         local frame = Adjustable.Container:new({
             name = nameFrame,
             x = opts.x or 30,
@@ -294,15 +512,22 @@ function M.create(opts)
         bundle.meta.adjustable = true
 
         M.hideMinimizeChromeBestEffort(frame)
+        _applyFrameStyleBestEffort(frame)
 
+        local closeA = nil
+        local closeB = nil
         if type(frame) == "table" then
-            bundle.closeLabel = frame.closeLabel
-            if type(bundle.closeLabel) ~= "table" and type(frame.window) == "table" then
-                bundle.closeLabel = frame.window.closeLabel
+            closeA = frame.closeLabel
+            if type(frame.window) == "table" then
+                closeB = frame.window.closeLabel
             end
         end
 
-        _applyFrameStyleBestEffort(frame)
+        if type(closeB) == "table" then
+            bundle.closeLabel = closeB
+        elseif type(closeA) == "table" then
+            bundle.closeLabel = closeA
+        end
 
         local insideParent = _resolveInsideParent(frame)
 
@@ -315,6 +540,8 @@ function M.create(opts)
         }, insideParent)
 
         bundle.content = content
+
+        _installAdjustableHideHookBestEffort(frame, bundle)
     else
         local frame = G.Container:new({
             name = nameFrame,
@@ -339,17 +566,7 @@ function M.create(opts)
             header:echo(" " .. title)
         end)
 
-        local close = G.Label:new({
-            name = nameFrame .. "__close",
-            x = "-28px",
-            y = 0,
-            width = "28px",
-            height = headerH,
-        }, frame)
-        pcall(function()
-            close:setStyleSheet(Theme.closeStyle())
-            close:echo("X")
-        end)
+        local close = _createFallbackCloseLabel(G, frame, nameFrame .. "__close", headerH)
 
         local content = G.Container:new({
             name = nameContent,
@@ -365,7 +582,6 @@ function M.create(opts)
         bundle.meta.adjustable = false
     end
 
-    -- IMPORTANT: make runtime discoverable + stored deterministically
     _registerRuntimeBestEffort(bundle)
 
     local onClose = opts.onClose
@@ -379,13 +595,41 @@ function M.create(opts)
 
     local function _onXClicked()
         local id = (bundle.meta and bundle.meta.uiId) or uiId
+
+        -- intent: user hide (session-only)
         _syncVisibleOffSessionBestEffort(id)
-        _applyHideViaUiManagerBestEffort(id)
+
+        -- perform hide
         onClose(bundle)
+
+        -- refresh UI Manager rows (rows-only, safe)
+        _refreshUiManagerUiBestEffort("ui_window:xclick", id)
     end
 
-    if type(bundle.closeLabel) == "table" then
-        _wireClickBestEffort(bundle.closeLabel, _onXClicked)
+    if bundle.meta.adjustable == true then
+        local frame = bundle.frame
+        local closeA = (type(frame) == "table") and frame.closeLabel or nil
+        local closeB = (type(frame) == "table" and type(frame.window) == "table") and frame.window.closeLabel or nil
+
+        local wired = false
+        if type(closeB) == "table" then
+            wired = _wireClickBestEffort(closeB, _onXClicked) or wired
+        end
+        if type(closeA) == "table" and closeA ~= closeB then
+            wired = _wireClickBestEffort(closeA, _onXClicked) or wired
+        end
+
+        if type(bundle.closeLabel) == "table" and bundle.closeLabel ~= closeA and bundle.closeLabel ~= closeB then
+            wired = _wireClickBestEffort(bundle.closeLabel, _onXClicked) or wired
+        end
+
+        if not wired and type(bundle.closeLabel) == "table" then
+            _wireClickBestEffort(bundle.closeLabel, _onXClicked)
+        end
+    else
+        if type(bundle.closeLabel) == "table" then
+            _wireClickBestEffort(bundle.closeLabel, _onXClicked)
+        end
     end
 
     return bundle
