@@ -1,13 +1,21 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.presence_ui
 -- Owner       : UI
--- Version     : v2026-02-05D
+-- Version     : v2026-02-06B
 -- Purpose     :
 --   - SAFE Presence UI scaffold with live render from PresenceService (data only).
---   - Creates a small Geyser container + label.
+--   - Creates a small window frame via ui_window + content panel + label.
 --   - Demonstrates gui_settings self-seeding (register) + apply()/dispose() lifecycle.
 --   - Subscribes to PresenceService "updated" event to auto-refresh when state changes.
 --   - No timers, no send(), no automation.
+--
+-- Key Fixes (2026-02-06B):
+--   1) Single X rule: remove the in-content close button so ONLY the title-bar X remains.
+--   2) Status correctness: rely on ui_window title-bar X wiring to:
+--        - set cfg visible OFF (session-only best-effort)
+--        - route apply via ui_manager
+--        - refresh ui_manager_ui
+--      so UI Manager reflects the correct "Show" state immediately.
 --
 -- Public API  :
 --   - getModuleVersion() -> string
@@ -20,7 +28,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-05D"
+M.VERSION = "v2026-02-06B"
 M.UI_ID = "presence_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -144,7 +152,6 @@ local function _forceVisibleFalseDeep(gs)
             rec.visible = false
             changed = true
         elseif rec.visible == nil then
-            -- Some stores only have enabled; still set visible defensively
             rec.visible = false
             changed = true
         end
@@ -158,19 +165,15 @@ local function _forceVisibleFalseDeep(gs)
         depth = depth or 0
         if depth > 4 then return end
 
-        -- Direct map by uiId
         if type(t[uiId]) == "table" then
             patchRecord(t[uiId])
         end
 
-        for k, v in pairs(t) do
-            -- Common shapes:
-            -- t.records[uiId] = { enabled=..., visible=... }
+        for _, v in pairs(t) do
             if type(v) == "table" then
                 if type(v[uiId]) == "table" then
                     patchRecord(v[uiId])
                 end
-                -- Recurse a bit to catch nested stores
                 scanTable(v, depth + 1, visited)
             end
         end
@@ -189,7 +192,6 @@ local function _setVisibleOffSessionBestEffort()
         return
     end
 
-    -- best-effort: visible persistence noSave (various signatures)
     if type(gs.enableVisiblePersistence) == "function" then
         pcall(gs.enableVisiblePersistence, { noSave = true })
         pcall(gs.enableVisiblePersistence, true)
@@ -212,20 +214,17 @@ local function _setVisibleOffSessionBestEffort()
         if (not okSet) and pcall(gs.set, M.UI_ID, "visible", false) then okSet = true end
     end
 
-    -- Some builds may treat register as an upsert/patch (save=false keeps session-only).
     if (not okSet) and type(gs.register) == "function" then
         pcall(gs.register, M.UI_ID, { visible = false }, { save = false })
         pcall(gs.register, M.UI_ID, { visible = false }, { noSave = true })
     end
 
-    -- If getVisible still reads true, force patch internal store tables.
     if type(gs.getVisible) == "function" then
         local okV, v = pcall(gs.getVisible, M.UI_ID, nil)
         if okV and v == true then
             _forceVisibleFalseDeep(gs)
         end
     else
-        -- Even without getVisible, still attempt deep patch.
         _forceVisibleFalseDeep(gs)
     end
 
@@ -248,6 +247,8 @@ local function _ensureWidgets()
             height = 260,
             padding = 6,
             onClose = function(b)
+                -- ui_window X should already do cfg visible OFF + ui_manager.applyOne().
+                -- We still keep this onClose as a compatibility net (hide frame).
                 _setVisibleOffSessionBestEffort()
                 _applyViaUiManagerBestEffort("presence_ui:x")
                 _refreshUiManagerUiBestEffort("presence_ui:x")
@@ -264,6 +265,7 @@ local function _ensureWidgets()
 
         local container = bundle.frame
         local contentParent = bundle.content
+        local meta = bundle.meta or {}
 
         local panel = G.Container:new({
             name = "__DWKit_presence_ui_panel",
@@ -285,7 +287,25 @@ local function _ensureWidgets()
 
         ListKit.applyTextLabelStyle(label)
 
-        return { container = container, content = contentParent, panel = panel, label = label }
+        -- IMPORTANT:
+        -- Return runtime identity fields along with widget handles so the stored entry
+        -- preserves nameFrame/meta/etc even if the gui store replaces the entry table.
+        return {
+            uiId = M.UI_ID,
+
+            -- runtime identity (from ui_window)
+            frame = container,
+            container = container,
+            content = contentParent,
+            meta = meta,
+            nameFrame = (type(meta) == "table" and meta.nameFrame) or nil,
+            nameContent = (type(meta) == "table" and meta.nameContent) or nil,
+            closeLabel = bundle.closeLabel,
+
+            -- widgets
+            panel = panel,
+            label = label,
+        }
     end)
 
     if not ok or type(widgets) ~= "table" then
@@ -510,6 +530,7 @@ function M.dispose(opts)
     U.clearUiStoreEntry(M.UI_ID)
 
     U.safeDelete(_state.widgets.label)
+    U.safeDelete(_state.widgets.panel)
     U.safeDelete(_state.widgets.container)
 
     _state.widgets.label = nil

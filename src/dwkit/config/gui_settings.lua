@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.config.gui_settings
 -- Owner       : Config
--- Version     : v2026-02-03E
+-- Version     : v2026-02-06A
 -- Purpose     :
 --   - Provide per-profile GUI settings storage for DWKit UI modules.
 --   - Owns "enabled" (mandatory) and "visible" (optional) flags per UI id.
@@ -20,6 +20,7 @@
 --   - isEnabled(uiId, default?) -> boolean
 --   - setEnabled(uiId, enabled, opts?) -> boolean ok, string|nil err
 --   - getVisible(uiId, default?) -> boolean
+--   - isVisible(uiId, default?) -> boolean   (alias for getVisible)
 --   - setVisible(uiId, visible, opts?) -> boolean ok, string|nil err
 --   - enableVisiblePersistence(opts?) -> boolean ok, string|nil err
 --   - list() -> table (copy) of uiId -> {enabled=?, visible=?}
@@ -60,7 +61,7 @@ do
         and type(existing.getModuleVersion) == "function"
         and type(existing.load) == "function"
         and type(existing.isEnabled) == "function"
-        and type(existing.getVisible) == "function"
+        and (type(existing.getVisible) == "function" or type(existing.isVisible) == "function")
     then
         return existing
     end
@@ -68,7 +69,7 @@ end
 
 local M = {}
 
-M.VERSION = "v2026-02-03E"
+M.VERSION = "v2026-02-06A"
 M.SCHEMA_VERSION = "v0.1"
 
 local ID = require("dwkit.core.identity")
@@ -97,6 +98,10 @@ local _state = {
 }
 
 local function _isNonEmptyString(s) return type(s) == "string" and s ~= "" end
+
+local function _optsTable(opts)
+    return (type(opts) == "table") and opts or {}
+end
 
 local function _copyTableShallow(t)
     if type(t) ~= "table" then return {} end
@@ -143,8 +148,8 @@ local function _getStoreBestEffort()
 end
 
 local function _resolveRelPath(opts)
-    opts = opts or {}
-    if type(opts) == "table" and _isNonEmptyString(opts.relPath) then
+    opts = _optsTable(opts)
+    if _isNonEmptyString(opts.relPath) then
         return tostring(opts.relPath)
     end
     return _state.relPath or DEFAULT_REL_PATH
@@ -267,11 +272,11 @@ function M.getDefaultRelPath() return DEFAULT_REL_PATH end
 function M.isLoaded() return _state.loaded == true end
 
 function M.load(opts)
-    opts = opts or {}
+    opts = _optsTable(opts)
     local relPath = _resolveRelPath(opts)
 
     local forceVisible = (
-        (type(opts) == "table" and opts.visiblePersistenceEnabled == true) or
+        (opts.visiblePersistenceEnabled == true) or
         (_state.sessionVisiblePersistenceEnabled == true) or
         (_getVisiblePersistenceEnabledNow() == true)
     ) and true or false
@@ -314,7 +319,7 @@ function M.load(opts)
 end
 
 function M.save(opts)
-    opts = opts or {}
+    opts = _optsTable(opts)
     local relPath = _resolveRelPath(opts)
 
     local okStore, store, storeErr = _getStoreBestEffort()
@@ -363,7 +368,7 @@ function M.register(uiId, defaults, opts)
     end
 
     defaults = (type(defaults) == "table") and defaults or {}
-    opts = (type(opts) == "table") and opts or {}
+    opts = _optsTable(opts)
 
     if _state.loaded ~= true then
         local okLoad, err = M.load({ quiet = true })
@@ -436,6 +441,8 @@ function M.setEnabled(uiId, enabled, opts)
         return false, "uiId invalid"
     end
 
+    opts = _optsTable(opts)
+
     if _state.loaded ~= true then
         local okLoad, err = M.load({ quiet = true })
         if not okLoad then
@@ -446,7 +453,7 @@ function M.setEnabled(uiId, enabled, opts)
     local rec = _ensureRec(uiId)
     rec.enabled = (enabled == true)
 
-    if opts and opts.noSave == true then
+    if opts.noSave == true then
         return true, nil
     end
 
@@ -474,8 +481,13 @@ function M.getVisible(uiId, default)
     return (default == true)
 end
 
+-- Compatibility alias: some callers check isVisible()
+function M.isVisible(uiId, default)
+    return M.getVisible(uiId, default)
+end
+
 function M.enableVisiblePersistence(opts)
-    opts = opts or {}
+    opts = _optsTable(opts)
 
     _state.sessionVisiblePersistenceEnabled = true
 
@@ -501,6 +513,8 @@ function M.setVisible(uiId, visible, opts)
         return false, "uiId invalid"
     end
 
+    opts = _optsTable(opts)
+
     if _state.loaded ~= true then
         local okLoad, err = M.load({ quiet = true })
         if not okLoad then
@@ -508,16 +522,24 @@ function M.setVisible(uiId, visible, opts)
         end
     end
 
-    if type(_state.data) ~= "table" or type(_state.data.options) ~= "table"
-        or _state.data.options.visiblePersistenceEnabled ~= true
+    -- If caller wants session-only (noSave), auto-enable persistence for session.
+    if (type(_state.data) ~= "table" or type(_state.data.options) ~= "table"
+            or _state.data.options.visiblePersistenceEnabled ~= true)
     then
-        return false, "visible persistence is disabled (options.visiblePersistenceEnabled=false)"
+        if opts.noSave == true then
+            local okEn, errEn = M.enableVisiblePersistence({ noSave = true })
+            if not okEn then
+                return false, "enableVisiblePersistence failed: " .. tostring(errEn)
+            end
+        else
+            return false, "visible persistence is disabled (options.visiblePersistenceEnabled=false)"
+        end
     end
 
     local rec = _ensureRec(uiId)
     rec.visible = (visible == true)
 
-    if opts and opts.noSave == true then
+    if opts.noSave == true then
         return true, nil
     end
 
@@ -581,7 +603,7 @@ function M.status()
 end
 
 function M.selfTestPersistenceSmoke(opts)
-    opts = opts or {}
+    opts = _optsTable(opts)
     local relPath = _isNonEmptyString(opts.relPath) and tostring(opts.relPath) or "selftest/gui_settings_smoke.tbl"
 
     local okStore, store, storeErr = _getStoreBestEffort()
