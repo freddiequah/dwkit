@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_window
 -- Owner       : UI
--- Version     : v2026-02-06J
+-- Version     : v2026-02-06L
 -- Purpose     :
 --   - Shared DWKit "frame" creator:
 --       * Prefer Adjustable.Container (movable/resizable + autoSave/autoLoad)
@@ -27,13 +27,20 @@
 --     - FIX: ui_window MUST NEVER call ui_manager_ui.apply() as a "refresh".
 --       apply() enforces gui_settings.visible(ui_manager_ui) and can hide/close UI Manager.
 --       Now: refresh path calls ui_manager_ui.refresh() (rows-only) if available; otherwise no-op.
+--   v2026-02-06K:
+--     - FIX: title-bar X / hide-hook now also updates ui_base runtime state (storeEntry.state.visible)
+--       so UI Manager UI has a deterministic runtime signal (rt:) even when container:isVisible() is nil.
+--       (No ui_manager.applyOne calls; no recursion.)
+--   v2026-02-06L:
+--     - FIX: Upsert ui_base runtime entry if it was removed during close/dispose path.
+--       Ensures rtVisible never becomes nil after X/hide; deterministic boolean signal for UI Manager UI.
 -- #########################################################################
 
 local Theme = require("dwkit.ui.ui_theme")
 
 local M = {}
 
-M.VERSION = "v2026-02-06J"
+M.VERSION = "v2026-02-06L"
 
 local function _pcall(fn, ...)
     local ok, res = pcall(fn, ...)
@@ -55,9 +62,48 @@ local function _getGuiSettingsSingletonBestEffort()
     return nil
 end
 
+-- Deterministic runtime signal for UI Manager UI:
+-- StoreEntry.state.visible is easy to read and does not depend on Adjustable/Geyser isVisible quirks.
+local function _setUiBaseRuntimeVisibleBestEffort(uiId, visible)
+    uiId = tostring(uiId or "")
+    if uiId == "" then return end
+
+    local okB, U = pcall(require, "dwkit.ui.ui_base")
+    if not okB or type(U) ~= "table" then return end
+    if type(U.getUiStoreEntry) ~= "function" then return end
+
+    local okE, e = pcall(U.getUiStoreEntry, uiId)
+
+    -- v2026-02-06L:
+    -- If runtime entry was removed during close/dispose, recreate minimal entry (state-only) so rtVisible is deterministic.
+    if (not okE) or type(e) ~= "table" then
+        if type(U.setUiRuntime) == "function" then
+            pcall(function()
+                U.setUiRuntime(uiId, {
+                    state = { visible = (visible == true) },
+                    meta = { uiId = uiId, source = "ui_window:runtime_upsert" },
+                })
+            end)
+        end
+        return
+    end
+
+    e.state = (type(e.state) == "table") and e.state or {}
+    e.state.visible = (visible == true)
+end
+
 local function _syncVisibleOffSessionBestEffort(uiId)
     uiId = tostring(uiId or "")
     if uiId == "" then return end
+
+    -- Prefer ui_manager safe helper if present (no recursion, no apply).
+    local okUM, UM = pcall(require, "dwkit.ui.ui_manager")
+    if okUM and type(UM) == "table" and type(UM.syncVisibleSession) == "function" then
+        pcall(function()
+            UM.syncVisibleSession(uiId, false, { source = "ui_window:syncVisibleOff", quiet = true })
+        end)
+        return
+    end
 
     local gs = _getGuiSettingsSingletonBestEffort()
     if type(gs) ~= "table" then return end
@@ -74,12 +120,26 @@ end
 local function _tryContainerVisibleBestEffort(c)
     if type(c) ~= "table" then return nil end
     local ok, v = pcall(function()
+        -- Direct: method
         if type(c.isVisible) == "function" then
             return c:isVisible()
         end
+        -- Direct: flag
         if c.hidden ~= nil then
             return not c.hidden
         end
+
+        -- Adjustable.Container often has a nested window object that tracks visibility:
+        if type(c.window) == "table" then
+            local w = c.window
+            if type(w.isVisible) == "function" then
+                return w:isVisible()
+            end
+            if w.hidden ~= nil then
+                return not w.hidden
+            end
+        end
+
         return nil
     end)
     if ok then return v end
@@ -168,9 +228,13 @@ local function _registerRuntimeBestEffort(bundle)
                     nameFrame = (nameFrame ~= "" and nameFrame) or nil,
                     nameContent = (nameContent ~= "" and nameContent) or nil,
                     meta = bundle.meta,
+                    state = { visible = true }, -- deterministic runtime signal
                 })
             end)
         end
+
+        -- Also mutate store entry state if already exists (covers implementations that ignore passed state).
+        _setUiBaseRuntimeVisibleBestEffort(uiId, true)
     end
 end
 
@@ -359,7 +423,14 @@ local function _installAdjustableHideHookBestEffort(frame, bundle)
         if suppressed then
             return
         end
+
+        -- deterministic runtime signal for UI Manager UI (upsert-safe)
+        _setUiBaseRuntimeVisibleBestEffort(uiId, false)
+
+        -- session-only cfg signal
         _syncVisibleOffSessionBestEffort(uiId)
+
+        -- redraw rows (safe)
         _refreshUiManagerUiBestEffort("ui_window:hidehook:" .. tostring(source or "hide"), uiId)
     end
 
@@ -595,6 +666,9 @@ function M.create(opts)
 
     local function _onXClicked()
         local id = (bundle.meta and bundle.meta.uiId) or uiId
+
+        -- deterministic runtime signal for UI Manager UI (rt:) (upsert-safe)
+        _setUiBaseRuntimeVisibleBestEffort(id, false)
 
         -- intent: user hide (session-only)
         _syncVisibleOffSessionBestEffort(id)

@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.test_ui
 -- Owner       : UI
--- Version     : v2026-01-15B
+-- Version     : v2026-02-07A
 -- Purpose     :
 --   - Minimal SAFE UI module that creates a visible Geyser window.
 --   - Mirrors sample_ui contract so we can validate multi-UI management.
@@ -25,11 +25,14 @@
 --   - dwkit.ui.ui_base
 -- Invariants       :
 --   - MUST remain SAFE. No gameplay commands, no timers.
+--
+-- Fix (v2026-02-07A):
+--   - dispose() must NOT clear ui_store entry; keep deterministic state.visible boolean.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-28A"
+M.VERSION = "v2026-02-07A"
 M.UI_ID = "test_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -226,15 +229,38 @@ end
 function M.dispose(opts)
     opts = (type(opts) == "table") and opts or {}
 
-    U.clearUiStoreEntry(M.UI_ID)
+    -- IMPORTANT: Do NOT clear the ui_store entry.
+    if type(U.setUiStateVisibleBestEffort) == "function" then
+        pcall(U.setUiStateVisibleBestEffort, M.UI_ID, false)
+    else
+        pcall(U.setUiRuntime, M.UI_ID, { state = { visible = false } })
+    end
+
+    local entry = nil
+    if type(U.ensureUiStoreEntry) == "function" then
+        entry = U.ensureUiStoreEntry(M.UI_ID)
+    end
+    if type(entry) == "table" then
+        entry.state = (type(entry.state) == "table") and entry.state or {}
+        entry.state.visible = false
+        entry.frame = nil
+        entry.container = nil
+        entry.content = nil
+        entry.panel = nil
+        entry.label = nil
+    end
 
     U.safeDelete(_state.widgets.label)
     U.safeDelete(_state.widgets.container)
 
     _state.widgets.label = nil
     _state.widgets.container = nil
+    _state.widgets.panel = nil
+    _state.widgets.content = nil
 
     _state.inited = false
+    _state.enabled = nil
+    _state.visible = nil
     _state.lastError = nil
     return true, nil
 end

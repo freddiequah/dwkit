@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_manager
 -- Owner       : UI
--- Version     : v2026-02-05A
+-- Version     : v2026-02-07C
 -- Purpose     :
 --   - SAFE dispatcher for applying UI modules registered in gui_settings.
 --   - Provides manual-only "apply all" and "apply one" capability.
@@ -14,35 +14,17 @@
 --       * When a UI is disabled, release claims via ui_dependency_service.releaseUi().
 --     NOTE: Provider lifecycle is tied to "enabled", not "visible".
 --
--- Public API  :
---   - getModuleVersion() -> string
---   - getState(opts?) -> table (manager summary; compat)
---   - listUiIds(opts?) -> {string} (compat)
---   - applyAll(opts?) -> boolean ok, string|nil err
---   - applyOne(uiId, opts?) -> boolean ok, string|nil err
---   - disposeOne(uiId, opts?) -> boolean ok, string|nil err
---   - reloadOne(uiId, opts?) -> boolean ok, string|nil err
---   - reloadAll(opts?) -> boolean ok, string|nil err
---
---   - state(opts?) -> table|nil, string|nil err
---   - stateOne(uiId, opts?) -> table|nil, string|nil err
---   - printState(opts?) -> boolean ok, string|nil err
---   - printStateOne(uiId, opts?) -> boolean ok, string|nil err
---
---   - listAll(opts?) -> {uiId}|{records}
---   - listEnabled(opts?) -> {uiId}|{records}
---   - seedRegisteredDefaults(opts?) -> boolean ok, string|nil err
---
--- Notes:
---   - Gating:
---       * If gui_settings says enabled=false, applyOne MUST best-effort stand-down
---         (dispose/hide) if the UI is already instantiated/visible.
---       * UI module itself decides visible/show/hide behaviour when enabled=true.
+-- Key Fixes:
+--   v2026-02-07C:
+--     - Dispatcher now enforces deterministic runtime-visible signal (ui_base storeEntry.state.visible)
+--       after successful applyOne stand-up when cfgVisible is ON.
+--       This fixes cases where UI modules reuse existing widgets and show() a container without
+--       updating storeEntry.state.visible back to true (rtState drift).
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-05A"
+M.VERSION = "v2026-02-07C"
 
 local function _rawOut(line)
     line = tostring(line or "")
@@ -65,7 +47,6 @@ local function _out(line, opts)
 end
 
 local function _err(msg, opts)
-    -- errors should still print even when quiet
     _rawOut("[DWKit UI] ERROR: " .. tostring(msg))
 end
 
@@ -83,10 +64,6 @@ local function _safeRequire(modName)
     return false, mod
 end
 
--- Robust module method call WITHOUT double side-effects.
--- Tries dot-call first: fn(...)
--- Only if that fails, tries colon-call: fn(self, ...)
--- Returns: ok, result, err
 local function _callModuleBestEffort(mod, fnName, ...)
     if type(mod) ~= "table" then
         return false, nil, "module not table"
@@ -149,16 +126,21 @@ local function _isEnabled(gs, uiId)
     return enabled
 end
 
+-- IMPORTANT: gui_settings.isVisible/getVisible often take a default value param.
+-- Passing nil can yield nil even when a value exists in defaults/records.
+-- Use a default that returns a stable boolean if a record is missing.
 local function _isVisibleBestEffort(gs, uiId)
     if type(gs) ~= "table" then return nil end
+
     if type(gs.isVisible) == "function" then
-        local okV, v = pcall(gs.isVisible, uiId, nil)
+        local okV, v = pcall(gs.isVisible, uiId, true)
         if okV then return v end
     end
     if type(gs.getVisible) == "function" then
-        local okV, v = pcall(gs.getVisible, uiId, nil)
+        local okV, v = pcall(gs.getVisible, uiId, true)
         if okV then return v end
     end
+
     return nil
 end
 
@@ -174,11 +156,44 @@ local function _clearModuleCache(modName)
 end
 
 -- -------------------------------------------------------------------------
+-- Deterministic runtime-visible signal (ui_base storeEntry.state.visible)
+-- -------------------------------------------------------------------------
+
+local function _setRuntimeVisibleBestEffort(uiId, visible, source)
+    uiId = tostring(uiId or "")
+    if uiId == "" then return false end
+
+    local okU, U = pcall(require, "dwkit.ui.ui_base")
+    if not okU or type(U) ~= "table" then
+        return false
+    end
+
+    -- Preferred: dedicated helper
+    if type(U.setUiStateVisibleBestEffort) == "function" then
+        pcall(function()
+            U.setUiStateVisibleBestEffort(uiId, (visible == true))
+        end)
+        return true
+    end
+
+    -- Fallback: setUiRuntime state merge
+    if type(U.setUiRuntime) == "function" then
+        pcall(function()
+            U.setUiRuntime(uiId, {
+                state = { visible = (visible == true) },
+                meta = { uiId = uiId, source = tostring(source or "ui_manager:runtime") },
+            })
+        end)
+        return true
+    end
+
+    return false
+end
+
+-- -------------------------------------------------------------------------
 -- Dependency wiring (enabled-based)
 -- -------------------------------------------------------------------------
 
--- Model A: enabled UI -> requires passive provider(s).
--- NOTE: Dependencies are tied to enabled, not visible.
 local UI_PROVIDER_DEPS = {
     roomentities_ui = { "roomfeed_watch" },
 }
@@ -187,7 +202,6 @@ local function _getProvidersForUi(uiId, uiMod)
     uiId = tostring(uiId or "")
     local list = UI_PROVIDER_DEPS[uiId]
 
-    -- Optional UI module override/extension: getRequiredProviders() -> {string}
     if type(uiMod) == "table" and type(uiMod.getRequiredProviders) == "function" then
         local ok, v = pcall(uiMod.getRequiredProviders)
         if ok and type(v) == "table" then
@@ -215,7 +229,7 @@ end
 local function _ensureDepsIfAny(uiId, uiMod, opts)
     local dep = _getUiDepServiceBestEffort()
     if type(dep) ~= "table" then
-        return true, nil -- dependency service optional (safe skip)
+        return true, nil
     end
 
     local providers = _getProvidersForUi(uiId, uiMod)
@@ -234,7 +248,7 @@ end
 local function _releaseDepsIfAny(uiId, opts)
     local dep = _getUiDepServiceBestEffort()
     if type(dep) ~= "table" then
-        return true, nil -- dependency service optional (safe skip)
+        return true, nil
     end
 
     local ok, err = dep.releaseUi(uiId, { source = (opts and opts.source) or "ui_manager:deps:release", quiet = true })
@@ -246,79 +260,43 @@ end
 
 -- -------------------------------------------------------------------------
 
-local function _ppValue(v)
-    local tv = type(v)
-    if tv == "string" then
-        return string.format("%q", v)
-    elseif tv == "number" or tv == "boolean" or tv == "nil" then
-        return tostring(v)
-    elseif tv == "function" then
-        return "<function>"
-    elseif tv == "userdata" then
-        return "<userdata>"
-    elseif tv == "thread" then
-        return "<thread>"
-    elseif tv == "table" then
-        return "<table>"
-    end
-    return "<" .. tv .. ">"
-end
-
-local function _ppTable(t, opts, depth, path, visited, itemCounter)
-    opts = (type(opts) == "table") and opts or {}
-    depth = depth or 0
-    path = path or ""
-    visited = visited or {}
-    itemCounter = itemCounter or { n = 0 }
-
-    local maxDepth = tonumber(opts.maxDepth or 4) or 4
-    local maxItems = tonumber(opts.maxItems or 80) or 80
-
-    if type(t) ~= "table" then
-        _out(path .. " = " .. _ppValue(t), opts)
-        return
-    end
-
-    if visited[t] then
-        _out(path .. " = <table:cycle>", opts)
-        return
-    end
-    visited[t] = true
-
-    if depth >= maxDepth then
-        _out(path .. " = <table:maxDepth>", opts)
-        return
-    end
-
-    local keys = _sortedKeys(t)
-    for _, k in ipairs(keys) do
-        if itemCounter.n >= maxItems then
-            _out(path .. "  ... <maxItems reached>", opts)
-            return
-        end
-
-        itemCounter.n = itemCounter.n + 1
-
-        local v = t[k]
-        local linePrefix = string.rep("  ", depth)
-        local keyStr = tostring(k)
-
-        if type(v) == "table" then
-            _out(linePrefix .. keyStr .. " = {", opts)
-            _ppTable(v, opts, depth + 1, keyStr, visited, itemCounter)
-            _out(linePrefix .. "}", opts)
-        else
-            _out(linePrefix .. keyStr .. " = " .. _ppValue(v), opts)
-        end
-    end
-end
-
 function M.getModuleVersion()
     return M.VERSION
 end
 
+-- Safe helper: session-only visible sync.
+-- Does NOT call apply/dispose; intended for UI chrome interactions.
+function M.syncVisibleSession(uiId, visible, opts)
+    opts = (type(opts) == "table") and opts or {}
+    uiId = tostring(uiId or "")
+    if uiId == "" then return false, "uiId invalid" end
+
+    local gs = _getGuiSettingsBestEffort()
+    if type(gs) ~= "table" then
+        return false, "DWKit.config.guiSettings not available"
+    end
+
+    local okLoad, loadErr = _ensureLoaded(gs)
+    if not okLoad then
+        return false, tostring(loadErr)
+    end
+
+    if type(gs.enableVisiblePersistence) == "function" then
+        pcall(gs.enableVisiblePersistence, { noSave = true })
+    end
+    if type(gs.setVisible) == "function" then
+        pcall(gs.setVisible, uiId, (visible == true), { noSave = true })
+    end
+
+    return true, nil
+end
+
 local function _standDownIfDisabled(uiId, opts)
     opts = (type(opts) == "table") and opts or {}
+
+    -- deterministic runtime signal: disabled implies not running/visible
+    _setRuntimeVisibleBestEffort(uiId, false, "ui_manager:standDownIfDisabled")
+
     local ok, err = M.disposeOne(uiId, { source = opts.source or "ui_manager:standdown", quiet = opts.quiet })
     if not ok then
         _err("standDown dispose failed uiId=" .. tostring(uiId) .. " err=" .. tostring(err), opts)
@@ -344,8 +322,8 @@ function M.applyOne(uiId, opts)
     end
 
     local enabled = _isEnabled(gs, uiId)
+    local cfgVisible = _isVisibleBestEffort(gs, uiId)
 
-    -- If disabled: release deps (enabled-based), then stand down best-effort.
     if not enabled then
         _out("[DWKit UI] SKIP uiId=" .. tostring(uiId) .. " (disabled)", opts)
 
@@ -358,12 +336,10 @@ function M.applyOne(uiId, opts)
         return true, nil
     end
 
-    -- Enabled: best-effort require module (may not exist yet).
     local modName = "dwkit.ui." .. tostring(uiId)
     local okR, modOrErr = _safeRequire(modName)
     local ui = (okR and type(modOrErr) == "table") and modOrErr or nil
 
-    -- Ensure dependencies for enabled UI even if module isn't implemented yet.
     local okDep, errDep = _ensureDepsIfAny(uiId, ui, { source = opts.source or "ui_manager:applyOne", quiet = true })
     if not okDep then
         return false, "dependency ensure failed: " .. tostring(errDep)
@@ -383,6 +359,14 @@ function M.applyOne(uiId, opts)
         if not okApply then
             return false, tostring(errApply)
         end
+
+        -- v2026-02-07C:
+        -- If gui_settings says this UI should be visible, enforce deterministic runtime-visible signal.
+        -- This fixes modules that reuse existing widgets and call show() without updating storeEntry.state.visible.
+        if cfgVisible == true then
+            _setRuntimeVisibleBestEffort(uiId, true, "ui_manager:post_apply:cfgVisibleOn")
+        end
+
         return true, nil
     end
 
@@ -445,12 +429,12 @@ function M.disposeOne(uiId, opts)
         return false, "uiId invalid"
     end
 
-    -- NOTE: dispose does NOT change dependency refs here.
-    -- Dependency lifecycle is tied to enabled/disabled (applyOne when disabled releases).
     local modName = "dwkit.ui." .. tostring(uiId)
     local okR, modOrErr = _safeRequire(modName)
     if not okR or type(modOrErr) ~= "table" then
         _out("[DWKit UI] dispose uiId=" .. tostring(uiId) .. " (no module yet)", opts)
+        -- deterministic runtime signal: disposed implies not visible
+        _setRuntimeVisibleBestEffort(uiId, false, "ui_manager:dispose:no_module")
         return true, nil
     end
 
@@ -461,11 +445,15 @@ function M.disposeOne(uiId, opts)
         if not okD then
             return false, tostring(errD)
         end
+        -- deterministic runtime signal: disposed implies not visible
+        _setRuntimeVisibleBestEffort(uiId, false, "ui_manager:dispose:ok")
         _out("[DWKit UI] dispose uiId=" .. tostring(uiId) .. " ok=true", opts)
         return true, nil
     end
 
     _out("[DWKit UI] dispose uiId=" .. tostring(uiId) .. " (no dispose() function)", opts)
+    -- best-effort: even without dispose(), consider it stood down from dispatcher POV
+    _setRuntimeVisibleBestEffort(uiId, false, "ui_manager:dispose:no_fn")
     return true, nil
 end
 
@@ -623,7 +611,7 @@ function M.stateOne(uiId, opts)
         uiId = uiId,
         moduleVersion = M.VERSION,
         enabled = (enabled == true),
-        visible = visible, -- may be nil if gui_settings doesn't track it
+        visible = visible,
         module = modName,
         hasModule = (type(ui) == "table"),
         hasInit = (type(ui) == "table" and type(ui.init) == "function") or false,
@@ -632,34 +620,8 @@ function M.stateOne(uiId, opts)
         hasGetState = (type(ui) == "table" and type(ui.getState) == "function") or false,
         hasGetRequiredProviders = (type(ui) == "table" and type(ui.getRequiredProviders) == "function") or false,
         requiredProviders = requiredProviders,
-        uiState = uiState, -- best-effort, may be nil
+        uiState = uiState,
     }
-
-    -- Optional pretty-print when not quiet (keeps your existing UX)
-    if not _isQuiet(opts) then
-        _out("[DWKit UI] state uiId=" .. tostring(uiId), opts)
-        _out("  moduleVersion=" .. tostring(M.VERSION), opts)
-        _out("  enabled=" .. tostring(rec.enabled), opts)
-        if visible ~= nil then
-            _out("  visible=" .. tostring(visible), opts)
-        end
-        _out("  module=" .. tostring(modName), opts)
-        if not rec.hasModule then
-            _out("  note=no module yet", opts)
-        else
-            _out("  hasInit=" .. tostring(rec.hasInit), opts)
-            _out("  hasApply=" .. tostring(rec.hasApply), opts)
-            _out("  hasDispose=" .. tostring(rec.hasDispose), opts)
-            _out("  hasGetState=" .. tostring(rec.hasGetState), opts)
-            _out("  hasGetRequiredProviders=" .. tostring(rec.hasGetRequiredProviders), opts)
-        end
-        if type(uiState) == "table" then
-            _out("{", opts)
-            _ppTable(uiState, { maxDepth = opts.maxDepth or 4, maxItems = opts.maxItems or 80, quiet = opts.quiet }, 0,
-                "", nil, nil)
-            _out("}", opts)
-        end
-    end
 
     return rec, nil
 end
@@ -680,7 +642,6 @@ function M.state(opts)
     local records = M.listAll({ records = true })
     local uis = {}
     for _, rec in ipairs(records) do
-        -- enrich with requiredProviders + module state best-effort
         local one, _ = M.stateOne(rec.uiId, { quiet = true })
         if type(one) == "table" then
             uis[rec.uiId] = one
@@ -703,30 +664,14 @@ function M.state(opts)
         end
     end
 
-    local st = {
+    return {
         moduleVersion = M.VERSION,
         uiCount = #records,
         uis = uis,
         dependencyState = depState,
-    }
-
-    if not _isQuiet(opts) then
-        _out("[DWKit UI] state (manager)", opts)
-        _out("  moduleVersion=" .. tostring(M.VERSION), opts)
-        _out("  uiCount=" .. tostring(st.uiCount), opts)
-        if type(depState) == "table" and type(depState.refs) == "table" then
-            local refsKeys = _sortedKeys(depState.refs)
-            _out("  dep.refs:", opts)
-            for _, k in ipairs(refsKeys) do
-                _out("   - " .. tostring(k) .. "=" .. tostring(depState.refs[k]), opts)
-            end
-        end
-    end
-
-    return st, nil
+    }, nil
 end
 
--- Print-only helpers (return boolean ok, err)
 function M.printStateOne(uiId, opts)
     local st, err = M.stateOne(uiId, opts)
     if not st then return false, err end
@@ -739,18 +684,11 @@ function M.printState(opts)
     return true, nil
 end
 
--- Backwards-compat aliases:
--- - previously state()/stateOne() were print-oriented and returned boolean
--- - now: state()/stateOne() return tables; printState*/printStateOne* are print-only
--- Keep old exported names but with correct semantics already above.
--- -------------------------------------------------------------------------
-
--- Defaults for registered UI ids (seed only; does not overwrite existing records)
 M.KNOWN_UI_DEFAULTS = {
     presence_ui = { enabled = true, visible = true },
     roomentities_ui = { enabled = true, visible = true },
     launchpad_ui = { enabled = true, visible = false },
-    ui_manager_ui = { enabled = true, visible = false }, -- UI Manager UI (enable/disable surface)
+    ui_manager_ui = { enabled = true, visible = false },
 }
 
 function M.seedRegisteredDefaults(opts)
@@ -809,7 +747,6 @@ end
 
 local function _looksLikeUiId(s)
     if type(s) ~= "string" then return false end
-    -- simple, permissive heuristic: letters/numbers/_ and ends with "_ui"
     return s:match("^[%w_]+_ui$") ~= nil
 end
 
@@ -818,9 +755,6 @@ local function _normalizeExcludeSet(opts)
 
     local exclude = {}
 
-    -- excludeUiIds can be:
-    -- 1) array: {"launchpad_ui","presence_ui"}
-    -- 2) map: { launchpad_ui=true, presence_ui=true }
     if type(opts.excludeUiIds) == "table" then
         local isArray = (#opts.excludeUiIds > 0)
         if isArray then
@@ -834,11 +768,9 @@ local function _normalizeExcludeSet(opts)
         end
     end
 
-    -- includeSelf=false means "exclude the caller ui id" (generic)
     if opts.includeSelf == false then
         local selfUiId = opts.selfUiId or opts.selfUi or opts.uiId or opts.callerUiId
         if (type(selfUiId) ~= "string" or selfUiId == "") and _looksLikeUiId(opts.source) then
-            -- generic inference: if source looks like a ui id, treat it as self
             selfUiId = opts.source
         end
         if type(selfUiId) == "string" and selfUiId ~= "" then
@@ -869,10 +801,6 @@ function M.listEnabled(opts)
     return out
 end
 
--- -------------------------------------------------------------------------
--- Compat helpers (your Mudlet calls expected these names)
--- -------------------------------------------------------------------------
-
 function M.listUiIds(opts)
     return M.listAll(opts)
 end
@@ -900,7 +828,6 @@ function M.getState(opts)
 
     local records = M.listAll({ records = true })
 
-    -- Build uis map (what your debugging expected as st.uis)
     local uis = {}
     for _, rec in ipairs(records) do
         uis[rec.uiId] = {
@@ -913,8 +840,8 @@ function M.getState(opts)
     return {
         moduleVersion = M.VERSION,
         uiCount = #records,
-        uis = uis,    -- ✅ map keyed by uiId
-        ui = records, -- keep old field for any existing consumers
+        uis = uis,
+        ui = records,
         guiSettingsStatus = gsStatus,
         dependencyState = depState,
         note = "ui_manager is a dispatcher; dwkit.ui.ui_manager_ui is the UI surface",
