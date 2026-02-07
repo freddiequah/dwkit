@@ -1,19 +1,21 @@
 ============================================================
-FULL ANCHOR PACK â€” MUDLET KIT GOVERNANCE (STORE IN PROJECT)
+FULL ANCHOR PACK — MUDLET KIT GOVERNANCE (STORE IN PROJECT)
 UPDATED: + Mudlet Input Line Paste Safety (single-line lua do...end)
 UPDATED: + Command Surface Architecture Standard (Router + Handlers, Phase 2 triggers)
 UPDATED: + Automation Policy: Passive Capture vs Active Polling + Essential Default Automation (declared, visible, controllable)
 UPDATED: + Mudlet Verification Runner Standard: dwverify + verification.lua suites (scripted verification steps; Lua steps must be single-line)
 UPDATED: + Verification Plan Split: verification.lua (stable runner) + verification_plan.lua (per-change suites)
 UPDATED: + UI Architecture Contracts: Shared Frame + Content Kits, and UI semantics (ActionPad/Presence_UI/RoomEntities_UI) + ui_smoke console verification
+UPDATED: + Full-File Return Rule hardening: always return full files in one contiguous block; never split outputs; never truncate; preserve unrelated code.
+UPDATED: + Mojibake cleanup: normalize punctuation/quotes to avoid UTF-8 decode artifacts in this standard.
 
-GitHub PR Workflow via PowerShell (GitHub CLI â€œghâ€)
+GitHub PR Workflow via PowerShell (GitHub CLI "gh")
 
 Repo Hygiene: UTF-8 (NO BOM) + Versioned Git Hooks + LF enforcement
 
 GitHub Branch Protection (solo repo) + gh merge policy notes (Section N.1)
 
-AUTHORITATIVE INSTRUCTION â€” FOLLOW STRICTLY
+AUTHORITATIVE INSTRUCTION — FOLLOW STRICTLY
 
 This pack defines the mandatory development standard for this project.
 It overrides all prior assumptions, habits, defaults, or stylistic choices.
@@ -21,7 +23,7 @@ Do not improvise. Do not refactor unless explicitly instructed.
 
 NEW CHAT OPENER (PASTE THIS AS FIRST MESSAGE IN EVERY NEW CHAT)
 
-Use the Projectâ€™s â€œFull Anchor Packâ€ as the authoritative reference for all work in this chat.
+Use the Project's "Full Anchor Pack" as the authoritative reference for all work in this chat.
 Do not deviate from its standards, contracts, naming, load order, and Definition of Done.
 For every delivered item (new or changed), include Confidence + Assumptions + Verification Steps and do not proceed until I confirm PASS (or I paste logs for diagnosis).
 If any requirement conflicts with the request, flag the conflict before implementing changes.
@@ -32,11 +34,18 @@ When requesting code changes, the user will paste the full current file(s).
 
 The assistant MUST return the full updated file(s) in full (no patches/diffs).
 
+Hardening rules (MANDATORY):
+- No split delivery: Return each changed file as ONE complete, contiguous block (no PART 1/2). Only split if the user explicitly asks.
+- No truncation: Never omit or elide any lines from a changed file. If the file is large, still return it in full.
+- Preserve unrelated code: Implement only the requested change. Do NOT delete, rewrite, or 'simplify' unrelated functions/sections (e.g., keep a/b/c/d/e intact when adding f).
+- Reverts follow the same rule: if reverting a file, return the full reverted file content in full.
+
+
 If the assistant is unsure it has the latest file content, it MUST request the full file content first and provide the exact commands to collect it.
 
 REFERENCE RULE (MANDATORY)
 
-The Projectâ€™s â€œFull Anchor Packâ€ is the single source of truth for:
+The Project's "Full Anchor Pack" is the single source of truth for:
 
 architecture, naming, module boundaries, load order
 
@@ -83,7 +92,7 @@ If any required identity fields or relevant contract sheets are missing:
 
 Implementation must pause for clarification (do not guess).
 
-PACKAGE IDENTITY (LOCKED â€” AUTHORITATIVE IN REPO)
+PACKAGE IDENTITY (LOCKED — AUTHORITATIVE IN REPO)
 
 Source of truth:
 
@@ -103,7 +112,7 @@ The Anchor Pack MUST match docs/PACKAGE_IDENTITY.md.
 If identity values ever change, docs/PACKAGE_IDENTITY.md MUST be version-bumped and the decision recorded there.
 
 ==================================================
-MUDLET PACKAGE DEVELOPMENT STANDARD v1.12 (FINALIZED)
+MUDLET PACKAGE DEVELOPMENT STANDARD v1.13 (FINALIZED)
 
 Baseline additions included:
 
@@ -119,7 +128,7 @@ Section S Command & Alias Registry (incl gameplay wrappers + runtime filters)
 
 Section T Iterative Development + Continuity Policy
 
-Section U Consistency Lock (no â€œnew chefâ€ drift)
+Section U Consistency Lock (no "new chef" drift)
 
 Section V Chat Handoff Pack Template
 
@@ -127,7 +136,7 @@ Full-File Return Workflow (assistant returns full changed files; no patches)
 
 Mudlet Input Line Paste Safety (single-line lua do...end)
 
-GitHub PR Workflow via PowerShell (GitHub CLI â€œghâ€) (Section N.1)
+GitHub PR Workflow via PowerShell (GitHub CLI "gh") (Section N.1)
 
 Repo Hygiene: UTF-8 NO BOM + versioned git hooks + LF enforcement (Section A.12)
 
@@ -135,7 +144,7 @@ GitHub Branch Protection (solo repo) + gh merge policy notes (Section N.1)
 
 NEW: Automation Policy clarification:
 Passive Capture (default-on allowed) vs Active Polling (timer automation),
-and â€œEssential Default Automationâ€ (declared, visible, controllable; small allowed list).
+and "Essential Default Automation" (declared, visible, controllable; small allowed list).
 
 NEW: Mudlet Verification Runner Standard:
 All changes MUST have Mudlet verification runnable via a single command: dwverify <suite>.
@@ -197,23 +206,23 @@ Pre-commit must block BOM regressions and direct commits to main.
 
 2026-01-14: Added Branch Protection + gh merge policy notes.
 
-2026-01-18: Added Command Surface Architecture Standard (Router + Handlers) to prevent command_aliases.lua becoming a â€œgod moduleâ€,
+2026-01-18: Added Command Surface Architecture Standard (Router + Handlers) to prevent command_aliases.lua becoming a "god module",
 and to provide a Phase 2 trigger checklist for registry migration.
 
-Solo-repo protection settings can block merges due to â€œreview requiredâ€ or â€œauto-merge disabledâ€.
+Solo-repo protection settings can block merges due to "review required" or "auto-merge disabled".
 
 Anchor Pack now defines the exact branch protection settings + the gh CLI merge commands to avoid being forced into browser UI.
 
-2026-01-28: Clarified â€œManual means manualâ€ vs explicit automation:
+2026-01-28: Clarified "Manual means manual" vs explicit automation:
 
 Manual commands remain one-shot only.
 Hidden automation is forbidden.
 
-2026-01-28: Added â€œPassive Capture vs Active Pollingâ€ and â€œEssential Default Automationâ€:
+2026-01-28: Added "Passive Capture vs Active Polling" and "Essential Default Automation":
 
 Passive capture services (parsers/stores) may be enabled by default (SAFE: no command emission).
 Active polling (timers/interval command emission) is automation.
-A minimal, declared â€œEssential Default Automationâ€ list may be enabled by default when required by core kit functionality (e.g., Presence/UI freshness),
+A minimal, declared "Essential Default Automation" list may be enabled by default when required by core kit functionality (e.g., Presence/UI freshness),
 but it must be visible, controllable, auditable, and never hidden.
 
 2026-01-28: Added Mudlet Verification Runner Standard (dwverify + verification suites):
@@ -248,8 +257,12 @@ WhoStore is an authority signal for confirming player identity and reducing name
 Console-first UI verification gate:
 - dwverify ui_smoke must set gui_settings (noSave) then apply and print visible state (pasteable; no screenshots).
 
+2026-02-07: Standard maintenance updates:
+- Fixed mojibake/UTF-8 punctuation artifacts in this document.
+- Hardened Full-File Return Workflow: no split delivery, no truncation, preserve unrelated code; full-file reverts required.
+
 ==================================================
-SECTION A â€” BOOTSTRAP (ALWAYS APPLIES)
+SECTION A — BOOTSTRAP (ALWAYS APPLIES)
 
 COMPATIBILITY BASELINE (MANDATORY)
 
@@ -258,13 +271,13 @@ Target client baseline: Mudlet 4.19.1
 Target runtime: Mudlet embedded Lua (verify at runtime; do not assume 5.2/5.3+ features)
 
 Rules:
-a) Do not use Lua features which may not exist in Mudletâ€™s Lua runtime unless a compatibility shim is provided.
+a) Do not use Lua features which may not exist in Mudlet's Lua runtime unless a compatibility shim is provided.
 b) Provide (or require) a simple runtime check command (later) that prints:
 
 Mudlet version (if available)
 
 _VERSION (Lua version string)
-c) If any feature depends on runtime-specific behavior, it is "unverified" until tested in the userâ€™s Mudlet 4.19.1 environment.
+c) If any feature depends on runtime-specific behavior, it is "unverified" until tested in the user's Mudlet 4.19.1 environment.
 
 This work is product-grade Mudlet package development, not ad-hoc scripting.
 
@@ -276,7 +289,7 @@ Cross-module interaction is allowed ONLY via documented APIs or events.
 
 No hardcoded profile names or absolute paths are permitted.
 
-Manual means manual â€” and no hidden automation.
+Manual means manual — and no hidden automation.
 
 UI modules are consumers only; they own no logic or persistence.
 
@@ -286,11 +299,11 @@ Every change must include test commands and expected results.
 
 Stability and contract preservation take priority over new features.
 
-AUTOMATION POLICY (LOCKED) â€” MANUAL VS PASSIVE CAPTURE VS ACTIVE POLLING (NO HIDDEN AUTOMATION)
+AUTOMATION POLICY (LOCKED) — MANUAL VS PASSIVE CAPTURE VS ACTIVE POLLING (NO HIDDEN AUTOMATION)
 
 Purpose:
 Support reliable data-driven UI (Presence_UI, future ActionPad, etc.) that needs fresh snapshots (who, score, etc.)
-without violating â€œManual means manualâ€.
+without violating "Manual means manual".
 
 A) Definitions (LOCKED)
 1) Manual action:
@@ -304,20 +317,20 @@ A) Definitions (LOCKED)
 - The batch MUST be visible by virtue of user invocation and its printed output; it must not be hidden.
 
 2) Passive Capture (SAFE data processing):
-- The kit parses/captures output ONLY when that output appears (e.g., user manually types â€œwhoâ€, or some other explicit action triggers it).
+- The kit parses/captures output ONLY when that output appears (e.g., user manually types "who", or some other explicit action triggers it).
 - Passive Capture MUST NOT issue MUD commands by itself.
 - Passive Capture may be enabled by default because it is not timer automation and does not emit gameplay commands.
 
 3) Active Polling (Automation):
 - Any recurring timer, scheduled action, or autonomous trigger that can run without the user typing each time,
-  including periodically issuing MUD commands (example: â€œwhoâ€, future â€œscoreâ€) and capturing/parsing outputs.
+  including periodically issuing MUD commands (example: "who", future "score") and capturing/parsing outputs.
 
 4) Hidden automation (FORBIDDEN):
 Any Active Polling that:
 - is not explicitly declared by governance/config,
 - has no visible status,
 - has no immediate stop control,
-- or re-enables itself without the userâ€™s instruction.
+- or re-enables itself without the user's instruction.
 
 B) Non-negotiable rules (LOCKED)
 1) Manual means manual:
@@ -326,11 +339,11 @@ B) Non-negotiable rules (LOCKED)
   and MUST NOT implicitly enable automation.
 
 2) No hidden automation:
-- Active Polling MUST NEVER be â€œsurprise behaviorâ€.
+- Active Polling MUST NEVER be "surprise behavior".
 - If it runs, it MUST be discoverable, controllable, and auditable.
 
 C) Automation modes (LOCKED)
-DWKit classifies â€œautomation modeâ€ for any behavior that could run repeatedly:
+DWKit classifies "automation mode" for any behavior that could run repeatedly:
 
 1) manual
 - No timers.
@@ -340,12 +353,12 @@ DWKit classifies â€œautomation modeâ€ for any behavior that could run rep
 - Timers allowed ONLY after explicit user enabling via command and/or explicit config toggle.
 
 3) essential-default
-- Timers may be enabled by default ONLY if the job is explicitly listed in the â€œEssential Default Automation Listâ€ (Section A.E).
+- Timers may be enabled by default ONLY if the job is explicitly listed in the "Essential Default Automation List" (Section A.E).
 - Essential-default is allowed only for core kit functionality dependencies (e.g., Presence_UI requiring fresh WhoStore).
 - Essential-default MUST still satisfy visibility + control + auditability + safe pacing.
 
 Note:
-- â€œessential-defaultâ€ is not â€œhiddenâ€.
+- "essential-default" is not "hidden".
 - It is a declared baseline, with explicit startup declaration and a kill switch.
 
 D) Allowed Active Polling requirements (MUST satisfy ALL) (LOCKED)
@@ -382,7 +395,7 @@ Active Polling (opt-in or essential-default) is allowed only if all are true:
 
 E) Essential Default Automation List (LOCKED)
 Rule:
-Only the following jobs are allowed to be â€œessential-defaultâ€ ON.
+Only the following jobs are allowed to be "essential-default" ON.
 
 Essential Default Jobs (current agreed baseline):
 1) WhoPoll (purpose: keep WhoStore reasonably fresh for Presence/UI dependency)
@@ -391,7 +404,7 @@ Essential Default Jobs (current agreed baseline):
 - Notes:
   - Must remain conservative and quiet.
   - Must be visible + controllable (status + kill switch).
-  - Must be safe to disable (UI shows â€œstaleâ€ state rather than breaking).
+  - Must be safe to disable (UI shows "stale" state rather than breaking).
 
 Non-essential jobs:
 - MUST be opt-in and default OFF unless this Anchor Pack is updated and version-bumped.
@@ -406,14 +419,14 @@ F) Service vs Scheduler separation (LOCKED)
 - Services MUST NOT silently create timers. Schedulers MUST be explicitly controlled.
 
 G) UI dependency rule (LOCKED)
-- UI modules MUST tolerate missing or stale data (show â€œstale/unknownâ€ state) instead of forcing hidden automation.
+- UI modules MUST tolerate missing or stale data (show "stale/unknown" state) instead of forcing hidden automation.
 - If a UI feature requires Active Polling to be useful, that dependency MUST be documented in:
   - the module contract sheet, and
   - the relevant service/automation job contract.
 
 MUDLET INPUT LINE PASTE SAFETY (LOCKED)
 
-Problem: Multi-line Lua pasted into the Mudlet input line can send stray lines to the MUD, causing â€œHuh?!?â€ and accidental gameplay commands.
+Problem: Multi-line Lua pasted into the Mudlet input line can send stray lines to the MUD, causing "Huh?!?" and accidental gameplay commands.
 
 Rules:
 a) When running Lua from the Mudlet INPUT LINE, always use a SINGLE-LINE: lua do ... end
@@ -493,7 +506,7 @@ They are file rules, not commands.
 Always edit .gitattributes using an editor or Set-Content / WriteAllText.
 
 ==================================================
-SECTION B â€” CANONICAL PACKAGE IDENTITY (MANDATORY)
+SECTION B — CANONICAL PACKAGE IDENTITY (MANDATORY)
 
 Rules:
 
@@ -512,7 +525,7 @@ Source of truth:
 docs/PACKAGE_IDENTITY.md (repo authoritative)
 
 ==================================================
-SECTION C â€” FILE/FOLDER NAMING & LAYOUT (MANDATORY)
+SECTION C — FILE/FOLDER NAMING & LAYOUT (MANDATORY)
 
 Canonical layout (physical repo paths):
 
@@ -576,7 +589,7 @@ docs/DOCS_SYNC_CHECKLIST.md
 docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.10.md (this file; versioned by content header)
 
 ==================================================
-SECTION D â€” CORE DEVELOPMENT STANDARD
+SECTION D — CORE DEVELOPMENT STANDARD
 
 PURPOSE
 Ensure correctness, stability, predictability, and long-term maintainability under the Compatibility Baseline.
@@ -589,7 +602,7 @@ Modules MUST return a table defining their public API.
 
 Internal state MUST remain local to the module.
 
-No module may read or mutate another moduleâ€™s internal tables.
+No module may read or mutate another module's internal tables.
 
 NAMESPACE & GLOBAL RULES
 
@@ -630,8 +643,8 @@ Events Consumed
 
 Persistence (path rule + schema version)
 
-Automation Policy (manual / opt-in / essential-default) â€” must align with Section A Automation Policy
-If not applicable, state â€œNoneâ€.
+Automation Policy (manual / opt-in / essential-default) — must align with Section A Automation Policy
+If not applicable, state "None".
 
 EVENTS & DATA CONTRACTS
 
@@ -690,7 +703,7 @@ Regression checklist
 If it cannot be tested, it is incomplete.
 
 ==================================================
-SECTION E â€” CENTRAL EVENT REGISTRY (SINGLE SOURCE OF TRUTH)
+SECTION E — CENTRAL EVENT REGISTRY (SINGLE SOURCE OF TRUTH)
 
 One Event Registry (module or doc).
 
@@ -713,7 +726,7 @@ consumers (if known)
 payload version/schema (if applicable)
 
 ==================================================
-SECTION F â€” LOAD ORDER & STARTUP BEHAVIOR (MANDATORY)
+SECTION F — LOAD ORDER & STARTUP BEHAVIOR (MANDATORY)
 
 Load order is a contract:
 
@@ -743,7 +756,7 @@ No Active Polling during load unless explicitly enabled by config (opt-in or ess
 and if autostart is supported, it MUST be visible + declared at startup (Section A Automation Policy).
 
 ==================================================
-SECTION G â€” NO CYCLIC DEPENDENCY POLICY
+SECTION G — NO CYCLIC DEPENDENCY POLICY
 
 Dependencies flow downward only:
 Core -> Persist/Config -> Bus -> Services -> UI
@@ -759,7 +772,7 @@ beyond registration boundary.
 If a cycle appears, redesign is required.
 
 ==================================================
-SECTION H â€” LOGGING & ERROR POLICY
+SECTION H — LOGGING & ERROR POLICY
 
 Consistent log prefix with PackageId/ModuleName.
 
@@ -773,7 +786,7 @@ Silent failures not allowed.
 LaunchPad wraps UI handler calls and emits namespaced error events.
 
 ==================================================
-SECTION I â€” CONFIG POLICY (ONE CONFIG SURFACE)
+SECTION I — CONFIG POLICY (ONE CONFIG SURFACE)
 
 One config surface (single owner module).
 
@@ -784,7 +797,7 @@ No random per-module config globals/files.
 Provide a status/dump method.
 
 ==================================================
-SECTION J â€” CROSS-PROFILE / BROADCAST BOUNDARY (OPTIONAL)
+SECTION J — CROSS-PROFILE / BROADCAST BOUNDARY (OPTIONAL)
 
 If cross-profile exists:
 
@@ -797,7 +810,7 @@ Payload includes version + sender identity.
 Disabled by default; must not break single-profile use.
 
 ==================================================
-SECTION K â€” UI STABILITY + LAUNCHPAD POLICY (REQUIRED)
+SECTION K — UI STABILITY + LAUNCHPAD POLICY (REQUIRED)
 
 Single UI control surface: LaunchPad.
 
@@ -807,7 +820,7 @@ UI modules are idempotent, reload-safe, dependency-safe, consumer-only.
 
 New UI is incomplete until controllable via LaunchPad and passes smoke tests.
 
-SECTION K.1 â€” UI ARCHITECTURE AND CONTRACTS (AUTHORITATIVE; DO NOT DRIFT)
+SECTION K.1 — UI ARCHITECTURE AND CONTRACTS (AUTHORITATIVE; DO NOT DRIFT)
 
 Core principle:
 UI modules must be consistent in frame + theme, and differ only by content contracts.
@@ -874,7 +887,7 @@ Verification (Console-first; No screenshots)
   Verification steps MUST set gui_settings (noSave) then call apply({}) and print visible state.
 
 ==================================================
-SECTION L â€” GUI SETTINGS (PER-PROFILE) (REQUIRED)
+SECTION L — GUI SETTINGS (PER-PROFILE) (REQUIRED)
 
 Per-profile persistent settings under package-owned data dir.
 
@@ -887,7 +900,7 @@ LaunchPad must obey GUI Settings.
 No surprise windows by default (restore visible is opt-in).
 
 ==================================================
-SECTION M â€” TESTING ESCALATION (SELF-TEST RUNNER STANDARD)
+SECTION M — TESTING ESCALATION (SELF-TEST RUNNER STANDARD)
 
 Provide a safe self-test runner command (no gameplay commands unless explicitly opted in by config/policy).
 
@@ -907,7 +920,7 @@ the self-test runner may omit those checks until implemented, but MUST add them
 once the subsystem exists.
 
 ==================================================
-SECTION N â€” RELEASE / PACKAGING DISCIPLINE
+SECTION N — RELEASE / PACKAGING DISCIPLINE
 
 Release Checklist (mandatory for each release):
 
@@ -980,10 +993,10 @@ Changes must land in main via PR (not direct push to main), unless explicitly ag
 
 Preferred workflow is gh CLI from PowerShell (Section N.1).
 
-SECTION N.1 â€” GITHUB PR WORKFLOW (POWERSHELL + GH CLI) (LOCKED)
+SECTION N.1 — GITHUB PR WORKFLOW (POWERSHELL + GH CLI) (LOCKED)
 
 Goal:
-Do PR creation, review, and merge from PowerShell using GitHub CLI (â€œghâ€),
+Do PR creation, review, and merge from PowerShell using GitHub CLI ("gh"),
 instead of relying on the browser UI.
 
 A) One-time setup per machine
@@ -1015,7 +1028,7 @@ Expected: .githooks
 B) GitHub branch protection policy (SOLO REPO, NO BROWSER WORKFLOW)
 
 Goal:
-Keep â€œRequire a pull request before mergingâ€ ON (so main stays protected),
+Keep "Require a pull request before merging" ON (so main stays protected),
 but ensure gh CLI merges never get blocked by impossible requirements (self-approval, missing CI, auto-merge disabled).
 
 Mandatory settings (recommended for this repo):
@@ -1047,7 +1060,7 @@ Allow deletions: OFF
 Automatically delete head branches: ON (nice-to-have)
 
 Policy rule:
-If â€œRequire a pull request before mergingâ€ is ON, then gh merge MUST succeed without:
+If "Require a pull request before merging" is ON, then gh merge MUST succeed without:
 
 approvals (since solo)
 
@@ -1055,7 +1068,7 @@ CI checks (since none)
 
 auto-merge (since may be disabled)
 
-If gh merge reports â€œbase branch policy prohibits the mergeâ€, it means the branch protection has at least one requirement still ON that cannot be satisfied in a solo/no-CI repo (usually approvals or required checks).
+If gh merge reports "base branch policy prohibits the merge", it means the branch protection has at least one requirement still ON that cannot be satisfied in a solo/no-CI repo (usually approvals or required checks).
 
 C) Standard PR workflow (start to end)
 (Assume you are inside repo root: C:\Projects\dwkit)
@@ -1111,19 +1124,19 @@ Notes (locked behavior expectations):
 
 gh pr merge may update origin/main and may switch you back to main, but DO NOT assume.
 
-Always run the â€œAfter merge sync + verifyâ€ block below.
+Always run the "After merge sync + verify" block below.
 
 If merge fails with policy error:
 
 Do NOT attempt self-approve (GitHub blocks approving your own PR).
 
-Fix branch protection to match â€œSolo repo policyâ€ in Section N.1.B (approvals OFF, checks OFF).
+Fix branch protection to match "Solo repo policy" in Section N.1.B (approvals OFF, checks OFF).
 
 Retry: gh pr merge <PR_NUMBER> --squash --delete-branch
 
 Avoid these flags unless you explicitly intend it:
 
---auto requires â€œAllow auto-mergeâ€ enabled on GitHub (often OFF by default).
+--auto requires "Allow auto-merge" enabled on GitHub (often OFF by default).
 
 --admin bypasses protections (works only if you are admin/owner and bypass is allowed).
 
@@ -1191,10 +1204,10 @@ git --% show -s --oneline <tag>^{}
 Or use rev-parse verification:
 git rev-parse --verify '<tag>^{}'
 
-This rule avoids the â€œfatal: ambiguous argument 'xml'â€ style errors seen before.
+This rule avoids the "fatal: ambiguous argument 'xml'" style errors seen before.
 
 ==================================================
-SECTION O â€” DEPRECATION POLICY
+SECTION O — DEPRECATION POLICY
 
 Deprecate in vX, remove in vY (Y later than X).
 
@@ -1211,9 +1224,9 @@ Removal requires migration notes and internal consumers updated first.
 Immediate removal only in explicit breaking-change release.
 
 ==================================================
-SECTION P â€” DEFINITION OF DONE
+SECTION P — DEFINITION OF DONE
 
-A change is not â€œdoneâ€ unless:
+A change is not "done" unless:
 
 scope + single objective defined
 
@@ -1229,14 +1242,14 @@ regression checklist passed
 
 version bumped
 
-â€œnot touchedâ€ list stated
+"not touched" list stated
 
 Mudlet verification gate satisfied:
 - dwverify <suite> executed
 - PASS confirmed by user (or logs provided for diagnosis)
 
 ==================================================
-SECTION Q â€” MODULE CONTRACT SHEET TEMPLATE
+SECTION Q — MODULE CONTRACT SHEET TEMPLATE
 
 MODULE CONTRACT SHEET
 
@@ -1265,7 +1278,7 @@ Invariants:
 Test Commands:
 
 ==================================================
-SECTION R â€” VERIFICATION GATE + CONFIDENCE POLICY (NO BLIND PROGRESSION)
+SECTION R — VERIFICATION GATE + CONFIDENCE POLICY (NO BLIND PROGRESSION)
 
 Problem:
 Assistants may assume a change or new item works and proceed without proof.
@@ -1275,16 +1288,16 @@ For ANY delivered item (new module, new feature, design, integration, bug fix,
 refactor, config change, or guidance that affects implementation), the assistant
 MUST require verification before moving to the next item.
 
-No â€œ100% workingâ€ claims:
+No "100% working" claims:
 
-The assistant MUST NOT claim anything is â€œ100% working/correctâ€ unless it can be
+The assistant MUST NOT claim anything is "100% working/correct" unless it can be
 logically proven from the provided code/spec alone AND does not depend on runtime.
 
 Anything depending on Mudlet runtime, profile state, installed packages,
-triggers, load order, timers, or external systems is always â€œunverifiedâ€
+triggers, load order, timers, or external systems is always "unverified"
 until the user runs validation steps and reports results.
 
-R.1 â€” Mandatory Mudlet Verification Runner (dwverify) (LOCKED)
+R.1 — Mandatory Mudlet Verification Runner (dwverify) (LOCKED)
 
 Goal:
 Make verification repeatable and one-command runnable inside Mudlet, instead of manual multi-step typing.
@@ -1323,7 +1336,7 @@ Safety and Automation Policy alignment:
 - It MUST NOT enable or create persistent polling jobs.
 - Any internal pacing timers used to sequence steps must self-cancel and must not schedule future runs.
 
-R.2 â€” Verification Steps Format (LOCKED)
+R.2 — Verification Steps Format (LOCKED)
 
 Verification steps MUST be explicit commands the user can run and observe.
 
@@ -1335,7 +1348,7 @@ A) DWKit commands/aliases (example: dwwho, dwwho refresh, dwservices status)
 B) Raw MUD commands when needed (example: who)
 C) Mudlet Lua commands ONLY if single-line (see R.3)
 
-R.3 â€” Single-line Lua Rule in Verification (LOCKED)
+R.3 — Single-line Lua Rule in Verification (LOCKED)
 
 Because multi-line Lua pasted/typed can be accidentally sent to the MUD (Huh?!?) and violates paste safety:
 
@@ -1353,7 +1366,7 @@ If multi-line Lua is required for a complex check:
 - implement it as a module function and call it via a single-line lua do ... end
 - OR run it in the Mudlet Lua Console (not as a step)
 
-R.4 â€” What the assistant MUST provide (every time)
+R.4 — What the assistant MUST provide (every time)
 
 Confidence Statement: HIGH / MEDIUM / LOW + short reason
 
@@ -1368,7 +1381,7 @@ Success/Fail Criteria: PASS + FAIL conditions
 
 Output Collection: what logs/output/screenshots user should paste back
 
-Regression Checks: 1â€“3 quick checks
+Regression Checks: 1–3 quick checks
 
 Proceeding Rule:
 
@@ -1376,11 +1389,11 @@ The assistant MUST NOT move on until user confirms PASS or provides output for d
 
 User override:
 
-If user explicitly says â€œProceed without verificationâ€, assistant may proceed,
-but must label subsequent work as â€œunverified chainâ€.
+If user explicitly says "Proceed without verification", assistant may proceed,
+but must label subsequent work as "unverified chain".
 
 ==================================================
-SECTION W â€” HALLUCINATION-RISK HANDOFF (RESET RULE)
+SECTION W — HALLUCINATION-RISK HANDOFF (RESET RULE)
 
 Goal:
 When hallucination risk is high, stop, reset scope, and carry forward only
@@ -1426,12 +1439,12 @@ Note:
 A new chat does not replace verification. Section R still applies.
 
 ==================================================
-SECTION S â€” COMMAND & ALIAS REGISTRY (SINGLE SOURCE OF TRUTH)
+SECTION S — COMMAND & ALIAS REGISTRY (SINGLE SOURCE OF TRUTH)
 
-SECTION S.0 â€” COMMAND SURFACE ARCHITECTURE STANDARD (PHASE 1 -> PHASE 2)
+SECTION S.0 — COMMAND SURFACE ARCHITECTURE STANDARD (PHASE 1 -> PHASE 2)
 
 Problem:
-As DWKit grows, a single monolithic alias/command file becomes a â€œgod moduleâ€ that is hard to maintain, hard to test, and high risk to change.
+As DWKit grows, a single monolithic alias/command file becomes a "god module" that is hard to maintain, hard to test, and high risk to change.
 
 Decision (LOCKED):
 DWKit uses a two-layer Command Surface architecture:
@@ -1604,7 +1617,7 @@ deprecate version (vX)
 remove version (vY)
 
 ==================================================
-SECTION T â€” ITERATIVE DEVELOPMENT + CONTINUITY POLICY (REAL-WORLD MODE)
+SECTION T — ITERATIVE DEVELOPMENT + CONTINUITY POLICY (REAL-WORLD MODE)
 
 Reality:
 The user and assistant are not perfect. Complex kits require iteration across
@@ -1647,11 +1660,11 @@ Assistant responsibilities in every chat:
 
 Re-state current objective and scope at the start of work.
 
-Maintain a â€œKnown Issuesâ€ list and close items only after PASS verification.
+Maintain a "Known Issues" list and close items only after PASS verification.
 
-Maintain a â€œVerified Workingâ€ list (features/modules confirmed PASS).
+Maintain a "Verified Working" list (features/modules confirmed PASS).
 
-Maintain a â€œNext Stepsâ€ list that is gated by verification (no skipping).
+Maintain a "Next Steps" list that is gated by verification (no skipping).
 
 Rollback discipline:
 
@@ -1660,11 +1673,11 @@ When a fix risks regression, prefer small, reversible patches.
 If uncertainty is high, provide a rollback plan or revert patch.
 
 Definition:
-A feature is not considered â€œdoneâ€ until it has been verified PASS in the userâ€™s
-environment, and recorded in the â€œVerified Workingâ€ list.
+A feature is not considered "done" until it has been verified PASS in the user's
+environment, and recorded in the "Verified Working" list.
 
 ==================================================
-SECTION U â€” CONSISTENCY LOCK (NO â€œNEW CHEFâ€ DRIFT)
+SECTION U — CONSISTENCY LOCK (NO "NEW CHEF" DRIFT)
 
 Problem:
 Different chats can drift in style, standards, naming, and assumptions, causing
@@ -1718,7 +1731,7 @@ Ask for the missing inputs required by the pack.
 
 Prefer small reversible changes.
 
-Keep a running â€œKnown Issuesâ€ list and â€œVerified Workingâ€ list.
+Keep a running "Known Issues" list and "Verified Working" list.
 
 If any assistant response conflicts with these requirements:
 
@@ -1727,7 +1740,7 @@ The user should treat it as non-compliant.
 The assistant must correct course immediately using the Anchor Pack.
 
 ==================================================
-SECTION V â€” CHAT HANDOFF PACK (PASTE INTO NEW CHAT)
+SECTION V — CHAT HANDOFF PACK (PASTE INTO NEW CHAT)
 
 New Chat Opener:
 
