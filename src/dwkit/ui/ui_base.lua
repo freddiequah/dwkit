@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_base
 -- Owner       : UI
--- Version     : v2026-02-06B
+-- Version     : v2026-02-07C
 -- Purpose     :
 --   - Shared SAFE helper utilities for DWKit UI modules.
 --   - Avoids copy/paste across UI modules (store, widgets, show/hide/delete, etc).
@@ -18,8 +18,9 @@
 --   - getUiStoreEntry(uiId) -> table|nil
 --   - ensureUiStoreEntry(uiId) -> table|nil
 --   - setUiRuntime(uiId, rt) -> boolean ok
---   - safeHide(widget)
---   - safeShow(widget)
+--   - setUiStateVisibleBestEffort(uiId, visible) -> boolean ok
+--   - safeHide(widget|uiId, uiId?, opts?) -> boolean ok
+--   - safeShow(widget|uiId, uiId?, opts?) -> boolean ok
 --   - safeDelete(widget)
 --   - safeSetLabelText(label, text)
 --   - ensureWidgets(uiId, requiredKeys, createFn) -> boolean ok, table|nil widgets, string|nil err
@@ -36,7 +37,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-06B"
+M.VERSION = "v2026-02-07C"
 
 local function _isNonEmptyString(s)
     return type(s) == "string" and s ~= ""
@@ -122,11 +123,16 @@ function M.ensureUiStoreEntry(uiId)
     end
     e.updatedAt = (type(_G.getEpoch) == "function" and _G.getEpoch()) or os.time()
 
+    -- Ensure deterministic state table exists (do not force defaults here)
+    if type(e.state) ~= "table" then
+        e.state = {}
+    end
+
     return e
 end
 
 -- Store runtime handles deterministically (frame/container/nameFrame/etc)
--- rt = { frame=?, container=?, nameFrame=?, nameContent=?, meta=? }
+-- rt = { frame=?, container=?, nameFrame=?, nameContent=?, meta=?, state=? }
 function M.setUiRuntime(uiId, rt)
     if not _isNonEmptyString(uiId) then return false end
     if type(rt) ~= "table" then return false end
@@ -141,6 +147,25 @@ function M.setUiRuntime(uiId, rt)
     if _isNonEmptyString(rt.nameContent) then e.nameContent = rt.nameContent end
     if type(rt.meta) == "table" then e.meta = rt.meta end
 
+    -- merge deterministic runtime state (e.state.*)
+    if type(rt.state) == "table" then
+        e.state = (type(e.state) == "table") and e.state or {}
+        for k, v in pairs(rt.state) do
+            e.state[k] = v
+        end
+    end
+
+    e.runtimeUpdatedAt = (type(_G.getEpoch) == "function" and _G.getEpoch()) or os.time()
+    return true
+end
+
+-- Deterministic boolean runtime signal used by UI Manager UI (rt:)
+function M.setUiStateVisibleBestEffort(uiId, visible)
+    if not _isNonEmptyString(uiId) then return false end
+    local e = M.ensureUiStoreEntry(uiId)
+    if type(e) ~= "table" then return false end
+    e.state = (type(e.state) == "table") and e.state or {}
+    e.state.visible = (visible == true)
     e.runtimeUpdatedAt = (type(_G.getEpoch) == "function" and _G.getEpoch()) or os.time()
     return true
 end
@@ -164,32 +189,151 @@ local function _setSuppressHideHookBestEffort(w, v)
     end
 end
 
-function M.safeHide(w)
-    if type(w) ~= "table" then return end
-    if type(w.hide) == "function" then
-        _setSuppressHideHookBestEffort(w, true)
-        local ok = pcall(w.hide, w)
-        _setSuppressHideHookBestEffort(w, false)
-        return ok
+-- Best-effort: resolve uiId for helpers that may receive (widget|uiId)
+local function _resolveUiIdBestEffort(w, uiIdMaybe, opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    if _isNonEmptyString(uiIdMaybe) then
+        return uiIdMaybe
     end
+
+    if _isNonEmptyString(w) then
+        return w
+    end
+
+    if type(w) == "table" and _isNonEmptyString(w.uiId) then
+        return w.uiId
+    end
+
+    if type(w) == "table" and _isNonEmptyString(w.name) then
+        -- Not canonical, but can help in some cases.
+        return w.name
+    end
+
+    if _isNonEmptyString(opts.uiId) then
+        return opts.uiId
+    end
+
+    return nil
 end
 
-function M.safeShow(w)
-    if type(w) ~= "table" then return end
-    if type(w.show) == "function" then
-        pcall(w.show, w)
+function M.getUiContainer(uiId)
+    local e = M.getUiStoreEntry(uiId)
+    if type(e) == "table" and type(e.container) == "table" then
+        return e.container
     end
+    return nil
+end
+
+function M.getUiFrame(uiId)
+    local e = M.getUiStoreEntry(uiId)
+    if type(e) == "table" and type(e.frame) == "table" then
+        return e.frame
+    end
+    return nil
+end
+
+function M.safeHide(w, uiIdMaybe, opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    -- Supports:
+    --   safeHide(widget)
+    --   safeHide(uiId)                (best-effort; resolves from store)
+    --   safeHide(widget, uiId, opts)  (preferred; explicit)
+    local uiId = _resolveUiIdBestEffort(w, uiIdMaybe, opts)
+
+    local target = w
+    if type(target) == "string" and target ~= "" then
+        target = M.getUiContainer(target) or M.getUiFrame(target)
+    end
+
+    if type(target) ~= "table" then
+        return true
+    end
+
+    -- Mark runtime state first so observers see intent even if widget hide fails.
+    if _isNonEmptyString(uiId) then
+        M.setUiStateVisibleBestEffort(uiId, false)
+    end
+
+    -- NOTE:
+    -- Adjustable.Container often renders via target.window (the actual widget).
+    -- Some builds have frame:hide that does not fully hide the underlying window,
+    -- so we best-effort hide both target and target.window.
+    local function _hideOne(obj)
+        if type(obj) ~= "table" then return end
+        if type(obj.hide) ~= "function" then return end
+        _setSuppressHideHookBestEffort(obj, true)
+        pcall(obj.hide, obj)
+        _setSuppressHideHookBestEffort(obj, false)
+    end
+
+    _hideOne(target)
+    if type(target.window) == "table" and target.window ~= target then
+        _hideOne(target.window)
+    end
+
+    return true
+end
+
+function M.safeShow(w, uiIdMaybe, opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    -- Supports:
+    --   safeShow(widget)
+    --   safeShow(uiId)                (best-effort; resolves from store)
+    --   safeShow(widget, uiId, opts)  (preferred; explicit)
+    local uiId = _resolveUiIdBestEffort(w, uiIdMaybe, opts)
+
+    local target = w
+    if type(target) == "string" and target ~= "" then
+        target = M.getUiContainer(target) or M.getUiFrame(target)
+    end
+
+    if type(target) ~= "table" then
+        return true
+    end
+
+    if _isNonEmptyString(uiId) then
+        M.setUiStateVisibleBestEffort(uiId, true)
+    end
+
+    local function _showOne(obj)
+        if type(obj) ~= "table" then return end
+        if type(obj.show) ~= "function" then return end
+        pcall(obj.show, obj)
+    end
+
+    _showOne(target)
+    if type(target.window) == "table" and target.window ~= target then
+        _showOne(target.window)
+    end
+
+    return true
 end
 
 function M.safeDelete(w)
     if type(w) ~= "table" then return end
-    -- Geyser supports :delete() on many widgets
-    if type(w.delete) == "function" then
-        pcall(w.delete, w)
-        return
+
+    -- Best-effort delete; if unavailable, hide only.
+    local function _delOne(obj)
+        if type(obj) ~= "table" then return false end
+        if type(obj.delete) == "function" then
+            return pcall(obj.delete, obj)
+        end
+        return false
     end
-    -- fallback: hide only
-    M.safeHide(w)
+
+    local ok = _delOne(w)
+
+    -- Adjustable wrappers sometimes keep the real widget at .window
+    if type(w.window) == "table" and w.window ~= w then
+        _delOne(w.window)
+    end
+
+    if not ok then
+        M.safeHide(w)
+    end
 end
 
 function M.safeSetLabelText(label, txt)
@@ -219,6 +363,9 @@ local function _stampIdentityFieldsBestEffort(e, uiId)
         e.createdAt = (type(_G.getEpoch) == "function" and _G.getEpoch()) or os.time()
     end
     e.updatedAt = (type(_G.getEpoch) == "function" and _G.getEpoch()) or os.time()
+    if type(e.state) ~= "table" then
+        e.state = {}
+    end
 end
 
 local function _mergeIntoEntryBestEffort(entry, widgets)
@@ -243,8 +390,8 @@ end
 --   store[uiId] remains a TABLE to preserve compatibility.
 --   We allow additional runtime/meta keys (frame/container/nameFrame/etc) on the same table.
 --
--- IMPORTANT (v2026-02-06A):
---   We now MERGE newly created widgets into an existing store entry (if any)
+-- IMPORTANT:
+--   We MERGE newly created widgets into an existing store entry (if any)
 --   instead of replacing store[uiId] with a new table. This prevents loss of
 --   runtime identity fields set by ui_window (nameFrame/meta/closeLabel/etc).
 function M.ensureWidgets(uiId, requiredKeys, createFn)
@@ -319,18 +466,6 @@ local function _bestEffortBusOff(handlerId)
     return false
 end
 
--- subscribeServiceUpdates
--- - Centralized helper for service event subscriptions used by UIs
---
--- Params:
---   uiId        : string (for state/debug)
---   onUpdatedFn : function(handlerFn) -> ok, token|any, err?  (e.g. service.onUpdated)
---   handlerFn   : function(payload, subscription?)           (UI refresh logic)
---   opts        : table? { eventName=string, debugPrefix=string }
---
--- Returns:
---   ok, sub, err
---   sub = { uiId, handlerId, updatedEventName, debugPrefix }
 function M.subscribeServiceUpdates(uiId, onUpdatedFn, handlerFn, opts)
     opts = (type(opts) == "table") and opts or {}
 
@@ -352,32 +487,24 @@ function M.subscribeServiceUpdates(uiId, onUpdatedFn, handlerFn, opts)
     }
 
     local function _wrapped(payload)
-        -- handlerFn should never throw; protect UI from breaking the event bus
         pcall(handlerFn, payload, sub)
     end
 
-    -- IMPORTANT:
-    -- service.onUpdated typically returns: ok(bool), token(any), err(string|nil)
-    -- pcall returns: pOk, ret1, ret2, ret3...
     local pOk, ret1, ret2, ret3 = pcall(onUpdatedFn, _wrapped)
     if not pOk then
         return false, nil, "onUpdatedFn pcall failed"
     end
 
-    -- Common: (true, token, nil)
     if ret1 == false then
         return false, nil, tostring(ret2 or "subscribe failed")
     end
 
     local token = nil
     if type(ret1) ~= "boolean" then
-        -- onUpdated returned only token (non-standard but supported)
         token = ret1
     else
-        -- onUpdated returned ok(bool) first; token likely ret2
         token = ret2
         if token == nil and ret3 ~= nil then
-            -- some odd shapes: (true, nil, token)
             token = ret3
         end
     end
@@ -386,9 +513,6 @@ function M.subscribeServiceUpdates(uiId, onUpdatedFn, handlerFn, opts)
     return true, sub, nil
 end
 
--- unsubscribeServiceUpdates
--- - Best-effort unsubscribe using known bus patterns.
--- - Safe if unsubscribe not supported yet.
 function M.unsubscribeServiceUpdates(sub)
     if type(sub) ~= "table" then
         return true

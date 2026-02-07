@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-02-04D
+-- Version     : v2026-02-07B
 -- Purpose     :
 --   - SAFE RoomEntities UI (consumer-only) that renders a per-entity ROW LIST with
 --     sections: Players / Mobs / Items-Objects / Unknown.
@@ -51,11 +51,15 @@
 --   - NEW (v2026-02-04D):
 --       * Declare required passive providers for enabled-mode dependency management.
 --         NOTE: Actual provider lifecycle is managed by ui_manager + ui_dependency_service.
+--
+--   - FIX (v2026-02-07A):
+--       * dispose() must NOT clear ui_store entry; keep deterministic state.visible boolean
+--         for ui_manager runtime visibility checks. Clear runtime handles + delete widgets instead.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-04D"
+M.VERSION = "v2026-02-07B"
 M.UI_ID = "roomentities_ui"
 M.id = M.UI_ID -- convenience alias (some tooling/debug expects ui.id)
 
@@ -1159,6 +1163,9 @@ function M.apply(opts)
 
     _state.enabled = enabled
     _state.visible = visible
+
+    -- Keep runtime visible signal in sync for UI Manager UI / drift probes
+    U.setUiStateVisibleBestEffort(M.UI_ID, (visible == true))
     _state.lastApply = os.time()
     _state.lastError = nil
 
@@ -1187,7 +1194,6 @@ function M.apply(opts)
 
     return true, nil
 end
-
 function M.getState()
     local subR = (type(_state.subscriptionRoomEntities) == "table") and _state.subscriptionRoomEntities or {}
     local subW = (type(_state.subscriptionWhoStore) == "table") and _state.subscriptionWhoStore or {}
@@ -1236,13 +1242,37 @@ end
 function M.dispose(opts)
     opts = (type(opts) == "table") and opts or {}
 
+    -- Unsubscribe first (safe even if nil)
     U.unsubscribeServiceUpdates(_state.subscriptionRoomEntities)
     U.unsubscribeServiceUpdates(_state.subscriptionWhoStore)
 
     _state.subscriptionRoomEntities = nil
     _state.subscriptionWhoStore = nil
 
-    U.clearUiStoreEntry(M.UI_ID)
+    -- IMPORTANT: Do NOT clear the ui_store entry.
+    -- UI Manager expects entry.state.visible to be deterministic (never nil).
+    if type(U.setUiStateVisibleBestEffort) == "function" then
+        pcall(U.setUiStateVisibleBestEffort, M.UI_ID, false)
+    else
+        pcall(U.setUiRuntime, M.UI_ID, { state = { visible = false } })
+    end
+
+    -- Keep entry, clear runtime handles
+    local entry = nil
+    if type(U.ensureUiStoreEntry) == "function" then
+        entry = U.ensureUiStoreEntry(M.UI_ID)
+    end
+    if type(entry) == "table" then
+        entry.state = (type(entry.state) == "table") and entry.state or {}
+        entry.state.visible = false
+
+        entry.frame = nil
+        entry.container = nil
+        entry.content = nil
+        entry.panel = nil
+        entry.label = nil
+        entry.listRoot = nil
+    end
 
     _clearRenderedWidgets()
 
@@ -1258,6 +1288,8 @@ function M.dispose(opts)
     _state.widgets.rendered = {}
 
     _state.inited = false
+    _state.enabled = nil
+    _state.visible = nil
     _state.lastError = nil
     return true, nil
 end

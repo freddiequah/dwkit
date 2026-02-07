@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.presence_ui
 -- Owner       : UI
--- Version     : v2026-02-06B
+-- Version     : v2026-02-07A
 -- Purpose     :
 --   - SAFE Presence UI scaffold with live render from PresenceService (data only).
 --   - Creates a small window frame via ui_window + content panel + label.
@@ -9,13 +9,12 @@
 --   - Subscribes to PresenceService "updated" event to auto-refresh when state changes.
 --   - No timers, no send(), no automation.
 --
--- Key Fixes (2026-02-06B):
---   1) Single X rule: remove the in-content close button so ONLY the title-bar X remains.
---   2) Status correctness: rely on ui_window title-bar X wiring to:
---        - set cfg visible OFF (session-only best-effort)
---        - route apply via ui_manager
---        - refresh ui_manager_ui
---      so UI Manager reflects the correct "Show" state immediately.
+-- Key Fixes:
+--   v2026-02-07A:
+--     1) Deterministic runtime visibility: never clear ui_base store entry on dispose.
+--        Instead, set storeEntry.state.visible to boolean and clear widget handles safely.
+--        This prevents UI Manager UI runtime visibility (rt:) from becoming nil.
+--     2) Safe UI Manager refresh: use ui_manager_ui.refresh() (rows-only) instead of apply().
 --
 -- Public API  :
 --   - getModuleVersion() -> string
@@ -28,7 +27,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-06B"
+M.VERSION = "v2026-02-07A"
 M.UI_ID = "presence_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -130,12 +129,22 @@ local function _applyViaUiManagerBestEffort(source)
     end
 end
 
-local function _refreshUiManagerUiBestEffort(source)
+local function _refreshUiManagerUiRowsBestEffort(source)
     local okU, uiMgrUi = pcall(require, "dwkit.ui.ui_manager_ui")
-    if okU and type(uiMgrUi) == "table" and type(uiMgrUi.apply) == "function" then
+    if okU and type(uiMgrUi) == "table" and type(uiMgrUi.refresh) == "function" then
         pcall(function()
-            uiMgrUi.apply({ source = source or "presence_ui:onClose", quiet = true })
+            uiMgrUi.refresh({ source = source or "presence_ui:onClose", quiet = true })
         end)
+    end
+end
+
+local function _markRuntimeVisible(visible)
+    _state.visible = (visible == true)
+    if type(U.setUiStateVisibleBestEffort) == "function" then
+        pcall(U.setUiStateVisibleBestEffort, M.UI_ID, (visible == true))
+    else
+        -- fallback: store via setUiRuntime state merge
+        pcall(U.setUiRuntime, M.UI_ID, { state = { visible = (visible == true) } })
     end
 end
 
@@ -184,11 +193,10 @@ local function _forceVisibleFalseDeep(gs)
 end
 
 -- Robustly set gui_settings.visible=false WITHOUT assuming the setVisible signature.
--- Also aligns our local _state.visible so UI doesn’t render when hidden.
 local function _setVisibleOffSessionBestEffort()
     local okGS, gs = pcall(require, "dwkit.config.gui_settings")
     if not okGS or type(gs) ~= "table" then
-        _state.visible = false
+        _markRuntimeVisible(false)
         return
     end
 
@@ -228,7 +236,7 @@ local function _setVisibleOffSessionBestEffort()
         _forceVisibleFalseDeep(gs)
     end
 
-    _state.visible = false
+    _markRuntimeVisible(false)
 end
 
 local function _ensureWidgets()
@@ -247,11 +255,11 @@ local function _ensureWidgets()
             height = 260,
             padding = 6,
             onClose = function(b)
-                -- ui_window X should already do cfg visible OFF + ui_manager.applyOne().
-                -- We still keep this onClose as a compatibility net (hide frame).
+                -- ui_window X already does: cfg visible OFF (session) + refresh ui_manager_ui (rows-only)
+                -- Keep compatibility net but ensure we do NOT call ui_manager_ui.apply() here.
                 _setVisibleOffSessionBestEffort()
-                _applyViaUiManagerBestEffort("presence_ui:x")
-                _refreshUiManagerUiBestEffort("presence_ui:x")
+                _applyViaUiManagerBestEffort("presence_ui:onClose")
+                _refreshUiManagerUiRowsBestEffort("presence_ui:onClose")
 
                 if type(b) == "table" and type(b.frame) == "table" then
                     U.safeHide(b.frame)
@@ -287,9 +295,6 @@ local function _ensureWidgets()
 
         ListKit.applyTextLabelStyle(label)
 
-        -- IMPORTANT:
-        -- Return runtime identity fields along with widget handles so the stored entry
-        -- preserves nameFrame/meta/etc even if the gui store replaces the entry table.
         return {
             uiId = M.UI_ID,
 
@@ -316,6 +321,10 @@ local function _ensureWidgets()
     _state.widgets.content = widgets.content
     _state.widgets.panel = widgets.panel
     _state.widgets.label = widgets.label
+
+    -- deterministic runtime signal: created implies visible true only when shown; initialize as false (hidden by default)
+    _markRuntimeVisible(false)
+
     return true, nil
 end
 
@@ -403,7 +412,6 @@ local function _ensureSubscription()
 end
 
 function M.getModuleVersion() return M.VERSION end
-
 function M.getUiId() return M.UI_ID end
 
 function M.init(opts)
@@ -430,6 +438,7 @@ function M.init(opts)
     end
 
     U.safeHide(_state.widgets.container)
+    _markRuntimeVisible(false)
 
     _state.inited = true
     _state.lastError = nil
@@ -485,8 +494,10 @@ function M.apply(opts)
         end
 
         U.safeShow(_state.widgets.container)
+        _markRuntimeVisible(true)
     else
         U.safeHide(_state.widgets.container)
+        _markRuntimeVisible(false)
     end
 
     _out(string.format("[DWKit UI] apply uiId=%s enabled=%s visible=%s action=%s",
@@ -524,11 +535,33 @@ end
 function M.dispose(opts)
     opts = (type(opts) == "table") and opts or {}
 
+    -- stop subscriptions first
     U.unsubscribeServiceUpdates(_state.subscription)
     _state.subscription = nil
 
-    U.clearUiStoreEntry(M.UI_ID)
+    -- deterministic runtime signal for UI Manager UI (rt:)
+    _markRuntimeVisible(false)
 
+    -- IMPORTANT:
+    -- Do NOT clear the ui_base store entry here.
+    -- UI Manager depends on storeEntry.state.visible being deterministic (never nil).
+    local entry = nil
+    if type(U.ensureUiStoreEntry) == "function" then
+        entry = U.ensureUiStoreEntry(M.UI_ID)
+    end
+    if type(entry) == "table" then
+        entry.state = (type(entry.state) == "table") and entry.state or {}
+        entry.state.visible = false
+        -- clear runtime handles (but keep the entry)
+        entry.frame = nil
+        entry.container = nil
+        entry.content = nil
+        entry.panel = nil
+        entry.label = nil
+        entry.closeLabel = nil
+    end
+
+    -- delete widgets best-effort
     U.safeDelete(_state.widgets.label)
     U.safeDelete(_state.widgets.panel)
     U.safeDelete(_state.widgets.container)
