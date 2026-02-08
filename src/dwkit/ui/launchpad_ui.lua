@@ -1,27 +1,38 @@
 -- src/dwkit/ui/launchpad_ui.lua
--- DWKit LaunchPad (UI control surface)
+-- #########################################################################
+-- Module Name : dwkit.ui.launchpad_ui
+-- Owner       : UI
+-- Version     : v2026-02-08B
+-- Purpose     :
+--   - Fixed, non-window LaunchPad button strip for temporary show/hide only.
+--   - Lists ONLY enabled UIs (excluding internal/admin surfaces).
+--   - Appears ONLY when at least 1 other eligible UI is enabled.
+--   - Respects its own gui_settings.visible:
+--       * If launchpad_ui visible=OFF, it must not appear (no container created).
+--   - No title bar, no close button, not draggable, not resizable.
 --
--- Purpose:
---   - List enabled UIs and provide quick visible toggle (show/hide).
---   - Must only appear if at least 1 other UI is enabled.
+-- Public API  :
+--   - apply(opts?)  -> bool
+--   - dispose(opts?) -> bool
+--   - getState() -> table
 --
--- Semantics:
---   - LaunchPad is a *temporary* show/hide surface by default (noSave=true).
---   - Persistent visibility changes should be done via dwgui visible <uiId> on|off.
+-- Events Emitted   : None
+-- Events Consumed  : None
+-- Persistence      : None
+-- Automation Policy: Manual only
+-- Dependencies     : dwkit.ui.ui_base, dwkit.ui.ui_theme, dwkit.ui.ui_button_kit
+-- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-02-04F"
+M.VERSION = "v2026-02-08B"
 
 local U = require("dwkit.ui.ui_base")
-local Window = require("dwkit.ui.ui_window")
 local Theme = require("dwkit.ui.ui_theme")
-local ListKit = require("dwkit.ui.ui_list_kit")
 local ButtonKit = require("dwkit.ui.ui_button_kit")
 
 local G = rawget(_G, "Geyser")
 
 local UI_ID = "launchpad_ui"
-local UI_LABEL = "LaunchPad"
 
 -- Internal / non-user surfaces to hide from LaunchPad
 local HIDDEN_UI_IDS = {
@@ -29,17 +40,27 @@ local HIDDEN_UI_IDS = {
     ["ui_manager_ui"] = true, -- manager surface should not appear on LaunchPad
 }
 
-local _frame = nil
-local _listRoot = nil
-local _rows = {}
+-- Fixed positioning (match old button strip feel)
+local POS = {
+    x = "-56px",
+    y = "48%",
+    w = "48px",
+    pad = 6,
+    gap = 6,
+    btnH = 30,
+}
+
+local _panel = nil
+local _buttons = {}
 
 local _state = {
     inited = false,
     visible = false,
     enabled = nil,
+    selfVisible = nil, -- launchpad_ui visible flag from gui_settings
     lastApplySource = nil,
     widgets = {
-        hasFrame = false,
+        hasPanel = false,
         rowCount = 0,
     },
     renderedUiIds = {},
@@ -49,15 +70,11 @@ local _state = {
     },
 }
 
-local function _safePrint(msg)
-    if type(msg) ~= "string" then msg = tostring(msg) end
-    if type(cecho) == "function" then
-        cecho(msg .. "\n")
-    elseif type(echo) == "function" then
-        echo(msg .. "\n")
-    else
-        print(msg)
-    end
+local function _copyArray(arr)
+    if type(arr) ~= "table" then return {} end
+    local out = {}
+    for i = 1, #arr do out[i] = arr[i] end
+    return out
 end
 
 local function _sortedKeys(t)
@@ -68,56 +85,133 @@ local function _sortedKeys(t)
     return keys
 end
 
-local function _copyArray(arr)
-    if type(arr) ~= "table" then return {} end
-    local out = {}
-    for i = 1, #arr do out[i] = arr[i] end
-    return out
+local function _shortLabel(uiId)
+    if type(uiId) ~= "string" or uiId == "" then return "?" end
+    local seg = uiId:match("^([^_]+)") or uiId
+    seg = tostring(seg)
+    if #seg >= 2 then
+        return string.upper(seg:sub(1, 2))
+    end
+    return string.upper(seg:sub(1, 1))
 end
 
-local function _disposeFrame()
-    if _frame then
-        pcall(function() _frame:hide() end)
-        pcall(function() _frame:delete() end)
+local function _rtVisible(uiId)
+    local e = U.getUiStoreEntry(uiId)
+    if type(e) ~= "table" or type(e.state) ~= "table" then
+        return false
     end
-    _frame = nil
-    _listRoot = nil
-    _rows = {}
+    return (e.state.visible == true)
+end
+
+local function _clearButtons()
+    for _, b in ipairs(_buttons) do
+        if b and type(b.label) == "table" then
+            pcall(function() U.safeDelete(b.label) end)
+        end
+    end
+    _buttons = {}
+end
+
+-- Best-effort: delete any runtime widgets stored under DWKit._uiStore[launchpad_ui]
+-- This is required to prevent orphan panels across module reloads (local handles reset).
+-- IMPORTANT: Do NOT clear the ui_store entry (keep deterministic rt state pattern).
+local function _deleteOrphanFromStore()
+    local e = U.getUiStoreEntry(UI_ID)
+    if type(e) ~= "table" then
+        return
+    end
+
+    local function _deleteWindowList(w)
+        if type(w) ~= "table" then return end
+        if type(w.windowList) ~= "table" then return end
+        for _, child in pairs(w.windowList) do
+            if type(child) == "table" then
+                pcall(function() U.safeDelete(child) end)
+            end
+        end
+    end
+
+    if type(e.frame) == "table" then
+        _deleteWindowList(e.frame)
+    end
+    if type(e.container) == "table" and e.container ~= e.frame then
+        _deleteWindowList(e.container)
+    end
+
+    if type(e.frame) == "table" then
+        pcall(function() U.safeDelete(e.frame) end)
+    end
+    if type(e.container) == "table" and e.container ~= e.frame then
+        pcall(function() U.safeDelete(e.container) end)
+    end
+end
+
+local function _disposePanel()
+    _clearButtons()
+
+    -- Always try to remove any previously stored runtime widgets (reload-orphan guard)
+    _deleteOrphanFromStore()
+
+    -- Also delete local panel handle if present (normal lifecycle)
+    if _panel and type(_panel) == "table" then
+        pcall(function() U.safeHide(_panel, UI_ID) end)
+        pcall(function() U.safeDelete(_panel) end)
+    end
+
+    _panel = nil
 
     _state.inited = false
-    _state.widgets.hasFrame = false
+    _state.visible = false
+    _state.widgets.hasPanel = false
     _state.widgets.rowCount = 0
     _state.renderedUiIds = {}
+
+    -- Deterministic runtime-visible signal (canonical)
+    pcall(U.setUiRuntime, UI_ID, { container = nil, frame = nil, state = { visible = false } })
+    pcall(U.setUiStateVisibleBestEffort, UI_ID, false)
 end
 
-local function _clearRows()
-    for _, row in ipairs(_rows) do
-        if row and row.container then
-            pcall(function() row.container:delete() end)
-        end
+local function _ensurePanel(btnCount)
+    if _panel then return true end
+    if type(G) ~= "table" then
+        return false
     end
-    _rows = {}
-    _state.widgets.rowCount = 0
-    _state.renderedUiIds = {}
-end
 
-local function _forceSelfHiddenNoSave(gs)
-    if type(gs) ~= "table" or type(gs.setVisible) ~= "function" then return end
-    pcall(gs.enableVisiblePersistence, { noSave = true })
-    pcall(gs.setVisible, UI_ID, false, { noSave = true })
-end
-
-local function _filterEligible(uiIds)
-    if type(uiIds) ~= "table" then return {} end
-    local out = {}
-    for i = 1, #uiIds do
-        local uiId = uiIds[i]
-        if type(uiId) == "string" and uiId ~= "" and HIDDEN_UI_IDS[uiId] ~= true then
-            out[#out + 1] = uiId
-        end
+    btnCount = tonumber(btnCount or 0) or 0
+    if btnCount < 1 then
+        return false
     end
-    table.sort(out)
-    return out
+
+    local totalH = POS.pad + (btnCount * POS.btnH) + ((btnCount - 1) * POS.gap) + POS.pad
+
+    _panel = G.Container:new({
+        name = "DWKit_LaunchPad_Panel",
+        x = POS.x,
+        y = POS.y,
+        width = POS.w,
+        height = tostring(totalH) .. "px",
+    })
+
+    if type(_panel) ~= "table" then
+        _panel = nil
+        return false
+    end
+
+    pcall(function()
+        if type(_panel.setStyleSheet) == "function" then
+            _panel:setStyleSheet(Theme.bodyStyle())
+        end
+    end)
+
+    _state.inited = true
+    _state.visible = true
+    _state.widgets.hasPanel = true
+
+    -- Deterministic runtime record
+    pcall(U.setUiRuntime, UI_ID, { container = _panel, frame = _panel, state = { visible = true } })
+    pcall(U.setUiStateVisibleBestEffort, UI_ID, true)
+
+    return true
 end
 
 -- Authoritative source: gui_settings.list() -> { uiId -> {enabled=bool, visible=bool} }
@@ -148,229 +242,104 @@ local function _getEnabledUiIdsFromSettings()
     return out
 end
 
--- Fallback: ui_manager.listEnabled may return:
---  - strings: "presence_ui"
---  - records: {uiId="presence_ui"} or {id="presence_ui"}
-local function _getEnabledUiIdsFallback()
-    local okM, mgr = pcall(require, "dwkit.ui.ui_manager")
-    if not okM or type(mgr) ~= "table" then
-        return {}
+local function _refreshUiManagerUiRows()
+    local ok, Mgr = pcall(require, "dwkit.ui.ui_manager_ui")
+    if ok and type(Mgr) == "table" and type(Mgr.refresh) == "function" then
+        pcall(Mgr.refresh, { source = "launchpad_ui:toggle", quiet = true })
     end
-
-    if type(mgr.listEnabled) ~= "function" then
-        return {}
-    end
-
-    local enabled = nil
-    local ok, v = pcall(mgr.listEnabled, { records = true })
-    if ok then enabled = v end
-    if type(enabled) ~= "table" then
-        local ok2, v2 = pcall(mgr.listEnabled)
-        if ok2 then enabled = v2 end
-    end
-
-    if type(enabled) ~= "table" then
-        return {}
-    end
-
-    local out = {}
-    for i = 1, #enabled do
-        local item = enabled[i]
-        local uiId = nil
-        if type(item) == "string" then
-            uiId = item
-        elseif type(item) == "table" then
-            uiId = item.uiId or item.id
-        end
-        uiId = (type(uiId) == "string") and uiId or nil
-        if uiId and HIDDEN_UI_IDS[uiId] ~= true then
-            out[#out + 1] = uiId
-        end
-    end
-
-    table.sort(out)
-    return out
 end
 
-local function _getEnabledUiIds()
-    local ids = _getEnabledUiIdsFromSettings()
-    if #ids > 0 then
-        return ids, "settings"
-    end
-    local fb = _getEnabledUiIdsFallback()
-    if #fb > 0 then
-        return fb, "fallback"
-    end
-    return {}, "none"
-end
+-- IMPORTANT FIX:
+-- Prefer ButtonKit styling when available; Theme.buttonStyle via setStyleSheet can repaint unreliably.
+local function _applyButtonVisual(label, isOn)
+    if type(label) ~= "table" then return end
 
-local function _ensureFrame()
-    if _frame then return true end
-    if type(G) ~= "table" then
-        _safePrint("[DWKit] launchpad_ui: Geyser not available")
-        return false
-    end
-
-    local ok, bundle = pcall(Window.create, {
-        uiId = UI_ID,
-        title = UI_LABEL,
-        width = 330,
-        height = 300,
-        x = 20,
-        y = 80,
-        resizable = true,
-    })
-    if not ok or type(bundle) ~= "table" then
-        return false
-    end
-
-    local root = bundle.content or bundle.frame or bundle
-    if not root then
-        return false
-    end
-
-    _frame = bundle.frame or bundle
-    _state.inited = true
-    _state.widgets.hasFrame = true
-
-    pcall(function()
-        if type(Theme.applyToFrame) == "function" then
-            Theme.applyToFrame(_frame, { variant = "standard" })
-        end
-    end)
-
-    local okList, listRoot = pcall(function()
-        if type(ListKit.newListRoot) == "function" then
-            return ListKit.newListRoot(root, {
-                name = "DWKit_LaunchPad_ListRoot",
-                x = 10,
-                y = 10,
-                width = -20,
-                height = -20,
-            })
-        end
-        return nil
-    end)
-
-    if okList and listRoot then
-        _listRoot = listRoot
-    else
-        _listRoot = G.Container:new({
-            name = "DWKit_LaunchPad_ListRoot_Fallback",
-            x = 10,
-            y = 10,
-            width = -20,
-            height = -20,
-        }, root)
-    end
-
-    return true
-end
-
-local function _renderList(uiIds)
-    if not _listRoot then return end
-    _clearRows()
-
-    local gs = U.getGuiSettingsBestEffort()
-    if type(gs) ~= "table" then
+    if type(ButtonKit) == "table" and type(ButtonKit.applyButtonStyle) == "function" then
+        pcall(ButtonKit.applyButtonStyle, label, { enabled = (isOn == true), minHeightPx = POS.btnH })
         return
     end
 
-    local y = 0
-    local rowH = 30
+    if type(label.setStyleSheet) == "function" and type(Theme) == "table" and type(Theme.buttonStyle) == "function" then
+        pcall(label.setStyleSheet, label, Theme.buttonStyle(isOn == true))
+    end
+end
+
+local function _applyOneBestEffort(uiId, source)
+    local okM, mgr = pcall(require, "dwkit.ui.ui_manager")
+    if okM and type(mgr) == "table" and type(mgr.applyOne) == "function" then
+        pcall(mgr.applyOne, uiId, { source = source or "launchpad_ui", quiet = true })
+    end
+end
+
+local function _renderButtons(uiIds)
+    if not _panel then return end
+    _clearButtons()
+
+    local y = POS.pad
 
     for i = 1, #uiIds do
         local uiId = uiIds[i]
+        local uiIdLocal = uiId -- closure safety
+        local isOn = _rtVisible(uiIdLocal)
 
-        local enabled = false
-        local visible = false
+        local label = G.Label:new({
+            name = "DWKit_LaunchPad_Btn_" .. tostring(uiIdLocal),
+            x = POS.pad,
+            y = tostring(y) .. "px",
+            width = "-" .. tostring(POS.pad * 2) .. "px",
+            height = tostring(POS.btnH) .. "px",
+        }, _panel)
 
-        if type(gs.isEnabled) == "function" then
-            local okE, v = pcall(gs.isEnabled, uiId, false)
-            if okE then enabled = (v == true) end
-        end
-        if type(gs.getVisible) == "function" then
-            local okV, v = pcall(gs.getVisible, uiId, false)
-            if okV then visible = (v == true) end
-        end
+        if type(label) == "table" then
+            pcall(function() label:echo(_shortLabel(uiIdLocal)) end)
 
-        local row = { uiId = uiId, enabled = enabled, visible = visible }
+            -- Apply visual style (reliable path)
+            _applyButtonVisual(label, isOn)
 
-        row.container = G.Container:new({
-            name = "DWKit_LaunchPad_Row_" .. tostring(uiId),
-            x = 0,
-            y = y,
-            width = "100%",
-            height = rowH,
-        }, _listRoot)
+            local function _onClick()
+                local gs = U.getGuiSettingsBestEffort()
+                if type(gs) ~= "table" then return end
 
-        pcall(function()
-            if type(ListKit.applyRowStyle) == "function" then
-                ListKit.applyRowStyle(row.container, { variant = ((i % 2) == 0) and "alt" or "base" })
-            end
-        end)
+                if type(gs.enableVisiblePersistence) == "function" then
+                    pcall(gs.enableVisiblePersistence, { noSave = true })
+                end
 
-        row.label = G.Label:new({
-            name = "DWKit_LaunchPad_Label_" .. tostring(uiId),
-            x = 8,
-            y = 6,
-            width = "-90px",
-            height = rowH - 10,
-        }, row.container)
+                local curVis = false
+                if type(gs.getVisible) == "function" then
+                    local okV, v = pcall(gs.getVisible, uiIdLocal, false)
+                    if okV then curVis = (v == true) end
+                elseif type(gs.isVisible) == "function" then
+                    local okV, v = pcall(gs.isVisible, uiIdLocal, false)
+                    if okV then curVis = (v == true) end
+                end
 
-        pcall(function() row.label:echo(uiId) end)
+                local newVis = (curVis ~= true)
 
-        local btnLabel = visible and "Hide" or "Show"
-        row.button = G.Label:new({
-            name = "DWKit_LaunchPad_Btn_" .. tostring(uiId),
-            x = "-80px",
-            y = 4,
-            width = "72px",
-            height = rowH - 8,
-        }, row.container)
+                if type(gs.setVisible) == "function" then
+                    pcall(gs.setVisible, uiIdLocal, newVis, { noSave = true })
+                end
 
-        pcall(function()
-            if type(ButtonKit.applyButtonStyle) == "function" then
-                ButtonKit.applyButtonStyle(row.button, { enabled = true, minHeightPx = rowH - 8 })
-            end
-            row.button:echo(btnLabel)
-        end)
+                -- Apply target UI so rt.visible updates deterministically
+                _applyOneBestEffort(uiIdLocal, "launchpad_ui:toggle")
 
-        local function _onToggle()
-            local gs2 = U.getGuiSettingsBestEffort()
-            if type(gs2) ~= "table" then return end
+                -- Refresh UI Manager rows if open
+                _refreshUiManagerUiRows()
 
-            if type(gs2.enableVisiblePersistence) == "function" then
-                pcall(gs2.enableVisiblePersistence, { noSave = true })
+                -- Preferred: refresh LaunchPad via ui_manager.applyOne(launchpad_ui),
+                -- NOT by calling M.apply directly (keeps a single control surface and avoids recursion patterns).
+                _applyOneBestEffort(UI_ID, "launchpad_ui:toggle_refresh_self")
             end
 
-            local curVis = false
-            if type(gs2.getVisible) == "function" then
-                local okV, v = pcall(gs2.getVisible, uiId, false)
-                if okV then curVis = (v == true) end
-            end
-            local newVis = (curVis ~= true)
-
-            if type(gs2.setVisible) == "function" then
-                pcall(gs2.setVisible, uiId, newVis, { noSave = true })
+            if type(ButtonKit) == "table" and type(ButtonKit.wireClick) == "function" then
+                pcall(function() ButtonKit.wireClick(label, _onClick) end)
+            elseif type(label.setClickCallback) == "function" then
+                pcall(function() label:setClickCallback(_onClick) end)
             end
 
-            local okM, mgr = pcall(require, "dwkit.ui.ui_manager")
-            if okM and type(mgr) == "table" and type(mgr.applyOne) == "function" then
-                pcall(mgr.applyOne, uiId, { source = "launchpad_ui:toggle", quiet = true })
-            end
-
-            pcall(M.apply, { source = "launchpad_ui:toggle" })
+            _buttons[#_buttons + 1] = { uiId = uiIdLocal, label = label }
         end
 
-        if type(ButtonKit.wireClick) == "function" then
-            pcall(function() ButtonKit.wireClick(row.button, _onToggle) end)
-        elseif type(row.button.setClickCallback) == "function" then
-            pcall(function() row.button:setClickCallback(_onToggle) end)
-        end
-
-        _rows[#_rows + 1] = row
-        y = y + rowH
+        y = y + POS.btnH + POS.gap
     end
 end
 
@@ -379,69 +348,75 @@ function M.apply(opts)
     _state.lastApplySource = opts.source or "unknown"
 
     local gs = U.getGuiSettingsBestEffort()
+
+    -- Read enabled + visible for LaunchPad itself
     if type(gs) == "table" then
         if type(gs.isEnabled) == "function" then
-            local okE, v = pcall(gs.isEnabled, UI_ID, true)
-            if okE then _state.enabled = (v == true) end
+            local okE, vE = pcall(gs.isEnabled, UI_ID, true)
+            if okE then _state.enabled = (vE == true) end
         end
-        if type(gs.getVisible) == "function" then
-            local okV, v = pcall(gs.getVisible, UI_ID, false)
-            if okV then _state.visible = (v == true) end
+        if type(gs.isVisible) == "function" then
+            local okV, vV = pcall(gs.isVisible, UI_ID, true)
+            if okV then _state.selfVisible = (vV == true) end
+        elseif type(gs.getVisible) == "function" then
+            local okV, vV = pcall(gs.getVisible, UI_ID, true)
+            if okV then _state.selfVisible = (vV == true) end
         end
     end
 
+    -- If disabled OR self visible is OFF -> must not exist
     if _state.enabled == false then
-        _disposeFrame()
-        _state.visible = false
+        _disposePanel()
         _state.debug.lastReason = "disabled"
         return true
     end
+    if _state.selfVisible == false then
+        _disposePanel()
+        _state.debug.lastReason = "selfVisibleOff"
+        return true
+    end
 
-    local enabledUiIdsRaw, src = _getEnabledUiIds()
-    local enabledUiIds = _filterEligible(enabledUiIdsRaw)
+    local enabledUiIds = _getEnabledUiIdsFromSettings()
 
     _state.debug.lastEnabledUiIds = _copyArray(enabledUiIds)
-    _state.debug.lastReason = "enabledSource=" .. tostring(src)
+    _state.debug.lastReason = "enabledSource=settings"
 
     _state.renderedUiIds = _copyArray(enabledUiIds)
     _state.widgets.rowCount = #enabledUiIds
 
     -- Governance: only appear if at least 1 other eligible UI enabled.
     if #enabledUiIds == 0 then
-        _forceSelfHiddenNoSave(gs)
+        _disposePanel()
         _state.visible = false
-        _clearRows()
-        if _frame then pcall(function() _frame:hide() end) end
+        _state.debug.lastReason = "noEligibleEnabledUi"
         return true
     end
 
-    -- If visible OFF: keep hidden, but state already reflects enabled list for tests/diagnostics.
-    if _state.visible ~= true then
-        _clearRows()
-        if _frame then pcall(function() _frame:hide() end) end
-        return true
+    local okP = _ensurePanel(#enabledUiIds)
+    if not okP then
+        _state.debug.lastReason = "panel_create_failed"
+        _state.visible = false
+        return false, "panel_create_failed"
     end
 
-    local okFrame = _ensureFrame()
-    if not okFrame then
-        _state.debug.lastReason = "frame_create_failed"
-        return false, "frame_create_failed"
-    end
+    pcall(function() U.safeShow(_panel, UI_ID) end)
+    _state.visible = true
 
-    pcall(function() _frame:show() end)
-    _renderList(enabledUiIds)
+    _renderButtons(enabledUiIds)
 
     _state.widgets.rowCount = #enabledUiIds
     _state.renderedUiIds = _copyArray(enabledUiIds)
+
+    pcall(U.setUiStateVisibleBestEffort, UI_ID, true)
 
     return true
 end
 
 function M.dispose(opts)
     opts = (type(opts) == "table") and opts or {}
-    _disposeFrame()
-    _state.visible = false
+    _disposePanel()
     _state.enabled = nil
+    _state.selfVisible = nil
     _state.lastApplySource = opts.source or _state.lastApplySource
     _state.debug.lastReason = "disposed"
     return true
@@ -454,9 +429,10 @@ function M.getState()
         inited = _state.inited,
         enabled = _state.enabled,
         visible = _state.visible,
+        selfVisible = _state.selfVisible,
         lastApplySource = _state.lastApplySource,
         widgets = {
-            hasFrame = _state.widgets.hasFrame,
+            hasPanel = _state.widgets.hasPanel,
             rowCount = _state.widgets.rowCount,
         },
         renderedUiIds = _copyArray(_state.renderedUiIds),

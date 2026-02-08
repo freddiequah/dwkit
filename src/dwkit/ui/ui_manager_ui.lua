@@ -28,9 +28,12 @@
 --     - FIX: _clearRows() was resetting state (rowCount/renderedUiIds) during redraw, making getState() report 0 rows.
 --       Now: redraw-clear keeps state; rowCount is set after rendering.
 --     - HARDEN: do not call GS.load() on every access if already loaded (prevents accidental registry wipe on redraw).
+--   v2026-02-08A:
+--     - FIX: Toggle handlers re-read current gui_settings/runtime values at click-time (avoid stale closure state).
+--     - FIX: Show/Hide toggles based on "shownVisible" (runtime-visible when available, else cfg-visible).
 
 local M = {}
-M.VERSION = "v2026-02-06I"
+M.VERSION = "v2026-02-08A"
 
 local U = require("dwkit.ui.ui_base")
 local Window = require("dwkit.ui.ui_window")
@@ -546,8 +549,36 @@ local function _renderList(uiIds)
             row.btnVisible:echo(btnVisLabel)
         end)
 
+        local function _readEnabledNow()
+            local nowEnabled = enabled
+            local gsNow = _getGuiSettingsModuleBestEffort()
+            if type(gsNow) == "table" and type(gsNow.isEnabled) == "function" then
+                local okE, v = pcall(gsNow.isEnabled, uiId, false)
+                if okE then nowEnabled = (v == true) end
+            end
+            return nowEnabled
+        end
+
+        local function _readCfgVisibleNow()
+            local nowVis = cfgVisible
+            local gsNow = _getGuiSettingsModuleBestEffort()
+            if type(gsNow) == "table" and type(gsNow.getVisible) == "function" then
+                local okV, v = pcall(gsNow.getVisible, uiId, false)
+                if okV then nowVis = (v == true) end
+            end
+            return nowVis
+        end
+
+        local function _readShownVisibleNow()
+            local nowCfg = _readCfgVisibleNow()
+            local nowRt = _getRuntimeVisibleBestEffort(uiId)
+            if nowRt ~= nil then return nowRt, nowCfg, nowRt end
+            return nowCfg, nowCfg, nil
+        end
+
         local function _onToggleEnabled()
-            local newEnabled = not enabled
+            local nowEnabled = _readEnabledNow()
+            local newEnabled = not nowEnabled
             _state.debug.lastAction = string.format("toggle-enabled %s -> %s", tostring(uiId), tostring(newEnabled))
 
             local okSet, errSet = M.setUiEnabled(uiId, newEnabled, { source = "ui_manager_ui:toggleEnabled" })
@@ -565,12 +596,21 @@ local function _renderList(uiIds)
         end
 
         local function _onToggleVisible()
-            if enabled ~= true then
+            local nowEnabled = _readEnabledNow()
+            if nowEnabled ~= true then
                 return
             end
 
-            local newVisible = not cfgVisible
-            _state.debug.lastAction = string.format("toggle-visible %s -> %s", tostring(uiId), tostring(newVisible))
+            local shownNow, cfgNow, rtNow = _readShownVisibleNow()
+            local newVisible = not (shownNow == true)
+            _state.debug.lastAction = string.format(
+                "toggle-visible %s shown:%s cfg:%s rt:%s -> %s",
+                tostring(uiId),
+                tostring(shownNow),
+                tostring(cfgNow),
+                tostring(rtNow),
+                tostring(newVisible)
+            )
 
             local okSet, errSet = M.setUiVisible(uiId, newVisible, { source = "ui_manager_ui:toggleVisible" })
             if not okSet then

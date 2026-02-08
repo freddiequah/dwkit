@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-04E
+-- Version     : v2026-02-07B
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-04E"
+M.VERSION = "v2026-02-07B"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -399,7 +399,7 @@ local SUITES = {
             {
                 cmd =
                 'lua do local gs=require("dwkit.config.gui_settings"); local m=gs.list(); local rec=m["roomentities_ui"]; if type(rec)~="table" then error("Expected gui_settings record for roomentities_ui") end; if rec.enabled~=false then error("Expected enabled=false after disable; got "..tostring(rec.enabled)) end; if rec.visible~=false then error("Expected visible=false after disable; got "..tostring(rec.visible)) end; print("[dwverify-ui] PASS gui_settings enabled=false visible=false after disable") end',
-                note = "ASSERT: gui_settings shows enabled=false and visible=false after dwgui disable.",
+                note = "ASSERT: gui_settings shows enabled=false and visible=false after disable.",
             },
             { cmd = "dwgui status",                  note = "Human confirmation: list should show roomentities_ui enabled=OFF visible=OFF." },
         },
@@ -467,6 +467,31 @@ local SUITES = {
                 cmd =
                 'lua do local gs=require("dwkit.config.gui_settings"); gs.setEnabled("presence_ui",false,{noSave=true}); gs.setVisible("presence_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)~="table" or type(UM.applyOne)~="function" then error("ui_manager.applyOne missing") end; UM.applyOne("presence_ui",{source="dwverify:launchpad"}); UM.applyOne("launchpad_ui",{source="dwverify:launchpad"}); local L=require("dwkit.ui.launchpad_ui"); local st=L.getState(); local ids=st.renderedUiIds or {}; if #ids~=1 or ids[1]~="roomentities_ui" then error("Expected ids=[roomentities_ui]; got "..tostring(table.concat(ids,","))) end; print("[dwverify-ui] PASS launchpad list step2 ids="..tostring(table.concat(ids,","))) end',
                 note = "Disable presence_ui; LaunchPad should list only roomentities_ui.",
+            },
+        },
+    },
+
+    -- NEW: LaunchPad toggle -> rtVisible (storeEntry.state.visible) follows cfg visible + applyOne
+    launchpad_toggle_updates_rt_visible = {
+        title = "launchpad_toggle_updates_rt_visible",
+        description =
+        "LaunchPad toggle drives gui_settings visible (noSave) and ui_manager.applyOne, and runtime-visible (rt:) follows ui_base storeEntry.state.visible.",
+        delay = 0.30,
+        steps = {
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); if type(gs.register)=="function" then pcall(gs.register,"launchpad_ui",{enabled=true,visible=true},{save=false}); pcall(gs.register,"presence_ui",{enabled=false,visible=false},{save=false}); end; gs.setEnabled("presence_ui",true,{noSave=true}); gs.setVisible("presence_ui",false,{noSave=true}); gs.setEnabled("launchpad_ui",true,{noSave=true}); gs.setVisible("launchpad_ui",true,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)~="table" or type(UM.applyAll)~="function" then error("ui_manager.applyAll missing") end; local ok,err=UM.applyAll({source="dwverify:launchpad_toggle"}); if ok==false then error("ui_manager.applyAll failed: "..tostring(err)) end; local U=require("dwkit.ui.ui_base"); local e=U.getUiStoreEntry("presence_ui") or {}; local rt=(type(e.state)=="table" and e.state.visible) or false; if rt~=false then error("Expected initial rt visible=false for presence_ui; got "..tostring(rt)) end; print("[dwverify-ui] PASS launchpad toggle step1 initial presence_ui rtVisible=false") end',
+                note = "Seed presence_ui enabled=ON visible=OFF; applyAll; assert rtVisible=false.",
+            },
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); local cur=gs.getVisible("presence_ui",false); local newVis=(cur~=true); gs.setVisible("presence_ui",newVis,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("presence_ui",{source="dwverify:launchpad_toggle"}); if ok==false then error("applyOne(presence_ui) failed: "..tostring(err)) end; local U=require("dwkit.ui.ui_base"); local e=U.getUiStoreEntry("presence_ui") or {}; local rt=(type(e.state)=="table" and e.state.visible) or false; if rt~=true then error("Expected rt visible=true after toggle ON; got "..tostring(rt)) end; print("[dwverify-ui] PASS launchpad toggle step2 toggled ON rtVisible=true") end',
+                note = "Simulate LaunchPad toggle ON (noSave visible flip + applyOne); assert rtVisible=true.",
+            },
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); local cur=gs.getVisible("presence_ui",false); local newVis=(cur~=true); gs.setVisible("presence_ui",newVis,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("presence_ui",{source="dwverify:launchpad_toggle"}); if ok==false then error("applyOne(presence_ui) failed: "..tostring(err)) end; local U=require("dwkit.ui.ui_base"); local e=U.getUiStoreEntry("presence_ui") or {}; local rt=(type(e.state)=="table" and e.state.visible) or false; if rt~=false then error("Expected rt visible=false after toggle OFF; got "..tostring(rt)) end; print("[dwverify-ui] PASS launchpad toggle step3 toggled OFF rtVisible=false") end',
+                note = "Simulate LaunchPad toggle OFF (noSave visible flip + applyOne); assert rtVisible=false.",
             },
         },
     },
