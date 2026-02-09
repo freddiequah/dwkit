@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.capture.roomfeed_capture
 -- Owner       : Capture
--- Version     : v2026-02-04C
+-- Version     : v2026-02-09B
 -- Purpose     :
 --   - Passive capture of room output blocks (movement room header, look output)
 --     without GMCP and without sending any commands.
@@ -60,6 +60,14 @@
 --     We now copy/modify/apply arrive/leave using set-maps (defensive conversion from arrays if needed),
 --     and apply via RoomSvc.setState(...,{forceEmit=true,...}) to avoid poisoning state shape.
 --
+-- Feb 2026 update (v2026-02-09B):
+--   - Partial snapshot finalize:
+--       If prompt arrives before "Obvious exits:", ingest buffered lines as a PARTIAL snapshot
+--       (instead of aborting), and mark RoomWatch as DEGRADED while still updating snapshot freshness.
+--       This prevents UI from going stale when some rooms omit exits or output is truncated.
+--   - Adds verification-only helper: _testIngestSnapshot(buf, opts) to deterministically validate
+--     full vs partial finalize behavior without requiring live MUD output.
+--
 -- Public API  :
 --   - getVersion() -> string
 --   - install(opts?) -> boolean ok, string|nil err
@@ -68,6 +76,10 @@
 --
 -- Compatibility (for dwroom.lua that is already applied):
 --   - getDebugState() -> table (alias of status({quiet=true}) with extra keys)
+--
+-- Verification/Test API (safe; no MUD sends):
+--   - _testIngestSnapshot(bufLinesRaw, opts?) -> boolean ok, string|nil err
+--       opts.hasExits=true|false (default false)
 --
 -- Events Emitted   : None (delegates to services)
 -- Events Consumed  : MUD output via tempRegexTrigger line hook
@@ -80,7 +92,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-04C"
+M.VERSION = "v2026-02-09B"
 
 local function _nowTs()
     return os.time()
@@ -430,11 +442,11 @@ local function _normalizeBucketToSet(src)
         if type(k) == "string" and v == true then
             out[k] = true
 
-        -- array of strings: { "Name", "Other" }
+            -- array of strings: { "Name", "Other" }
         elseif type(k) == "number" and type(v) == "string" and v ~= "" then
             out[v] = true
 
-        -- array of objects with .name: { {name="X"}, ... }
+            -- array of objects with .name: { {name="X"}, ... }
         elseif type(k) == "number" and type(v) == "table" and type(v.name) == "string" and v.name ~= "" then
             out[v.name] = true
         end
@@ -596,6 +608,26 @@ local function _abortSnap(reason)
     end
 end
 
+-- Internal: ingest snapshot buffer, optionally marking partial/degraded.
+local function _ingestSnapshot(buf, ts, meta)
+    meta = (type(meta) == "table") and meta or {}
+    buf = (type(buf) == "table") and buf or {}
+
+    local okR, RoomSvc = _resolveRoomSvc()
+    if okR then
+        local src = tostring(meta.source or "roomfeed_capture")
+        local ingestMeta = {
+            source = src,
+            ts = ts,
+        }
+        if meta.partial == true then
+            ingestMeta.partial = true
+            ingestMeta.reason = tostring(meta.reason or "partial")
+        end
+        RoomSvc.ingestLookLines(buf, ingestMeta)
+    end
+end
+
 local function _finalizeSnap()
     local buf = ROOT.snapBuf
     local hasExits = (ROOT.snapHasExits == true)
@@ -604,21 +636,35 @@ local function _finalizeSnap()
     local ts = _nowTs()
 
     if hasExits ~= true then
-        ROOT.lastAbortReason = "end:prompt_before_exits"
+        -- v2026-02-09B: Partial finalize instead of abort.
+        local reason = "partial:prompt_before_exits"
+
+        _ingestSnapshot(buf, ts, {
+            source = "roomfeed_capture_partial",
+            partial = true,
+            reason = reason,
+        })
+
+        ROOT.lastOkTs = ts
+        ROOT.lastAbortReason = nil
+        ROOT.lastDegradedReason = reason
         _resetSnap()
+
+        -- Keep freshness updated AND keep degraded latched.
         if okS then
-            Status.noteAbort("end:prompt_before_exits", { ts = ts })
+            -- noteSnapshot clears degradedReason; so do snapshot first, then degraded.
+            Status.noteSnapshot({ source = "roomfeed_capture_partial", ts = ts })
+            Status.noteDegraded(reason, { ts = ts })
         end
+
         return
     end
 
-    local okR, RoomSvc = _resolveRoomSvc()
-    if okR then
-        RoomSvc.ingestLookLines(buf, { source = "roomfeed_capture", ts = ts })
-    end
+    _ingestSnapshot(buf, ts, { source = "roomfeed_capture" })
 
     ROOT.lastOkTs = ts
     ROOT.lastAbortReason = nil -- IMPORTANT: clear stale abort after successful finalize
+    ROOT.lastDegradedReason = nil
     _resetSnap()
 
     if okS then
@@ -655,6 +701,32 @@ end
 
 function M.getVersion()
     return tostring(M.VERSION)
+end
+
+-- Verification-only helper: deterministically ingest a supplied snapshot buffer.
+-- SAFE: no timers, no sends, no triggers. Intended for dwverify suites.
+-- opts:
+--   - hasExits=true|false (default false)
+function M._testIngestSnapshot(bufLinesRaw, opts)
+    opts = (type(opts) == "table") and opts or {}
+    if type(bufLinesRaw) ~= "table" then
+        return false, "_testIngestSnapshot(bufLinesRaw): bufLinesRaw must be table"
+    end
+
+    local hasExits = (opts.hasExits == true)
+
+    -- Pretend we are mid-capture.
+    ROOT.snapCapturing = true
+    ROOT.snapBuf = {}
+    for i = 1, #bufLinesRaw do
+        ROOT.snapBuf[i] = tostring(bufLinesRaw[i] or "")
+    end
+    ROOT.snapSeenLines = #ROOT.snapBuf
+    ROOT.snapHasExits = hasExits
+
+    -- Finalize as if prompt arrived.
+    _finalizeSnap()
+    return true, nil
 end
 
 function M.install(opts)

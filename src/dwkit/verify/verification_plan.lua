@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-09A
+-- Version     : v2026-02-09C
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-09A"
+M.VERSION = "v2026-02-09C"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -59,6 +59,23 @@ local SUITES = {
             "dwwho fixture basic",
             "dwwho list",
             "dwwho status",
+        },
+    },
+
+    -- NEW (v2026-02-09B): Partial snapshot finalize regression guard (deterministic; no live MUD output required)
+    roomfeed_partial_snapshot_finalize = {
+        title = "roomfeed_partial_snapshot_finalize",
+        description =
+        "RoomFeed v2026-02-09B: prompt before exits should ingest as PARTIAL snapshot (no abort), update lastSnapshotTs, and latch degradedReason=partial:prompt_before_exits. Uses capture._testIngestSnapshot (SAFE; no sends).",
+        delay = 0.30,
+        steps = {
+            {
+                cmd =
+                'lua do local C=require("dwkit.capture.roomfeed_capture"); local S=require("dwkit.services.roomfeed_status_service"); if type(C)~="table" or type(C._testIngestSnapshot)~="function" then error("Expected roomfeed_capture._testIngestSnapshot (v2026-02-09B)") end; local pre=S.getState(); local preTs=tostring(pre.lastSnapshotTs or ""); local ok,err=C._testIngestSnapshot({"The Board Room (#1204) [ INDOORS IMMROOM ]","A plain room description line."},{hasExits=false}); if not ok then error("test ingest failed: "..tostring(err)) end; local post=S.getState(); if post.lastSnapshotTs==nil then error("Expected lastSnapshotTs non-nil after partial finalize") end; if tostring(post.lastSnapshotTs)==preTs then error("Expected lastSnapshotTs to change after partial finalize; before="..preTs.." after="..tostring(post.lastSnapshotTs)) end; if tostring(post.degradedReason or "")~="partial:prompt_before_exits" then error("Expected degradedReason partial:prompt_before_exits; got "..tostring(post.degradedReason)) end; local dbg=C.getDebugState(); if tostring(dbg.lastAbortReason or "")~="" then error("Expected lastAbortReason nil/empty after partial finalize; got "..tostring(dbg.lastAbortReason)) end; if tostring(dbg.lastDegradedReason or "")~="partial:prompt_before_exits" then error("Expected capture lastDegradedReason partial:prompt_before_exits; got "..tostring(dbg.lastDegradedReason)) end; print(string.format("[dwverify-roomfeed] PASS partial finalize snapshotTs=%s degraded=%s", tostring(post.lastSnapshotTs), tostring(post.degradedReason))) end',
+                note =
+                "ASSERT: partial finalize updates snapshot freshness and latches degraded state; capture does not abort.",
+            },
+            { cmd = "dwroom watch status", note = "Human confirmation: RoomWatch should show health=DEGRADED with note partial:prompt_before_exits and a recent lastCaptureTs." },
         },
     },
 
@@ -338,6 +355,9 @@ local SUITES = {
             },
         },
     },
+
+    -- (rest of your suites unchanged)
+    -- NOTE: Keeping everything else exactly as provided to avoid collateral breakage.
 
     -- NEW: UI dependency lifecycle suite (Model A) for roomfeed_watch
     ui_dependency_roomfeed_watch_claim_release = {
