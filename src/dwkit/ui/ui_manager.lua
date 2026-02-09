@@ -1,7 +1,8 @@
+-- FILE: src/dwkit/ui/ui_manager.lua
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_manager
 -- Owner       : UI
--- Version     : v2026-02-07C
+-- Version     : v2026-02-09B
 -- Purpose     :
 --   - SAFE dispatcher for applying UI modules registered in gui_settings.
 --   - Provides manual-only "apply all" and "apply one" capability.
@@ -20,11 +21,20 @@
 --       after successful applyOne stand-up when cfgVisible is ON.
 --       This fixes cases where UI modules reuse existing widgets and show() a container without
 --       updating storeEntry.state.visible back to true (rtState drift).
+--   v2026-02-09A:
+--     - Extend enforcement BOTH ways:
+--         * cfgVisible=true  => rt state.visible MUST be true after apply()
+--         * cfgVisible=false => rt state.visible MUST be false after apply()
+--       This fixes modules that hide widgets without updating storeEntry.state.visible back to false.
+--   v2026-02-09B:
+--     - Cross-surface sync: UI Manager changes now best-effort refresh LaunchPad after applyOne/applyAll.
+--       This ensures LaunchPad list + shown-state reflects enable/disable/show/hide actions done in
+--       UI Manager UI (and any other callers of ui_manager.applyOne/applyAll).
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-07C"
+M.VERSION = "v2026-02-09B"
 
 local function _rawOut(line)
     line = tostring(line or "")
@@ -191,6 +201,49 @@ local function _setRuntimeVisibleBestEffort(uiId, visible, source)
 end
 
 -- -------------------------------------------------------------------------
+-- Cross-surface sync (LaunchPad refresh best-effort)
+-- -------------------------------------------------------------------------
+
+local function _sourceLooksLikeLaunchpadSync(opts)
+    if type(opts) ~= "table" then return false end
+    local s = tostring(opts.source or "")
+    if s == "" then return false end
+    return (s:find("ui_manager:sync_launchpad", 1, true) ~= nil)
+end
+
+local function _refreshLaunchpadBestEffort(changedUiId, opts)
+    changedUiId = tostring(changedUiId or "")
+    if changedUiId == "" then return false end
+
+    -- Guard: don't self-refresh when applying LaunchPad itself
+    if changedUiId == "launchpad_ui" then
+        return false
+    end
+
+    -- Guard: prevent simple sync loops
+    if _sourceLooksLikeLaunchpadSync(opts) then
+        return false
+    end
+
+    local okL, L = pcall(require, "dwkit.ui.launchpad_ui")
+    if not okL or type(L) ~= "table" then
+        return false
+    end
+
+    -- Prefer refresh() if present, else apply()
+    if type(L.refresh) == "function" then
+        pcall(L.refresh, { source = "ui_manager:sync_launchpad", quiet = true })
+        return true
+    end
+    if type(L.apply) == "function" then
+        pcall(L.apply, { source = "ui_manager:sync_launchpad", quiet = true })
+        return true
+    end
+
+    return false
+end
+
+-- -------------------------------------------------------------------------
 -- Dependency wiring (enabled-based)
 -- -------------------------------------------------------------------------
 
@@ -333,6 +386,10 @@ function M.applyOne(uiId, opts)
         end
 
         _standDownIfDisabled(uiId, opts)
+
+        -- v2026-02-09B: refresh LaunchPad after dispatcher change
+        _refreshLaunchpadBestEffort(uiId, opts)
+
         return true, nil
     end
 
@@ -347,6 +404,10 @@ function M.applyOne(uiId, opts)
 
     if type(ui) ~= "table" then
         _out("[DWKit UI] SKIP uiId=" .. tostring(uiId) .. " (no module yet)", opts)
+
+        -- v2026-02-09B: refresh LaunchPad after dispatcher change (even if module missing)
+        _refreshLaunchpadBestEffort(uiId, opts)
+
         return true, nil
     end
 
@@ -360,17 +421,26 @@ function M.applyOne(uiId, opts)
             return false, tostring(errApply)
         end
 
-        -- v2026-02-07C:
-        -- If gui_settings says this UI should be visible, enforce deterministic runtime-visible signal.
-        -- This fixes modules that reuse existing widgets and call show() without updating storeEntry.state.visible.
+        -- v2026-02-09A:
+        -- Enforce deterministic runtime-visible signal to match cfgVisible when cfgVisible is a real boolean.
+        -- This fixes modules that show/hide containers without updating ui_base storeEntry.state.visible.
         if cfgVisible == true then
             _setRuntimeVisibleBestEffort(uiId, true, "ui_manager:post_apply:cfgVisibleOn")
+        elseif cfgVisible == false then
+            _setRuntimeVisibleBestEffort(uiId, false, "ui_manager:post_apply:cfgVisibleOff")
         end
+
+        -- v2026-02-09B: refresh LaunchPad after dispatcher change
+        _refreshLaunchpadBestEffort(uiId, opts)
 
         return true, nil
     end
 
     _out("[DWKit UI] SKIP uiId=" .. tostring(uiId) .. " (no apply() function)", opts)
+
+    -- v2026-02-09B: refresh LaunchPad after dispatcher change
+    _refreshLaunchpadBestEffort(uiId, opts)
+
     return true, nil
 end
 
@@ -411,6 +481,9 @@ function M.applyAll(opts)
             _err("applyOne failed uiId=" .. tostring(id) .. " err=" .. tostring(errOne), opts)
         end
     end
+
+    -- v2026-02-09B: refresh LaunchPad once after applyAll (covers bulk changes)
+    _refreshLaunchpadBestEffort("applyAll", opts)
 
     _out("", opts)
     _out("[DWKit UI] applyAll summary", opts)
