@@ -2,124 +2,27 @@
 -- #########################################################################
 -- Module Name : dwkit.services.roomentities_service
 -- Owner       : Services
--- Version     : v2026-02-04D
+-- Version     : v2026-02-09D
 -- Purpose     :
 --   - SAFE, profile-portable RoomEntitiesService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
 --   - Emits a registered internal event when state changes.
---   - Provides manual ingestion helpers for "look" output parsing.
---   - Classification (best-effort, SAFE):
---       - Presence-assisted classification during ingest (existing).
---       - WhoStore-assisted classification during ingest (NEW).
---       - AUTO reclassify on WhoStore updates (NEW "superpower"):
---           When WhoStore player set updates, we re-bucket current entities
---           (unknown/mobs/items -> players) when names are now known players,
---           and emit RoomEntities Updated only if state actually changes.
+--   - Provides ingestion helpers for look/snapshot output parsing.
 --
---   - FIX (v2026-02-04A):
---       - Broaden entity parsing for real-world LOOK lines:
---           * Accept "is here," in addition to "is here."
---           * Accept "is <posture> here," in addition to "is <posture> here."
---           * Conservative heuristic for lines like:
---               "A beastly fido ... here ... ."
---             Extract leading noun phrase (e.g., "A beastly fido") and bucket as
---             mobs/items (item keyword check), rather than dropping the line.
---
---   - FIX (v2026-02-04B):
---       - Recognize common item lines: "<thing> lies here." (with optional trailing tags)
---         Example:
---           "Achilles' breastplate lies here. (glowing) (damaged)"
---         These were previously ignored, causing items=0 in many rooms.
---
---   - FIX (v2026-02-04C):
---       - Recognize common encounter lines where "here" is NOT the end of line:
---           * "<thing> is here <doing something>."
---           * "<thing> is here, <doing something>..."
---           * "<thing> stands here <doing something>."
---           * "<thing> is <verb/posture> here <...>."
---         This fixes the majority of missed encounters in real movement logs.
---
---   - FIX (v2026-02-04D):
---       - Cater to both Immortal and normal entity formats:
---           * Immortals/mobs/items may include trailing ids/flags (e.g. "(#123)", "#123", "[FLAG]").
---           * Normal players typically do not.
---         We now canonicalize bucket keys by stripping trailing id/flag tokens
---         (in addition to existing "(glowing)/(humming)" tag stripping),
---         while keeping buckets keyed by display name ONLY.
---
---   - NEW (v2026-01-17E):
---       - Known-player prefix matching:
---           "Scynox the adventurer" becomes player "Scynox" if WhoStore knows Scynox.
---           "Borai hates ..." becomes player "Borai" if WhoStore knows Borai.
---       - Reclassify also canonicalizes keys (renames bucket entries) when prefix matches.
---
---   - NEW (v2026-01-17F):
---       - Ignore non-entity look lines:
---           room title, indented description lines, and exit direction rows.
---       - Better items classification for common room objects:
---           board/bulletin/keg/mechanism/etc => items
---
---   - FIX (v2026-01-17G):
---       - Do NOT discard indented entity lines.
---         Some clipboard/capture flows indent ALL lines.
---         If an indented line contains "is here." or "standing here.", treat as entity.
---
---   - NEW (v2026-01-17H):
---       - Support more player postures:
---           standing/sitting/sleeping/resting/kneeling/meditating.
---       - Opt-in ingestion noise filters (caller-controlled):
---           opts.ignorePatterns (Lua patterns) + opts.ignoreSubstrings (plain contains).
---
---   - FIX (v2026-01-19D):
---       - Ignore wrapped/unindented LOOK description lines.
---         Only treat lines as entity candidates when they match entity-ish patterns:
---           - "is here."
---           - "is <posture> here."
---           - contains "corpse"
---         This prevents paragraph text from being misclassified into unknown bucket.
---
---   - NEW (v2026-01-20B):
---       - Add public emitUpdated(meta) API so command surfaces can request an
---         explicit RoomEntities Updated emission without relying on eventBus fallback.
---
---   - NEW (v2026-01-20C):
---       - Add SAFE ingestFixture(opts) API for command surfaces (dwroom fixture).
---         Provides deterministic bucket seeding for UI + pipeline validation.
---
---   - FIX (v2026-01-23A):
---       - event_bus.emit() requires 3-arg signature: emit(eventName, payload, meta)
---         Without meta, emit does not deliver (verified live).
---       - _emit now passes meta and checks the ok flag (pcall success != emit success).
---
---   - NEW (v2026-01-23B):
---       - Arm WhoStore subscription automatically on setState/update/clear/emitUpdated.
---         This ensures WhoStore-driven reclassify works even if callers seed state
---         via setState() and then trigger WhoStore updates (no manual "arm" step).
---
---   - FIX (v2026-01-23C):
---       - Also arm WhoStore subscription at module load (best-effort).
---         So immediately after init(), getStats() reflects subscribed=true when available.
---
---   - NEW (v2026-01-31A):
---       - Normalize entity keys by stripping trailing parenthetical tags:
---           "a wooden board (glowing)" -> "a wooden board"
---       - Classify common object lines:
---           "<thing> hangs here ..." -> items
---           "<thing> is mounted here ..." -> items
---
---   - NEW (v2026-02-01A):
---       - Confidence gate for WhoStore/presence-assisted player classification:
---           * Case-insensitive membership is treated as a BOOST CANDIDATE only.
---           * Auto "players" classification requires an EXACT display-name match.
---           * If candidate but not exact, prefer "unknown" (safe) unless caller overrides
---             via UI override mechanism (handled in UI module).
---       - ReclassifyFromWhoStore also applies the same gate (no prefix-based promotion).
---
---   - FIX (v2026-02-01B):
---       - WhoStore Option-A legacy players map uses lowercase keys, which MUST NOT
---         be treated as canonical display names. Build known-player index from
---         WhoStore snapshot entries (entry.name) when available.
---       - If snapshot not available, legacy players map is treated as candidate-only.
+--   DWKit RoomEntities Capture & Unknown Tagging Agreement (DISCUSSION-LOCK)
+--   Alignment (v2026-02-09C):
+--     - Unknown-first strategy:
+--         * ONLY players may be auto-typed (WhoStore confidence gate, exact name match).
+--         * All non-player entity candidates default to "unknown".
+--         * Do NOT auto-classify mob vs item/object in the service.
+--     - Preserve snapshot duplicate counts:
+--         * Keep a V2 structure (state.entitiesV2) carrying counts + raw lines.
+--         * Maintain legacy bucket sets (players/mobs/items/unknown) for compatibility,
+--           but mobs/items remain empty unless upstream/overrides fill them (UI does).
+--     - Strict entity region support (service-side best-effort):
+--         * When ingesting full snapshot lines, scan entity candidates ONLY before
+--           "Obvious exits:".
+--         * Description/title lines are ignored (conservative).
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -144,7 +47,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-04D"
+M.VERSION = "v2026-02-09D"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -163,6 +66,17 @@ local function _newBuckets()
     }
 end
 
+-- V2: occurrence-aware structure (per snapshot ingest)
+-- NOTE: mobs/items are present for completeness; service keeps them empty by policy.
+local function _newEntitiesV2()
+    return {
+        players = {}, -- { [displayName] = { label=displayName, key=displayName, count=1, raws={...} } }
+        mobs = {},    -- intentionally empty (policy)
+        items = {},   -- intentionally empty (policy)
+        unknown = {}, -- { [normKey] = { label=displayName, key=normKey, count=N, raws={...} } }
+    }
+end
+
 local function _ensureBucketsPresent(s)
     if type(s) ~= "table" then
         return _newBuckets()
@@ -174,8 +88,20 @@ local function _ensureBucketsPresent(s)
     return s
 end
 
+local function _ensureEntitiesV2Present(s)
+    if type(s) ~= "table" then
+        return _newEntitiesV2()
+    end
+    if type(s.players) ~= "table" then s.players = {} end
+    if type(s.mobs) ~= "table" then s.mobs = {} end
+    if type(s.items) ~= "table" then s.items = {} end
+    if type(s.unknown) ~= "table" then s.unknown = {} end
+    return s
+end
+
 local STATE = {
-    state = _newBuckets(),
+    state = _newBuckets(),         -- legacy sets
+    entitiesV2 = _newEntitiesV2(), -- V2 occurrence map
     lastTs = nil,
     updates = 0,
     emits = 0,
@@ -248,7 +174,6 @@ end
 -- Strip trailing id tokens:
 --   "(#12345)"  (already covered by paren stripping, but kept explicit for clarity)
 --   "#12345"
---   "[#12345]"  (covered by bracket stripping, but kept explicit for clarity)
 local function _stripTrailingIdTokens(s)
     if type(s) ~= "string" then return "" end
     local out = _trim(s)
@@ -259,11 +184,9 @@ local function _stripTrailingIdTokens(s)
         changed = false
         local before = out
 
-        -- explicit "(#123)" (harmless even though paren-tag stripper handles it)
         out = out:gsub("%s*%(%s*#%d+%s*%)%s*$", "")
         out = _trim(out)
 
-        -- "#123"
         out = out:gsub("%s*#%d+%s*$", "")
         out = _trim(out)
 
@@ -291,6 +214,38 @@ local function _copyOneLevel(t)
     return out
 end
 
+local function _copyEntitiesV2(v2)
+    local out = _newEntitiesV2()
+    v2 = _ensureEntitiesV2Present(v2)
+
+    local function copyBucket(dst, src)
+        if type(src) ~= "table" then return end
+        for k, e in pairs(src) do
+            if type(k) == "string" and type(e) == "table" then
+                local ee = {
+                    label = tostring(e.label or k),
+                    key = tostring(e.key or k),
+                    count = tonumber(e.count) or 1,
+                    raws = {},
+                }
+                if type(e.raws) == "table" then
+                    for i = 1, #e.raws do
+                        ee.raws[i] = tostring(e.raws[i] or "")
+                    end
+                end
+                dst[k] = ee
+            end
+        end
+    end
+
+    copyBucket(out.players, v2.players)
+    copyBucket(out.mobs, v2.mobs)
+    copyBucket(out.items, v2.items)
+    copyBucket(out.unknown, v2.unknown)
+
+    return out
+end
+
 local function _merge(dst, src)
     if type(dst) ~= "table" or type(src) ~= "table" then return end
     for k, v in pairs(src) do
@@ -299,11 +254,11 @@ local function _merge(dst, src)
 end
 
 -- FIXED: event_bus.emit requires (eventName, payload, meta) in this DWKit environment.
--- Also: pcall success only means "no crash", not that emit succeeded. Check okEmit flag.
 local function _emit(stateCopy, deltaCopy, source)
     local payload = {
         ts = os.time(),
         state = stateCopy,
+        entitiesV2 = _copyEntitiesV2(STATE.entitiesV2),
     }
     if type(deltaCopy) == "table" then payload.delta = deltaCopy end
     if type(source) == "string" and source ~= "" then payload.source = source end
@@ -335,22 +290,17 @@ local function _emit(stateCopy, deltaCopy, source)
 end
 
 -- Normalize + build a stable key for buckets.
--- IMPORTANT: buckets remain keyed by display name ONLY (string), even if ids exist in output.
+-- IMPORTANT: legacy buckets remain keyed by display label ONLY (string), even if ids exist in output.
 local function _asKey(s)
     s = _trim(s or "")
     if s == "" then return nil end
 
-    -- order matters:
-    --   1) strip trailing paren tags (includes "(#123)" and "(glowing)" etc)
-    --   2) strip trailing bracket/flag tags
-    --   3) strip trailing "#123" tokens (rare format)
     local out = _stripTrailingParenTags(s)
     out = _stripTrailingBracketTags(out)
     out = _stripTrailingIdTokens(out)
 
     out = _trim(out)
     if out == "" then return nil end
-
     return out
 end
 
@@ -443,14 +393,13 @@ end
 local function _indexAdd(idx, name)
     if type(idx) ~= "table" or type(name) ~= "string" then return end
 
-    local canon = _asKey(name) -- trims + strips trailing tags/ids/flags
+    local canon = _asKey(name)
     if type(canon) ~= "string" or canon == "" then return end
 
     local lower = _normName(canon)
     if lower == "" then return end
 
     idx.set[lower] = true
-    -- prefer later authoritative sources (caller controls merge order)
     idx.canonByLower[lower] = canon
 end
 
@@ -462,7 +411,6 @@ local function _indexAddLowerOnly(idx, name)
     local lower = _normName(canon)
     if lower == "" then return end
     idx.set[lower] = true
-    -- intentionally NOT setting canonByLower => candidate-only
 end
 
 local function _indexMerge(dst, src)
@@ -501,10 +449,8 @@ local function _absorbNamesToIndex(idx, t)
                 _indexAdd(idx, k)
             elseif type(v) == "string" then
                 _indexAdd(idx, v)
-            elseif type(v) == "table" then
-                if type(v.name) == "string" then
-                    _indexAdd(idx, v.name)
-                end
+            elseif type(v) == "table" and type(v.name) == "string" then
+                _indexAdd(idx, v.name)
             end
         elseif type(v) == "string" then
             _indexAdd(idx, v)
@@ -541,7 +487,6 @@ local function _confidenceForName(name, idx)
         return "candidate"
     end
 
-    -- no canonical known; treat as candidate only
     return "candidate"
 end
 
@@ -585,7 +530,6 @@ local function _getPresenceKnownPlayersIndexBestEffort(opts)
     if not okP or type(P) ~= "table" then
         return _newNameIndex()
     end
-
     if type(P.getState) ~= "function" then
         return _newNameIndex()
     end
@@ -604,12 +548,9 @@ local function _extractKnownPlayersIndexFromWhoStoreState(wState)
         return idx
     end
 
-    -- Prefer docs-first snapshot entries which preserve display-case (entry.name).
-    -- This avoids treating WhoStore Option-A lowercase legacy players map as canonical.
     do
         local snap = wState.snapshot
         if type(snap) ~= "table" and type(wState.byName) == "table" then
-            -- caller might have passed a snapshot directly
             snap = wState
         end
 
@@ -635,8 +576,6 @@ local function _extractKnownPlayersIndexFromWhoStoreState(wState)
         end
     end
 
-    -- Fallback: legacy players map may only contain lowercase canonical keys.
-    -- Treat as membership-only (candidate), not canonical display-name exact.
     if type(wState.players) == "table" then
         for k, v in pairs(wState.players) do
             if v == true and type(k) == "string" and k ~= "" then
@@ -646,7 +585,6 @@ local function _extractKnownPlayersIndexFromWhoStoreState(wState)
         return idx
     end
 
-    -- Last resort: if someone passed a plain list/map of names, absorb normally.
     _absorbNamesToIndex(idx, wState)
     return idx
 end
@@ -679,7 +617,6 @@ local function _getKnownPlayersIndexCombined(opts)
 
     local idx = _newNameIndex()
 
-    -- Merge order matters: Presence first, then WhoStore overrides canonical names.
     if opts.usePresence == nil or opts.usePresence == true then
         local pIdx = _getPresenceKnownPlayersIndexBestEffort(opts)
         _indexMerge(idx, pIdx)
@@ -693,6 +630,29 @@ local function _getKnownPlayersIndexCombined(opts)
     return idx
 end
 
+-- ############################################################
+-- Entity candidate detection (simple, stable allowlist)
+-- ############################################################
+
+local function _isNoiseLine(lowerTrimmed)
+    if type(lowerTrimmed) ~= "string" then return false end
+    if lowerTrimmed == "" then return true end
+
+    if lowerTrimmed:find("^%<%d+") then return true end -- prompt-ish
+    if lowerTrimmed:find("gossips,") then return true end
+    if lowerTrimmed:find("tells you") then return true end
+    if lowerTrimmed:find("shouts,") then return true end
+    if lowerTrimmed:find("auction:") then return true end
+    return false
+end
+
+local function _isExitBoundary(lowerTrimmed)
+    if type(lowerTrimmed) ~= "string" then return false end
+    if lowerTrimmed:find("^obvious exits:") then return true end
+    if lowerTrimmed:find("^exits:") then return true end
+    return false
+end
+
 local function _looksLikeExitRow(lineLower)
     if type(lineLower) ~= "string" then return false end
     return (lineLower:match("^(north|south|east|west|up|down)%s+%-%s+") ~= nil)
@@ -701,59 +661,91 @@ end
 local function _looksLikeRoomTitle(line)
     if type(line) ~= "string" then return false end
     if line:find("%.") then return false end
-    if #line > 60 then return false end
+    if #line > 70 then return false end
     if line:match("^%s+") then return false end
-    if line:lower():find(" is here") or line:lower():find("standing here") then return false end
-    if line:lower():find("^obvious exits:") then return false end
-    if line:lower():find("^exits:") then return false end
-
-    if line:match("^[%a%s']+$") then
-        return true
-    end
-    return false
+    local l = line:lower()
+    if l:find(" is here") or l:find("standing here") then return false end
+    if l:find("^obvious exits:") then return false end
+    if l:find("^exits:") then return false end
+    return true
 end
 
-local function _isProbablyItemPhrase(phraseLower)
-    if type(phraseLower) ~= "string" then return false end
+-- Returns phrase (label) if this is a candidate entity line, else nil.
+-- Allowed:
+--   "<X> is here..."
+--   "<X> is <posture> here..."
+--   "<X> stands here..."
+--   "<X> lies here..."
+--   "<X> has been placed here..."
+--   "<X> is standing here..."
+--   "<X> is mounted <...> here..."   (added for bulletin boards / mounted objects)
+local function _extractEntityPhrase(lineClean)
+    if type(lineClean) ~= "string" then return nil end
+    local trimmed = _trim(lineClean)
+    if trimmed == "" then return nil end
 
-    local itemKeys = {
-        "board", "bulletin", "announcement", "keg", "mechanism", "altar",
-        "portal", "sign", "plaque", "statue", "fountain", "table", "chair",
-        "bench", "door", "gate", "lever", "switch", "chest", "bag",
-        "scroll", "potion", "sword", "shield", "corpse",
-        "breastplate", "helmet", "armor", "armour", "gauntlet", "greave",
-        "boot", "cloak", "ring", "amulet", "necklace", "bracelet",
-    }
+    local lower = trimmed:lower()
+    if _isNoiseLine(lower) then return nil end
+    if _isExitBoundary(lower) then return nil end
+    if _looksLikeExitRow(lower) then return nil end
+    if _looksLikeRoomTitle(trimmed) and lower:find(" here") == nil then
+        -- conservative: treat title/description as non-entity unless it matches entity patterns
+        -- (entity patterns below will still catch "X is here" etc)
+    end
 
-    for _, k in ipairs(itemKeys) do
-        if phraseLower:find(k, 1, true) then
-            return true
+    do
+        local phrase = trimmed:match("^(.-)%s+has%s+been%s+placed%s+here[%s,%.]")
+        phrase = _trim(phrase or "")
+        if phrase ~= "" then return phrase end
+    end
+
+    do
+        local phrase = trimmed:match("^(.-)%s+lies%s+here[%s,%.]")
+        phrase = _trim(phrase or "")
+        if phrase ~= "" then return phrase end
+    end
+
+    do
+        local phrase = trimmed:match("^(.-)%s+stands%s+here[%s,%.]")
+        phrase = _trim(phrase or "")
+        if phrase ~= "" then return phrase end
+    end
+
+    do
+        local phrase = trimmed:match("^(.-)%s+is%s+standing%s+here[%s,%.]")
+        phrase = _trim(phrase or "")
+        if phrase ~= "" then return phrase end
+    end
+
+    -- NEW: capture lines like:
+    --   "A large bulletin board is mounted on a wall here."
+    do
+        local phrase = trimmed:match("^(.-)%s+is%s+mounted%s+.-%s+here[%s,%.]")
+        phrase = _trim(phrase or "")
+        if phrase ~= "" then return phrase end
+    end
+
+    do
+        local phrase, posture = trimmed:match("^(.-)%s+is%s+(%a+)%s+here[%s,%.]")
+        phrase = _trim(phrase or "")
+        posture = tostring(posture or ""):lower()
+        if phrase ~= "" and posture ~= "" then
+            -- allow any word, but this is primarily posture support
+            if POSTURES[posture] == true then
+                return phrase
+            end
+            -- still accept as candidate (agreement: allowlist is simple, stable; errs go to unknown)
+            return phrase
         end
     end
 
-    return false
-end
-
-local function _isEntityishPostureLine(lowerTrimmed)
-    if type(lowerTrimmed) ~= "string" then return false end
-
-    -- accept "is here," / "is here." / "is here <more...>"
-    if lowerTrimmed:match("^.-%s+is%s+here[%s,%.]") ~= nil then
-        return true
+    do
+        local phrase = trimmed:match("^(.-)%s+is%s+here[%s,%.]")
+        phrase = _trim(phrase or "")
+        if phrase ~= "" then return phrase end
     end
 
-    -- accept "stands here <...>"
-    if lowerTrimmed:match("^.-%s+stands%s+here[%s,%.]") ~= nil then
-        return true
-    end
-
-    -- accept "is <word> here," / "is <word> here." / "is <word> here <more...>"
-    local w = lowerTrimmed:match("^.-%s+is%s+(%a+)%s+here[%s,%.]")
-    if type(w) == "string" and w ~= "" then
-        return true
-    end
-
-    return false
+    return nil
 end
 
 local function _shouldIgnoreByCallerRules(trimmed, opts)
@@ -788,211 +780,10 @@ local function _shouldIgnoreByCallerRules(trimmed, opts)
     return false
 end
 
-local function _classifyLookLine(line, opts, knownPlayersIdx)
-    opts = (type(opts) == "table") and opts or {}
-    if type(line) ~= "string" then return nil, nil end
-
-    local rawLine = line
-    local trimmed = _trim(line)
-    if trimmed == "" then return nil, nil end
-
-    if _shouldIgnoreByCallerRules(trimmed, opts) then
-        return nil, nil
-    end
-
-    local lowerTrimmed = trimmed:lower()
-
-    if rawLine:match("^%s%s%s+") then
-        local isEntityish = _isEntityishPostureLine(lowerTrimmed)
-        if not isEntityish then
-            return nil, nil
-        end
-    end
-
-    local lineClean = trimmed
-    local lower = lowerTrimmed
-
-    if lower == "you see nothing special." then return nil, nil end
-    if lower:find("^exits:") then return nil, nil end
-    if lower:find("^obvious exits:") then return nil, nil end
-    if _looksLikeExitRow(lower) then return nil, nil end
-
-    if lower == "huh?!?" then return nil, nil end
-    if lower == "you are hungry." then return nil, nil end
-    if lower == "you are thirsty." then return nil, nil end
-
-    if _looksLikeRoomTitle(lineClean) then
-        return nil, nil
-    end
-
-    -- "<thing> hangs here ..." -> items
-    do
-        local phrase = lineClean:match("^(.-)%s+hangs%s+here")
-        if type(phrase) == "string" then
-            phrase = _trim(phrase)
-            if phrase ~= "" then
-                return "items", _asKey(phrase)
-            end
-        end
-    end
-
-    -- "<thing> is mounted here ..." -> items
-    do
-        local phrase = lineClean:match("^(.-)%s+is%s+mounted%s+here")
-        if type(phrase) == "string" then
-            phrase = _trim(phrase)
-            if phrase ~= "" then
-                return "items", _asKey(phrase)
-            end
-        end
-    end
-
-    -- FIX (v2026-02-04B): "<thing> lies here." -> items
-    do
-        local phrase = lineClean:match("^(.-)%s+lies%s+here[%,%.]")
-        if type(phrase) == "string" then
-            phrase = _trim(phrase)
-            if phrase ~= "" then
-                return "items", _asKey(phrase)
-            end
-        end
-    end
-
-    -- NEW (v2026-02-04C): "<thing> stands here ..." (with any trailing text)
-    do
-        local phrase = lineClean:match("^(.-)%s+stands%s+here[%s,%.]")
-        if type(phrase) == "string" then
-            phrase = _trim(phrase)
-            if phrase ~= "" then
-                local conf = _confidenceForName(phrase, knownPlayersIdx)
-                if conf == "exact" then
-                    return "players", _asKey(phrase)
-                end
-                if conf == "candidate" then
-                    return "unknown", _asKey(phrase)
-                end
-
-                if lower:find("corpse") then
-                    return "items", _asKey(phrase)
-                end
-
-                local pLower = phrase:lower()
-                if pLower:match("^(a%s+)") or pLower:match("^(an%s+)") or pLower:match("^(the%s+)") then
-                    if _isProbablyItemPhrase(pLower) then
-                        return "items", _asKey(phrase)
-                    end
-                    return "mobs", _asKey(phrase)
-                end
-
-                return "unknown", _asKey(phrase)
-            end
-        end
-    end
-
-    -- posture-ish / verb-ish line: "X is <word> here ..." (comma/period/space after here)
-    do
-        local phrase, posture = lineClean:match("^(.-)%s+is%s+(%a+)%s+here[%s,%.]")
-        if type(phrase) == "string" and type(posture) == "string" then
-            phrase = _trim(phrase)
-            posture = posture:lower()
-            if phrase ~= "" then
-                local conf = _confidenceForName(phrase, knownPlayersIdx)
-                if conf == "exact" then
-                    return "players", _asKey(phrase)
-                end
-                if conf == "candidate" then
-                    return "unknown", _asKey(phrase)
-                end
-
-                if lower:find("corpse") then
-                    return "items", _asKey(phrase)
-                end
-
-                local pLower = phrase:lower()
-                if pLower:match("^(a%s+)") or pLower:match("^(an%s+)") or pLower:match("^(the%s+)") then
-                    if _isProbablyItemPhrase(pLower) then
-                        return "items", _asKey(phrase)
-                    end
-                    return "mobs", _asKey(phrase)
-                end
-
-                if opts.assumeCapitalizedAsPlayer == true and POSTURES[posture] == true then
-                    local first = phrase:sub(1, 1)
-                    if first:match("%u") then
-                        return "players", _asKey(phrase)
-                    end
-                end
-
-                return "unknown", _asKey(phrase)
-            end
-        end
-    end
-
-    -- "X is here ..." (with any trailing text)
-    do
-        local phrase = lineClean:match("^(.-)%s+is%s+here[%s,%.]")
-        if type(phrase) == "string" then
-            phrase = _trim(phrase)
-            if phrase ~= "" then
-                local conf = _confidenceForName(phrase, knownPlayersIdx)
-                if conf == "exact" then
-                    return "players", _asKey(phrase)
-                end
-                if conf == "candidate" then
-                    return "unknown", _asKey(phrase)
-                end
-
-                if lower:find("corpse") then
-                    return "items", _asKey(phrase)
-                end
-
-                local pLower = phrase:lower()
-
-                if pLower:match("^(a%s+)") or pLower:match("^(an%s+)") or pLower:match("^(the%s+)") then
-                    if _isProbablyItemPhrase(pLower) then
-                        return "items", _asKey(phrase)
-                    end
-                    return "mobs", _asKey(phrase)
-                end
-
-                return "unknown", _asKey(phrase)
-            end
-        end
-    end
-
-    -- Conservative: "A/An/The <noun> ... here ... ."
-    do
-        if not lower:find("%sis%s", 1, true) then
-            if (lower:match("^(a%s+)") or lower:match("^(an%s+)") or lower:match("^(the%s+)")) and lower:find("%shere%s", 1, true) and lower:match("%.%s*$") then
-                local noun = lineClean:match("^(An?%s+.-)%s+%a+%s")
-                if type(noun) ~= "string" or noun == "" then
-                    noun = lineClean:match("^(The%s+.-)%s+%a+%s")
-                end
-                noun = _trim(noun or "")
-                if noun ~= "" then
-                    local nLower = noun:lower()
-                    if _isProbablyItemPhrase(nLower) then
-                        return "items", _asKey(noun)
-                    end
-                    return "mobs", _asKey(noun)
-                end
-            end
-        end
-    end
-
-    if lower:find("corpse") then
-        return "items", _asKey(lineClean)
-    end
-
-    if _isEntityishPostureLine(lower) then
-        return "unknown", _asKey(lineClean)
-    end
-
-    return nil, nil
-end
-
 -- ############################################################
 -- WhoStore "superpower" wiring (SAFE)
+-- Still allowed: auto promote to players when WhoStore becomes confident.
+-- But per agreement: ONLY players can be auto-typed; everything else remains unknown.
 -- ############################################################
 
 local _who = {
@@ -1017,36 +808,23 @@ local function _resolveWhoStoreUpdatedEventName(W)
     return nil
 end
 
-local function _reclassifyBucketsWithKnownPlayers(current, knownIdx)
+local function _reclassifyUnknownToPlayersOnly(current, knownIdx)
     current = _ensureBucketsPresent((type(current) == "table") and current or {})
     knownIdx = (type(knownIdx) == "table") and knownIdx or _newNameIndex()
 
     local next = _newBuckets()
-
     local moved = 0
 
-    local function placeName(originalBucket, name)
+    -- keep legacy mobs/items as-is (typically empty); policy is unknown-first.
+    next.mobs = _copyOneLevel(current.mobs)
+    next.items = _copyOneLevel(current.items)
+
+    local function placeNameFromUnknown(name)
         if type(name) ~= "string" or name == "" then return end
-
         local conf = _confidenceForName(name, knownIdx)
-
         if conf == "exact" then
             next.players[name] = true
             moved = moved + 1
-            return
-        end
-
-        if conf == "candidate" then
-            next.unknown[name] = true
-            return
-        end
-
-        if originalBucket == "players" then
-            next.unknown[name] = true
-        elseif originalBucket == "mobs" then
-            next.mobs[name] = true
-        elseif originalBucket == "items" then
-            next.items[name] = true
         else
             next.unknown[name] = true
         end
@@ -1054,25 +832,12 @@ local function _reclassifyBucketsWithKnownPlayers(current, knownIdx)
 
     for k, v in pairs(current.players) do
         if v == true and type(k) == "string" and k ~= "" then
-            placeName("players", k)
+            next.players[k] = true
         end
     end
-
     for k, v in pairs(current.unknown) do
         if v == true and type(k) == "string" and k ~= "" then
-            placeName("unknown", k)
-        end
-    end
-
-    for k, v in pairs(current.mobs) do
-        if v == true and type(k) == "string" and k ~= "" then
-            placeName("mobs", k)
-        end
-    end
-
-    for k, v in pairs(current.items) do
-        if v == true and type(k) == "string" and k ~= "" then
-            placeName("items", k)
+            placeNameFromUnknown(k)
         end
     end
 
@@ -1091,7 +856,7 @@ local function _applyReclassifyNow(opts)
     local knownIdx = _getWhoStoreKnownPlayersIndexBestEffort()
     local before = _copyOneLevel(_ensureBucketsPresent(STATE.state))
 
-    local next, moved = _reclassifyBucketsWithKnownPlayers(before, knownIdx)
+    local next, moved = _reclassifyUnknownToPlayersOnly(before, knownIdx)
 
     if opts.forceEmit ~= true and _statesEqual(before, next) then
         STATE.suppressedEmits = STATE.suppressedEmits + 1
@@ -1104,7 +869,7 @@ local function _applyReclassifyNow(opts)
     STATE.updates = STATE.updates + 1
 
     local src = tostring(opts.source or "reclassify:whostore")
-    local delta = { reclassified = moved }
+    local delta = { reclassifiedPlayers = moved }
 
     local okEmit, errEmit = _emit(_copyOneLevel(STATE.state), delta, src)
     if not okEmit then
@@ -1139,7 +904,7 @@ local function _ensureWhoStoreSubscription()
         return false, _who.lastErr
     end
 
-    local handlerFn = function(payload)
+    local handlerFn = function(_payload)
         _applyReclassifyNow({ source = "whostore:updated" })
     end
 
@@ -1172,7 +937,9 @@ function M.getUpdatedEventName()
 end
 
 function M.getState()
-    return _copyOneLevel(_ensureBucketsPresent(STATE.state))
+    local out = _copyOneLevel(_ensureBucketsPresent(STATE.state))
+    out.entitiesV2 = _copyEntitiesV2(STATE.entitiesV2)
+    return out
 end
 
 function M.emitUpdated(meta)
@@ -1190,6 +957,7 @@ function M.emitUpdated(meta)
     delta.ts = nil
     delta.state = nil
     delta.delta = nil
+    delta.entitiesV2 = nil
 
     local hasAny = false
     for _ in pairs(delta) do
@@ -1214,64 +982,92 @@ function M.ingestFixture(opts)
 
     _ensureWhoStoreSubscription()
 
-    local function absorb(dstSet, t)
-        if type(dstSet) ~= "table" then return end
-        if type(t) ~= "table" then return end
-
-        if _isArrayTable(t) then
-            for _, v in ipairs(t) do
-                if type(v) == "string" and v ~= "" then
-                    dstSet[v] = true
-                elseif type(v) == "table" and type(v.name) == "string" and v.name ~= "" then
-                    dstSet[v.name] = true
-                end
-            end
-            return
-        end
-
-        for k, v in pairs(t) do
-            if type(k) == "string" and k ~= "" then
-                if v == true then
-                    dstSet[k] = true
-                elseif type(v) == "string" and v ~= "" then
-                    dstSet[v] = true
-                elseif type(v) == "table" and type(v.name) == "string" and v.name ~= "" then
-                    dstSet[v.name] = true
-                end
-            elseif type(v) == "string" and v ~= "" then
-                dstSet[v] = true
-            elseif type(v) == "table" and type(v.name) == "string" and v.name ~= "" then
-                dstSet[v.name] = true
-            end
-        end
-    end
-
     local buckets = _newBuckets()
+    local v2 = _newEntitiesV2()
 
-    buckets.players["FixturePlayer"] = true
-    buckets.mobs["a fixture goblin"] = true
-    buckets.items["a fixture chest"] = true
-    buckets.unknown["Mysterious figure"] = true
+    -- V2 helper: preserve duplicates by incrementing count and storing raws.
+    local function addV2(bucketMap, label, rawLine)
+        bucketMap = (type(bucketMap) == "table") and bucketMap or {}
+        label = tostring(label or "")
+        rawLine = tostring(rawLine or label)
 
+        local key = _asKey(label) or label
+        key = _trim(key)
+        if key == "" then return end
+
+        local e = bucketMap[key]
+        if type(e) ~= "table" then
+            e = { label = label, key = key, count = 0, raws = {} }
+            bucketMap[key] = e
+        end
+
+        e.count = (tonumber(e.count) or 0) + 1
+        e.raws[#e.raws + 1] = rawLine
+    end
+
+    local function absorbSetOrArray(dstBucket, dstV2, src)
+        if type(src) ~= "table" then return false end
+
+        local addedAny = false
+
+        local function addName(name)
+            name = tostring(name or "")
+            local label = _asKey(name) or name
+            label = _trim(label)
+            if label == "" then return end
+
+            _addBucket(dstBucket, label)
+            addV2(dstV2, label, label .. " is here.")
+            addedAny = true
+        end
+
+        if _isArrayTable(src) then
+            for _, v in ipairs(src) do
+                if type(v) == "string" then
+                    addName(v)
+                elseif type(v) == "table" and type(v.name) == "string" then
+                    addName(v.name)
+                end
+            end
+            return addedAny
+        end
+
+        for k, v in pairs(src) do
+            if v == true and type(k) == "string" then
+                addName(k)
+            elseif type(v) == "string" then
+                addName(v)
+            elseif type(v) == "table" and type(v.name) == "string" then
+                addName(v.name)
+            end
+        end
+
+        return addedAny
+    end
+
+    local hasAny = false
     if type(opts.players) == "table" then
-        buckets.players = {}
-        absorb(buckets.players, opts.players)
-    end
-    if type(opts.mobs) == "table" then
-        buckets.mobs = {}
-        absorb(buckets.mobs, opts.mobs)
-    end
-    if type(opts.items) == "table" then
-        buckets.items = {}
-        absorb(buckets.items, opts.items)
+        if absorbSetOrArray(buckets.players, v2.players, opts.players) then
+            hasAny = true
+        end
     end
     if type(opts.unknown) == "table" then
-        buckets.unknown = {}
-        absorb(buckets.unknown, opts.unknown)
+        if absorbSetOrArray(buckets.unknown, v2.unknown, opts.unknown) then
+            hasAny = true
+        end
+    end
+
+    -- Backward-compatible default fixture if caller provided nothing usable.
+    if not hasAny then
+        buckets.players["FixturePlayer"] = true
+        buckets.unknown["Mysterious figure"] = true
+
+        v2.players["FixturePlayer"] = { label = "FixturePlayer", key = "FixturePlayer", count = 1, raws = { "FixturePlayer is here." } }
+        v2.unknown["Mysterious figure"] = { label = "Mysterious figure", key = "Mysterious figure", count = 1, raws = { "Mysterious figure is here." } }
     end
 
     local src = tostring(opts.source or "fixture:roomentities")
-    return M.setState(buckets, { source = src, forceEmit = (opts.forceEmit == true) })
+    return M.setState({ state = buckets, entitiesV2 = v2 }, { source = src, forceEmit = (opts.forceEmit == true) })
 end
 
 function M.setState(newState, opts)
@@ -1282,17 +1078,39 @@ function M.setState(newState, opts)
 
     _armWhoStoreSubscriptionBestEffort()
 
-    local nextState = _copyOneLevel(newState)
+    -- Accept two shapes:
+    --   A) legacy: {players=..., mobs=..., items=..., unknown=...}
+    --   B) wrapped: { state=legacyBuckets, entitiesV2=v2 }
+    local incomingBuckets = newState
+    local incomingV2 = nil
+
+    if type(newState.state) == "table" then
+        incomingBuckets = newState.state
+    end
+    if type(newState.entitiesV2) == "table" then
+        incomingV2 = newState.entitiesV2
+    end
+
+    local nextState = _copyOneLevel(incomingBuckets)
     nextState = _ensureBucketsPresent(nextState)
 
     local before = _ensureBucketsPresent(STATE.state)
 
-    if opts.forceEmit ~= true and _statesEqual(before, nextState) then
+    local sameLegacy = _statesEqual(before, nextState)
+    local nextV2 = (type(incomingV2) == "table") and _copyEntitiesV2(incomingV2) or _newEntitiesV2()
+
+    -- If caller didn't provide V2, keep existing V2 only when legacy is unchanged.
+    if type(incomingV2) ~= "table" and sameLegacy then
+        nextV2 = _copyEntitiesV2(STATE.entitiesV2)
+    end
+
+    if opts.forceEmit ~= true and sameLegacy and type(incomingV2) ~= "table" then
         STATE.suppressedEmits = STATE.suppressedEmits + 1
         return true, nil
     end
 
     STATE.state = nextState
+    STATE.entitiesV2 = _ensureEntitiesV2Present(nextV2)
     STATE.lastTs = os.time()
     STATE.updates = STATE.updates + 1
 
@@ -1348,6 +1166,7 @@ function M.clear(opts)
     local before = _copyOneLevel(STATE.state)
 
     STATE.state = _newBuckets()
+    STATE.entitiesV2 = _newEntitiesV2()
     local after = _copyOneLevel(STATE.state)
 
     if opts.forceEmit ~= true and _statesEqual(before, after) then
@@ -1377,6 +1196,9 @@ function M.reclassifyFromWhoStore(opts)
     return _applyReclassifyNow({ source = opts.source or "manual:reclassify", forceEmit = (opts.forceEmit == true) })
 end
 
+-- Best-effort entity-region scan:
+--   - Collect candidates until "Obvious exits:" (or exit rows).
+--   - Ignore room title / description lines conservatively.
 function M.ingestLookLines(lines, opts)
     opts = (type(opts) == "table") and opts or {}
     if type(lines) ~= "table" then
@@ -1386,16 +1208,60 @@ function M.ingestLookLines(lines, opts)
     _ensureWhoStoreSubscription()
 
     local knownPlayersIdx = _getKnownPlayersIndexCombined(opts)
+
     local buckets = _newBuckets()
+    local v2 = _newEntitiesV2()
+
+    local function addV2(bucketMap, key, label, rawLine)
+        bucketMap = (type(bucketMap) == "table") and bucketMap or {}
+        key = tostring(key or "")
+        label = tostring(label or key)
+        rawLine = tostring(rawLine or "")
+        if key == "" then return end
+
+        local e = bucketMap[key]
+        if type(e) ~= "table" then
+            e = { label = label, key = key, count = 0, raws = {} }
+            bucketMap[key] = e
+        end
+
+        e.count = (tonumber(e.count) or 0) + 1
+        e.raws[#e.raws + 1] = rawLine
+    end
 
     for _, raw in ipairs(lines) do
-        local bucketName, key = _classifyLookLine(raw, opts, knownPlayersIdx)
-        if bucketName and key then
-            _addBucket(buckets[bucketName], key)
+        local line = tostring(raw or "")
+        local trimmed = _trim(line)
+        if trimmed ~= "" then
+            if _shouldIgnoreByCallerRules(trimmed, opts) then
+                -- skip
+            else
+                local lower = trimmed:lower()
+                if _isExitBoundary(lower) or _looksLikeExitRow(lower) then
+                    break
+                end
+
+                local phrase = _extractEntityPhrase(trimmed)
+                if phrase ~= nil then
+                    local label = _asKey(phrase) or phrase
+                    if label ~= "" then
+                        local conf = _confidenceForName(label, knownPlayersIdx)
+                        if conf == "exact" then
+                            _addBucket(buckets.players, label)
+                            addV2(v2.players, label, label, trimmed)
+                        else
+                            _addBucket(buckets.unknown, label)
+                            addV2(v2.unknown, label, label, trimmed)
+                        end
+                    end
+                end
+            end
         end
     end
 
-    return M.setState(buckets, { source = opts.source or "ingestLookLines", forceEmit = (opts.forceEmit == true) })
+    -- Policy: service does not auto-fill mobs/items; leave empty.
+    local wrapped = { state = buckets, entitiesV2 = v2 }
+    return M.setState(wrapped, { source = opts.source or "ingestLookLines", forceEmit = (opts.forceEmit == true) })
 end
 
 function M.ingestLookText(text, opts)
