@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-07B
+-- Version     : v2026-02-09A
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-07B"
+M.VERSION = "v2026-02-09A"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -78,7 +78,8 @@ local SUITES = {
             {
                 cmd =
                 'lua do local C=require("dwkit.capture.roomfeed_capture"); local s=C.getDebugState(); local kind=tostring(s.lastHeaderSeenKind or ""); local isStrong=(kind:sub(1,6)=="strong"); local isFallback=(kind:sub(1,8)=="fallback"); if (not isStrong) and (not isFallback) then error("Expected lastHeaderSeenKind strong* OR fallback*; got "..kind) end; local eff=tostring(s.lastHeaderSeenEffectiveClean or ""); if eff=="" then error("Expected non-empty effective header; got empty") end; if isStrong then local hasId=(eff:find("#",1,true)~=nil); local hasFlags=(eff:find("[",1,true)~=nil and eff:find("]",1,true)~=nil); if (not hasId) and (not hasFlags) then error("Expected strong header to include id (#) or flags ([..]); got "..eff) end end; if tostring(s.lastAbortReason or "")=="abort:restart_header_seen" then error("Unexpected restart_header_seen (wrapped text misdetected as header).") end; if s.lastOkTs==nil then error("Expected lastOkTs non-nil after look finalize; stillCapturing="..tostring(s.snapCapturing).." hasExits="..tostring(s.snapHasExits).." bufLen="..tostring(s.snapBufLen).." lastLine="..tostring(s.lastLineSeenClean)) end; print(string.format("[dwverify-roomfeed] PASS kind=%s okTs=%s abort=%s eff=%s", kind, tostring(s.lastOkTs), tostring(s.lastAbortReason), eff)) end',
-                note = "ASSERT: finalize succeeded; no false restart; header classification allows Immortal strong OR normal fallback; strong implies id/flags present.",
+                note =
+                "ASSERT: finalize succeeded; no false restart; header classification allows Immortal strong OR normal fallback; strong implies id/flags present.",
             },
 
             { cmd = "dwroom status", note = "Human confirmation: Room feed capture status should show lastOkTs updated and no restart abort." },
@@ -475,7 +476,7 @@ local SUITES = {
     launchpad_toggle_updates_rt_visible = {
         title = "launchpad_toggle_updates_rt_visible",
         description =
-        "LaunchPad toggle drives gui_settings visible (noSave) and ui_manager.applyOne, and runtime-visible (rt:) follows ui_base storeEntry.state.visible.",
+        "LaunchPad toggle drives gui_settings visible (noSave) and ui_manager.applyOne, and runtime-visible (rt:) follows ui_base storeEntry.state.visible (must flip true AND false).",
         delay = 0.30,
         steps = {
             {
