@@ -1,7 +1,8 @@
+-- FILE: src/dwkit/persist/store.lua
 -- #########################################################################
 -- Module Name : dwkit.persist.store
 -- Owner       : Persist
--- Version     : v2026-01-12B
+-- Version     : v2026-02-10C
 -- Purpose     :
 --   - Provide SAFE, per-profile persistence helpers backed by Mudlet's table.save/table.load.
 --   - Enforces package-owned data directory (dwkit) via dwkit.persist.paths.
@@ -15,6 +16,10 @@
 --   - loadEnvelope(relPath) -> (ok:boolean, envelope:table|nil, err:string|nil)
 --   - delete(relPath) -> (ok:boolean, err:string|nil)
 --
+-- Added Debug Helpers (v2026-02-10C):
+--   - resolvePathBestEffort(relPath) -> fullPath|nil
+--   - getBaseDirBestEffort() -> baseDir|nil
+--
 -- Events Emitted   : None
 -- Events Consumed  : None
 -- Persistence      : Writes under: <getMudletHomeDir()>/<identity.dataFolderName>/
@@ -27,7 +32,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-12B"
+M.VERSION = "v2026-02-10C"
 
 local ID = require("dwkit.core.identity")
 local Paths = require("dwkit.persist.paths")
@@ -170,6 +175,24 @@ function M.resolve(relPath)
     end
 
     return true, Paths.join(dataDir, _normalizeSeps(relPath)), nil
+end
+
+-- Added (debug): returns fullPath or nil
+function M.resolvePathBestEffort(relPath)
+    local ok, fullPath = M.resolve(relPath)
+    if ok and type(fullPath) == "string" and fullPath ~= "" then
+        return fullPath
+    end
+    return nil
+end
+
+-- Added (debug): returns base data dir or nil
+function M.getBaseDirBestEffort()
+    local okDir, dataDir = Paths.getDataDir()
+    if okDir and type(dataDir) == "string" and dataDir ~= "" then
+        return dataDir
+    end
+    return nil
 end
 
 function M.saveEnvelope(relPath, schemaVersion, data, meta)

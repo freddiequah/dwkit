@@ -2,35 +2,32 @@
 -- #########################################################################
 -- Module Name : dwkit.services.roomentities_override_store
 -- Owner       : Services
--- Version     : v2026-02-09B
+-- Version     : v2026-02-10G
 -- Purpose     :
 --   - SAFE per-profile override persistence for RoomEntities Unknown tagging.
 --   - No GMCP, no timers, no send(), no Mudlet events required.
 --   - Stores overrides keyed by a normalized entity key (string).
 --
--- Policy (RoomEntities Capture & Unknown Tagging Agreement):
---   - Unknown-first: non-players are Unknown until user tags.
---   - User overrides are canonical authority for non-players.
---   - Override types: mob | item | ignore
---   - Per-profile: stored inside DWKit data folder (Mudlet profile-local).
+-- Override types: mob | item | ignore
+-- Stored per-profile under DWKit data folder using dwkit.persist.store envelope.
 --
 -- Public API:
---   - getVersion() -> string
---   - getAll() -> table (copy) of overrides: { [key] = { type="mob|item|ignore", ts=number } }
---   - get(key) -> table|nil
---   - set(key, typeStr) -> boolean ok, string|nil err
---   - clear(key) -> boolean ok, string|nil err
---   - clearAll() -> boolean ok, string|nil err
+--   - getVersion(), getAll(), get(), set(), clear(), clearAll()
+--   - setType(), getType(), clearType() (compat)
+--   - getDebugState(), forceReload() (debug)
 --
--- Compatibility helpers (older UI callers):
---   - setType(key, typeStr) -> boolean ok, string|nil err
---   - getType(key) -> string|nil
---   - clearType(key) -> boolean ok, string|nil err
+-- Key Fix (v2026-02-10G):
+--   - Align to actual dwkit.persist.store API:
+--       saveEnvelope(relPath, schemaVersion, data, meta)
+--       loadEnvelope(relPath)
+--   - Payload is stored under env.data (NOT schemaVersion).
+--   - Load parsing supports legacy/bad files (where payload ended up under schemaVersion.data).
+--   - Load failures do NOT permanently freeze "empty"; retry with cooldown.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-09B"
+M.VERSION = "v2026-02-10G"
 
 local Store = require("dwkit.persist.store")
 
@@ -40,6 +37,14 @@ local _cache = {
     loaded = false,
     overrides = {},
     lastErr = nil,
+
+    -- retry gate (prevents hammering during startup)
+    nextRetryTs = 0,
+    retryCooldownSec = 2,
+
+    -- debug flags
+    lastLoadOk = nil,
+    lastSaveOk = nil,
 }
 
 local function _copyOneLevel(t)
@@ -64,54 +69,226 @@ end
 
 local function _validType(t)
     t = tostring(t or "")
-    if t == "mob" or t == "item" or t == "ignore" then
-        return true
-    end
-    return false
+    return (t == "mob" or t == "item" or t == "ignore")
 end
+
+local function _now()
+    return os.time()
+end
+
+local function _shouldRetryNow()
+    local t = _now()
+    return (t >= (tonumber(_cache.nextRetryTs) or 0))
+end
+
+local function _markRetryLater(errMsg)
+    _cache.lastErr = tostring(errMsg or "load failed")
+    _cache.loaded = false
+    _cache.lastLoadOk = false
+    _cache.nextRetryTs = _now() + (tonumber(_cache.retryCooldownSec) or 2)
+end
+
+-- -----------------------------
+-- Load parsing helpers
+-- -----------------------------
+
+local function _extractOverridesFromEnvelope(env)
+    if type(env) ~= "table" then return nil end
+
+    -- Normal/correct shape: env.data.overrides
+    if type(env.data) == "table" and type(env.data.overrides) == "table" then
+        return env.data.overrides
+    end
+
+    -- Some callers may store directly: env.overrides
+    if type(env.overrides) == "table" then
+        return env.overrides
+    end
+
+    -- Legacy/double-wrap: env.data.data.overrides
+    if type(env.data) == "table" and type(env.data.data) == "table" and type(env.data.data.overrides) == "table" then
+        return env.data.data.overrides
+    end
+
+    -- Alternate naming: env.payload.overrides / env.payload.data.overrides
+    if type(env.payload) == "table" then
+        if type(env.payload.overrides) == "table" then
+            return env.payload.overrides
+        end
+        if type(env.payload.data) == "table" and type(env.payload.data.overrides) == "table" then
+            return env.payload.data.overrides
+        end
+    end
+
+    -- IMPORTANT: support "bad file" created by earlier mismatch:
+    -- payload ended up under env.schemaVersion.data.overrides
+    if type(env.schemaVersion) == "table" and type(env.schemaVersion.data) == "table" then
+        if type(env.schemaVersion.data.overrides) == "table" then
+            return env.schemaVersion.data.overrides
+        end
+        if type(env.schemaVersion.data.data) == "table" and type(env.schemaVersion.data.data.overrides) == "table" then
+            return env.schemaVersion.data.data.overrides
+        end
+    end
+
+    return nil
+end
+
+-- -----------------------------
+-- Load / Save
+-- -----------------------------
 
 local function _loadBestEffort()
     if _cache.loaded == true then
         return true, nil
     end
 
-    local ok, envOrErr = Store.loadEnvelopeBestEffort(RELPATH, { quiet = true })
-    if ok and type(envOrErr) == "table" then
-        local data = envOrErr.data
-        if type(data) == "table" and type(data.overrides) == "table" then
-            _cache.overrides = _copyOneLevel(data.overrides)
-        else
-            _cache.overrides = {}
-        end
-        _cache.loaded = true
-        _cache.lastErr = nil
+    if not _shouldRetryNow() then
         return true, nil
     end
 
-    _cache.overrides = {}
-    _cache.loaded = true
-    _cache.lastErr = tostring(envOrErr or "load failed")
+    if type(Store) ~= "table" or type(Store.loadEnvelope) ~= "function" then
+        _markRetryLater("persist store missing loadEnvelope()")
+        return true, nil
+    end
+
+    local okCall, ok, env, err = pcall(Store.loadEnvelope, RELPATH)
+    if not okCall then
+        _markRetryLater(ok)
+        return true, nil
+    end
+
+    -- Store.loadEnvelope returns (ok:boolean, env:table|nil, err:string|nil)
+    if ok == true and type(env) == "table" then
+        local ov = _extractOverridesFromEnvelope(env)
+        if type(ov) == "table" then
+            _cache.overrides = _copyOneLevel(ov)
+        else
+            _cache.overrides = {}
+        end
+
+        _cache.loaded = true
+        _cache.lastErr = nil
+        _cache.lastLoadOk = true
+        _cache.nextRetryTs = 0
+        return true, nil
+    end
+
+    -- If file not found, treat as empty but loaded (no need to retry)
+    local errStr = tostring(err or "load failed")
+    if errStr:lower():find("file not found", 1, true) then
+        _cache.overrides = {}
+        _cache.loaded = true
+        _cache.lastErr = nil
+        _cache.lastLoadOk = true
+        _cache.nextRetryTs = 0
+        return true, nil
+    end
+
+    -- Otherwise: retry later
+    _cache.overrides = _cache.overrides or {}
+    _markRetryLater(errStr)
     return true, nil
 end
 
 local function _saveBestEffort()
+    if type(Store) ~= "table" or type(Store.saveEnvelope) ~= "function" then
+        _cache.lastErr = "persist store missing saveEnvelope()"
+        _cache.lastSaveOk = false
+        return false, _cache.lastErr
+    end
+
     local payload = {
         version = M.VERSION,
-        updatedTs = os.time(),
+        updatedTs = _now(),
         overrides = _copyOneLevel(_cache.overrides),
     }
 
-    local ok, err = Store.saveEnvelopeBestEffort(RELPATH, payload, { quiet = true })
-    if ok then
+    -- Correct Store API:
+    -- saveEnvelope(relPath, schemaVersion, data, meta)
+    local okCall, ok, err = pcall(Store.saveEnvelope, RELPATH, M.VERSION, payload,
+        { module = "roomentities_override_store" })
+    if not okCall then
+        _cache.lastErr = tostring(ok)
+        _cache.lastSaveOk = false
+        return false, _cache.lastErr
+    end
+
+    if ok == true then
         _cache.lastErr = nil
+        _cache.lastSaveOk = true
         return true, nil
     end
+
     _cache.lastErr = tostring(err or "save failed")
+    _cache.lastSaveOk = false
     return false, _cache.lastErr
 end
 
+-- -----------------------------
+-- Debug helpers
+-- -----------------------------
+
+local function _bestEffortResolvedPath()
+    if type(Store) ~= "table" then return nil end
+    if type(Store.resolvePathBestEffort) == "function" then
+        local ok, v = pcall(Store.resolvePathBestEffort, RELPATH)
+        if ok and type(v) == "string" and v ~= "" then return v end
+    end
+    if type(Store.resolve) == "function" then
+        local ok, ok2, fullPath = pcall(Store.resolve, RELPATH)
+        if ok and ok2 == true and type(fullPath) == "string" and fullPath ~= "" then return fullPath end
+    end
+    return nil
+end
+
+local function _bestEffortBaseDir()
+    if type(Store) ~= "table" then return nil end
+    if type(Store.getBaseDirBestEffort) == "function" then
+        local ok, v = pcall(Store.getBaseDirBestEffort)
+        if ok and type(v) == "string" and v ~= "" then return v end
+    end
+    return nil
+end
+
+-- -----------------------------
+-- Public API
+-- -----------------------------
+
 function M.getVersion()
     return tostring(M.VERSION)
+end
+
+function M.getDebugState()
+    local n = 0
+    if type(_cache.overrides) == "table" then
+        for _ in pairs(_cache.overrides) do n = n + 1 end
+    end
+
+    return {
+        version = M.VERSION,
+        relpath = RELPATH,
+        resolvedPath = _bestEffortResolvedPath(),
+        baseDir = _bestEffortBaseDir(),
+        loaded = (_cache.loaded == true),
+        lastLoadOk = _cache.lastLoadOk,
+        lastSaveOk = _cache.lastSaveOk,
+        lastErr = _cache.lastErr,
+        nextRetryTs = tonumber(_cache.nextRetryTs) or 0,
+        retryCooldownSec = tonumber(_cache.retryCooldownSec) or 0,
+        overrideCount = n,
+        storeApi = {
+            detected = true,
+            loadFn = "loadEnvelope",
+            saveFn = "saveEnvelope"
+        }
+    }
+end
+
+function M.forceReload()
+    _cache.loaded = false
+    _cache.nextRetryTs = 0
+    return _loadBestEffort()
 end
 
 function M.getAll()
@@ -143,7 +320,7 @@ function M.set(key, typeStr)
         return false, "set(key,type): type must be mob|item|ignore"
     end
 
-    _cache.overrides[key] = { type = typeStr, ts = os.time() }
+    _cache.overrides[key] = { type = typeStr, ts = _now() }
     return _saveBestEffort()
 end
 
@@ -165,13 +342,8 @@ function M.clearAll()
     return _saveBestEffort()
 end
 
--- ############################################################
--- Compatibility wrappers (older UI callers)
--- ############################################################
-
-function M.setType(key, typeStr)
-    return M.set(key, typeStr)
-end
+-- Compatibility wrappers
+function M.setType(key, typeStr) return M.set(key, typeStr) end
 
 function M.getType(key)
     local e = M.get(key)
@@ -181,9 +353,7 @@ function M.getType(key)
     return nil
 end
 
-function M.clearType(key)
-    return M.clear(key)
-end
+function M.clearType(key) return M.clear(key) end
 
 return M
 
