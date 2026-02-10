@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-09C
+-- Version     : v2026-02-10D
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-09C"
+M.VERSION = "v2026-02-10D"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -352,6 +352,11 @@ local SUITES = {
                 cmd =
                 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("launchpad_ui", true, {noSave=true}); gs.setVisible("launchpad_ui", true, {noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)=="table" and type(UM.applyOne)=="function" then UM.applyOne("launchpad_ui",{source="dwverify:ui_smoke"}) else local UI=require("dwkit.ui.launchpad_ui"); if type(UI.apply)=="function" then local ok,err=UI.apply({}); if ok==false then error(err) end end end; local UI=require("dwkit.ui.launchpad_ui"); local s=UI.getState(); local rowCount=(s.widgets and s.widgets.rowCount) or s.rowCount or 0; local ids=s.renderedUiIds or {}; print(string.format("[dwverify-ui] launchpad_ui visible=%s enabled=%s rowCount=%s ids=%s", tostring(s.visible), tostring(s.enabled), tostring(rowCount), tostring(table.concat(ids,",")))) end',
                 note = "Show launchpad_ui (via ui_manager if present) and print rendered list state.",
+            },
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("chat_ui", true, {noSave=true}); gs.setVisible("chat_ui", true, {noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)=="table" and type(UM.applyOne)=="function" then local ok,err=UM.applyOne("chat_ui",{source="dwverify:ui_smoke"}); if ok==false then error("applyOne(chat_ui) failed: "..tostring(err)) end end; local UI=require("dwkit.ui.chat_ui"); local s=UI.getState(); local u=(s and s.unread and s.unread.Other) or 0; print(string.format("[dwverify-ui] chat_ui visible=%s activeTab=%s unreadOther=%s", tostring(s and s.visible), tostring(s and s.activeTab), tostring(u))); end',
+                note = "Show chat_ui (direct-control) via ui_manager.applyOne when available; print state.",
             },
         },
     },
