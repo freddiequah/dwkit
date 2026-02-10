@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_manager
 -- Owner       : UI
--- Version     : v2026-02-09B
+-- Version     : v2026-02-10B
 -- Purpose     :
 --   - SAFE dispatcher for applying UI modules registered in gui_settings.
 --   - Provides manual-only "apply all" and "apply one" capability.
@@ -17,24 +17,26 @@
 --
 -- Key Fixes:
 --   v2026-02-07C:
---     - Dispatcher now enforces deterministic runtime-visible signal (ui_base storeEntry.state.visible)
+--     - Dispatcher enforces deterministic runtime-visible signal (ui_base storeEntry.state.visible)
 --       after successful applyOne stand-up when cfgVisible is ON.
---       This fixes cases where UI modules reuse existing widgets and show() a container without
---       updating storeEntry.state.visible back to true (rtState drift).
 --   v2026-02-09A:
 --     - Extend enforcement BOTH ways:
 --         * cfgVisible=true  => rt state.visible MUST be true after apply()
 --         * cfgVisible=false => rt state.visible MUST be false after apply()
---       This fixes modules that hide widgets without updating storeEntry.state.visible back to false.
 --   v2026-02-09B:
---     - Cross-surface sync: UI Manager changes now best-effort refresh LaunchPad after applyOne/applyAll.
---       This ensures LaunchPad list + shown-state reflects enable/disable/show/hide actions done in
---       UI Manager UI (and any other callers of ui_manager.applyOne/applyAll).
+--     - Cross-surface sync: refresh LaunchPad after applyOne/applyAll.
+--   v2026-02-10A:
+--     - FIX: cfgVisible=false must NOT call ui.apply().
+--       Instead: call ui.hide() (preferred) or ui.dispose() (fallback),
+--       then enforce rt visible=false.
+--   v2026-02-10B:
+--     - FIX: direct-control UIs (e.g. chat_ui) do NOT implement apply/hide.
+--       UI Manager must call their show/hide/toggle APIs when cfgVisible flips.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-09B"
+M.VERSION = "v2026-02-10B"
 
 local function _rawOut(line)
     line = tostring(line or "")
@@ -136,9 +138,6 @@ local function _isEnabled(gs, uiId)
     return enabled
 end
 
--- IMPORTANT: gui_settings.isVisible/getVisible often take a default value param.
--- Passing nil can yield nil even when a value exists in defaults/records.
--- Use a default that returns a stable boolean if a record is missing.
 local function _isVisibleBestEffort(gs, uiId)
     if type(gs) ~= "table" then return nil end
 
@@ -178,7 +177,6 @@ local function _setRuntimeVisibleBestEffort(uiId, visible, source)
         return false
     end
 
-    -- Preferred: dedicated helper
     if type(U.setUiStateVisibleBestEffort) == "function" then
         pcall(function()
             U.setUiStateVisibleBestEffort(uiId, (visible == true))
@@ -186,7 +184,6 @@ local function _setRuntimeVisibleBestEffort(uiId, visible, source)
         return true
     end
 
-    -- Fallback: setUiRuntime state merge
     if type(U.setUiRuntime) == "function" then
         pcall(function()
             U.setUiRuntime(uiId, {
@@ -215,12 +212,10 @@ local function _refreshLaunchpadBestEffort(changedUiId, opts)
     changedUiId = tostring(changedUiId or "")
     if changedUiId == "" then return false end
 
-    -- Guard: don't self-refresh when applying LaunchPad itself
     if changedUiId == "launchpad_ui" then
         return false
     end
 
-    -- Guard: prevent simple sync loops
     if _sourceLooksLikeLaunchpadSync(opts) then
         return false
     end
@@ -230,13 +225,55 @@ local function _refreshLaunchpadBestEffort(changedUiId, opts)
         return false
     end
 
-    -- Prefer refresh() if present, else apply()
     if type(L.refresh) == "function" then
         pcall(L.refresh, { source = "ui_manager:sync_launchpad", quiet = true })
         return true
     end
     if type(L.apply) == "function" then
         pcall(L.apply, { source = "ui_manager:sync_launchpad", quiet = true })
+        return true
+    end
+
+    return false
+end
+
+-- -------------------------------------------------------------------------
+-- Direct-control UI handling (non-dispatcher-applied)
+-- -------------------------------------------------------------------------
+
+local DIRECT_UI = {
+    chat_ui = true, -- chat UI uses show/hide/toggle, not apply()
+}
+
+local function _applyDirectUiBestEffort(uiId, cfgVisible, opts)
+    uiId = tostring(uiId or "")
+    if DIRECT_UI[uiId] ~= true then return false end
+
+    if uiId == "chat_ui" then
+        local okUI, UI = pcall(require, "dwkit.ui.chat_ui")
+        if not okUI or type(UI) ~= "table" then
+            return true -- direct UI missing is not fatal to dispatcher
+        end
+
+        if cfgVisible == true then
+            if type(UI.show) == "function" then
+                pcall(UI.show,
+                    { source = (opts and opts.source) or "ui_manager:direct:chat", fixed = false, noClose = false })
+            elseif type(UI.toggle) == "function" then
+                pcall(UI.toggle, { source = (opts and opts.source) or "ui_manager:direct:chat" })
+            end
+            _setRuntimeVisibleBestEffort(uiId, true, "ui_manager:direct:chat:show")
+            return true
+        elseif cfgVisible == false then
+            if type(UI.hide) == "function" then
+                pcall(UI.hide, { source = (opts and opts.source) or "ui_manager:direct:chat" })
+            elseif type(UI.toggle) == "function" then
+                pcall(UI.toggle, { source = (opts and opts.source) or "ui_manager:direct:chat" })
+            end
+            _setRuntimeVisibleBestEffort(uiId, false, "ui_manager:direct:chat:hide")
+            return true
+        end
+
         return true
     end
 
@@ -312,13 +349,32 @@ local function _releaseDepsIfAny(uiId, opts)
 end
 
 -- -------------------------------------------------------------------------
+-- Visibility control (cfgVisible=false path)
+-- -------------------------------------------------------------------------
+
+local function _hideOrDisposeBestEffort(uiId, ui, opts)
+    local okH, _, _ = _callModuleBestEffort(ui, "hide", opts)
+    if okH then
+        _setRuntimeVisibleBestEffort(uiId, false, "ui_manager:cfgVisibleOff:hide")
+        return true, nil
+    end
+
+    local okD, _, errD = _callModuleBestEffort(ui, "dispose", opts)
+    if okD then
+        _setRuntimeVisibleBestEffort(uiId, false, "ui_manager:cfgVisibleOff:dispose")
+        return true, nil
+    end
+
+    _setRuntimeVisibleBestEffort(uiId, false, "ui_manager:cfgVisibleOff:runtime_only")
+    return true, errD
+end
+
+-- -------------------------------------------------------------------------
 
 function M.getModuleVersion()
     return M.VERSION
 end
 
--- Safe helper: session-only visible sync.
--- Does NOT call apply/dispose; intended for UI chrome interactions.
 function M.syncVisibleSession(uiId, visible, opts)
     opts = (type(opts) == "table") and opts or {}
     uiId = tostring(uiId or "")
@@ -347,7 +403,6 @@ end
 local function _standDownIfDisabled(uiId, opts)
     opts = (type(opts) == "table") and opts or {}
 
-    -- deterministic runtime signal: disabled implies not running/visible
     _setRuntimeVisibleBestEffort(uiId, false, "ui_manager:standDownIfDisabled")
 
     local ok, err = M.disposeOne(uiId, { source = opts.source or "ui_manager:standdown", quiet = opts.quiet })
@@ -386,10 +441,14 @@ function M.applyOne(uiId, opts)
         end
 
         _standDownIfDisabled(uiId, opts)
-
-        -- v2026-02-09B: refresh LaunchPad after dispatcher change
         _refreshLaunchpadBestEffort(uiId, opts)
+        return true, nil
+    end
 
+    -- Direct-control UI path (e.g. chat_ui)
+    if DIRECT_UI[uiId] == true and (cfgVisible == true or cfgVisible == false) then
+        _applyDirectUiBestEffort(uiId, cfgVisible, opts)
+        _refreshLaunchpadBestEffort(uiId, opts)
         return true, nil
     end
 
@@ -404,15 +463,18 @@ function M.applyOne(uiId, opts)
 
     if type(ui) ~= "table" then
         _out("[DWKit UI] SKIP uiId=" .. tostring(uiId) .. " (no module yet)", opts)
-
-        -- v2026-02-09B: refresh LaunchPad after dispatcher change (even if module missing)
         _refreshLaunchpadBestEffort(uiId, opts)
-
         return true, nil
     end
 
     if type(ui.init) == "function" then
         _callModuleBestEffort(ui, "init", opts)
+    end
+
+    if cfgVisible == false then
+        _hideOrDisposeBestEffort(uiId, ui, opts)
+        _refreshLaunchpadBestEffort(uiId, opts)
+        return true, nil
     end
 
     if type(ui.apply) == "function" then
@@ -421,26 +483,18 @@ function M.applyOne(uiId, opts)
             return false, tostring(errApply)
         end
 
-        -- v2026-02-09A:
-        -- Enforce deterministic runtime-visible signal to match cfgVisible when cfgVisible is a real boolean.
-        -- This fixes modules that show/hide containers without updating ui_base storeEntry.state.visible.
         if cfgVisible == true then
             _setRuntimeVisibleBestEffort(uiId, true, "ui_manager:post_apply:cfgVisibleOn")
         elseif cfgVisible == false then
             _setRuntimeVisibleBestEffort(uiId, false, "ui_manager:post_apply:cfgVisibleOff")
         end
 
-        -- v2026-02-09B: refresh LaunchPad after dispatcher change
         _refreshLaunchpadBestEffort(uiId, opts)
-
         return true, nil
     end
 
     _out("[DWKit UI] SKIP uiId=" .. tostring(uiId) .. " (no apply() function)", opts)
-
-    -- v2026-02-09B: refresh LaunchPad after dispatcher change
     _refreshLaunchpadBestEffort(uiId, opts)
-
     return true, nil
 end
 
@@ -482,7 +536,6 @@ function M.applyAll(opts)
         end
     end
 
-    -- v2026-02-09B: refresh LaunchPad once after applyAll (covers bulk changes)
     _refreshLaunchpadBestEffort("applyAll", opts)
 
     _out("", opts)
@@ -502,11 +555,17 @@ function M.disposeOne(uiId, opts)
         return false, "uiId invalid"
     end
 
+    -- Direct-control UI: dispose maps to hide best-effort
+    if DIRECT_UI[uiId] == true then
+        _applyDirectUiBestEffort(uiId, false, opts)
+        _setRuntimeVisibleBestEffort(uiId, false, "ui_manager:dispose:direct")
+        return true, nil
+    end
+
     local modName = "dwkit.ui." .. tostring(uiId)
     local okR, modOrErr = _safeRequire(modName)
     if not okR or type(modOrErr) ~= "table" then
         _out("[DWKit UI] dispose uiId=" .. tostring(uiId) .. " (no module yet)", opts)
-        -- deterministic runtime signal: disposed implies not visible
         _setRuntimeVisibleBestEffort(uiId, false, "ui_manager:dispose:no_module")
         return true, nil
     end
@@ -518,14 +577,12 @@ function M.disposeOne(uiId, opts)
         if not okD then
             return false, tostring(errD)
         end
-        -- deterministic runtime signal: disposed implies not visible
         _setRuntimeVisibleBestEffort(uiId, false, "ui_manager:dispose:ok")
         _out("[DWKit UI] dispose uiId=" .. tostring(uiId) .. " ok=true", opts)
         return true, nil
     end
 
     _out("[DWKit UI] dispose uiId=" .. tostring(uiId) .. " (no dispose() function)", opts)
-    -- best-effort: even without dispose(), consider it stood down from dispatcher POV
     _setRuntimeVisibleBestEffort(uiId, false, "ui_manager:dispose:no_fn")
     return true, nil
 end
@@ -686,9 +743,11 @@ function M.stateOne(uiId, opts)
         enabled = (enabled == true),
         visible = visible,
         module = modName,
+        isDirect = (DIRECT_UI[uiId] == true),
         hasModule = (type(ui) == "table"),
         hasInit = (type(ui) == "table" and type(ui.init) == "function") or false,
         hasApply = (type(ui) == "table" and type(ui.apply) == "function") or false,
+        hasHide = (type(ui) == "table" and type(ui.hide) == "function") or false,
         hasDispose = (type(ui) == "table" and type(ui.dispose) == "function") or false,
         hasGetState = (type(ui) == "table" and type(ui.getState) == "function") or false,
         hasGetRequiredProviders = (type(ui) == "table" and type(ui.getRequiredProviders) == "function") or false,
