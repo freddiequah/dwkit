@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.event_registry
 -- Owner       : Bus
--- Version     : v2026-02-02A
+-- Version     : v2026-02-10B
 -- Purpose     :
 --   - Canonical registry for all DWKit events (code mirror of docs/Event_Registry_v1.0.md).
 --   - No events are emitted here. Registry only.
@@ -32,22 +32,23 @@
 -- Dependencies     : dwkit.core.identity
 -- #########################################################################
 
-local M                           = {}
+local M                             = {}
 
-M.VERSION                         = "v2026-02-02A"
+M.VERSION                           = "v2026-02-10B"
 
-local ID                          = require("dwkit.core.identity")
+local ID                            = require("dwkit.core.identity")
 
-local PREFIX                      = tostring(ID.eventPrefix or "DWKit:")
+local PREFIX                        = tostring(ID.eventPrefix or "DWKit:")
 
-local EV_BOOT_READY               = PREFIX .. "Boot:Ready"
-local EV_SVC_PRESENCE_UPDATED     = PREFIX .. "Service:Presence:Updated"
-local EV_SVC_ACTIONMODEL_UPDATED  = PREFIX .. "Service:ActionModel:Updated"
-local EV_SVC_SKILLREG_UPDATED     = PREFIX .. "Service:SkillRegistry:Updated"
-local EV_SVC_SCORESTORE_UPDATED   = PREFIX .. "Service:ScoreStore:Updated"
-local EV_SVC_ROOMENTITIES_UPDATED = PREFIX .. "Service:RoomEntities:Updated"
-local EV_SVC_WHOSTORE_UPDATED     = PREFIX .. "Service:WhoStore:Updated"
+local EV_BOOT_READY                 = PREFIX .. "Boot:Ready"
+local EV_SVC_PRESENCE_UPDATED       = PREFIX .. "Service:Presence:Updated"
+local EV_SVC_ACTIONMODEL_UPDATED    = PREFIX .. "Service:ActionModel:Updated"
+local EV_SVC_SKILLREG_UPDATED       = PREFIX .. "Service:SkillRegistry:Updated"
+local EV_SVC_SCORESTORE_UPDATED     = PREFIX .. "Service:ScoreStore:Updated"
+local EV_SVC_ROOMENTITIES_UPDATED   = PREFIX .. "Service:RoomEntities:Updated"
+local EV_SVC_WHOSTORE_UPDATED       = PREFIX .. "Service:WhoStore:Updated"
 local EV_SVC_ROOMFEEDSTATUS_UPDATED = PREFIX .. "Service:RoomFeedStatus:Updated"
+local EV_SVC_CHATLOG_UPDATED        = PREFIX .. "Service:ChatLog:Updated"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -71,7 +72,7 @@ end
 -- - M.VERSION is the code module version tag (calendar style)
 -- -------------------------
 local REG = {
-  version = "v1.10",
+  version = "v1.11",
   moduleVersion = M.VERSION,
   events = {
     [EV_BOOT_READY] = {
@@ -244,6 +245,28 @@ local REG = {
         "Primary consumer is UI modules that need to show Room Watch Health.",
       },
     },
+
+    [EV_SVC_CHATLOG_UPDATED] = {
+      name = EV_SVC_CHATLOG_UPDATED,
+      description = "Emitted when ChatLogService appends/clears chat lines (SAFE; data only).",
+      payloadSchema = {
+        ts = "number",
+        state = "table",
+        delta = "table (optional)",
+        source = "string (optional)",
+      },
+      producers = {
+        "dwkit.services.chat_log_service",
+      },
+      consumers = {
+        "internal (chat_ui/tests/integrations)",
+      },
+      notes = {
+        "SAFE internal event (no gameplay commands).",
+        "Manual-only: emitted only when ChatLogService API is invoked.",
+        "Primary consumer is dwkit.ui.chat_ui (event-driven refresh while visible).",
+      },
+    },
   }
 }
 
@@ -261,7 +284,6 @@ local function _isArrayLike(t)
   if type(t) ~= "table" then return false end
   local n = #t
   if n == 0 then
-    -- could be empty list; treat as array-like if no non-numeric keys
     for k, _ in pairs(t) do
       if type(k) ~= "number" then return false end
     end
@@ -270,7 +292,6 @@ local function _isArrayLike(t)
   for i = 1, n do
     if t[i] == nil then return false end
   end
-  -- Ensure no obvious non-numeric keys
   for k, _ in pairs(t) do
     if type(k) ~= "number" then return false end
   end
@@ -314,9 +335,11 @@ local function _validateDef(def, opts)
 
   if type(def) ~= "table" then return false, "def must be a table" end
   if not _isNonEmptyString(def.name) then return false, "missing/invalid: name" end
-  if not _startsWith(def.name, ID.eventPrefix) then
-    return false, "invalid: name must start with EventPrefix (" .. tostring(ID.eventPrefix) .. ")"
+
+  if not _startsWith(def.name, PREFIX) then
+    return false, "invalid: name must start with EventPrefix (" .. tostring(PREFIX) .. ")"
   end
+
   if requireDescription and (not _isNonEmptyString(def.description)) then
     return false, "missing/invalid: description"
   end
@@ -324,14 +347,11 @@ local function _validateDef(def, opts)
   local okPS, errPS = _validatePayloadSchema(def.payloadSchema)
   if not okPS then return false, errPS end
 
-  -- producers/consumers/notes should be arrays if present; strictness applied by caller
   if def.producers ~= nil and type(def.producers) ~= "table" then
-    return false,
-        "invalid: producers must be a table if provided"
+    return false, "invalid: producers must be a table if provided"
   end
   if def.consumers ~= nil and type(def.consumers) ~= "table" then
-    return false,
-        "invalid: consumers must be a table if provided"
+    return false, "invalid: consumers must be a table if provided"
   end
   if def.notes ~= nil and type(def.notes) ~= "table" then return false, "invalid: notes must be a table if provided" end
 
@@ -538,7 +558,6 @@ function M.help(name, opts)
   return true, c, nil
 end
 
--- Runtime-only registration (NOT persisted)
 function M.register(def)
   local ok, err = _validateDef(def, { requireDescription = true })
   if not ok then return false, err end
@@ -552,8 +571,6 @@ function M.register(def)
   return true, nil
 end
 
--- SAFE validation for the static registry content (no printing by default).
--- Returns pass, issues[] where each issue = {name=<eventName>, error=<string>}
 function M.validateAll(opts)
   opts = opts or {}
   local strict = (opts.strict ~= false)
@@ -583,7 +600,6 @@ function M.validateAll(opts)
         table.insert(issues, _mkIssue(defName ~= "" and defName or keyName, "registry key must equal def.name"))
       end
 
-      -- producers must be array-like (and non-empty if strict/requireProducers)
       local okP, errP = _validateStringArray("producers", def.producers, not requireProducers)
       if not okP then table.insert(issues, _mkIssue(defName, errP)) end
 

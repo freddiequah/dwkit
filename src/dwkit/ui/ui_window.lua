@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_window
 -- Owner       : UI
--- Version     : v2026-02-06L
+-- Version     : v2026-02-10A
 -- Purpose     :
 --   - Shared DWKit "frame" creator:
 --       * Prefer Adjustable.Container (movable/resizable + autoSave/autoLoad)
@@ -34,13 +34,18 @@
 --   v2026-02-06L:
 --     - FIX: Upsert ui_base runtime entry if it was removed during close/dispose path.
 --       Ensures rtVisible never becomes nil after X/hide; deterministic boolean signal for UI Manager UI.
+--
+--   v2026-02-10A:
+--     - ADD: opts.noClose=true support (hide/disable title-bar X best-effort; still allows programmatic hide()).
+--     - ADD: opts.fixed=true support (best-effort lock: no move/resize/raise where supported by Adjustable).
+--     - NOTE: These are best-effort and must not break existing UIs if underlying APIs are missing.
 -- #########################################################################
 
 local Theme = require("dwkit.ui.ui_theme")
 
 local M = {}
 
-M.VERSION = "v2026-02-06L"
+M.VERSION = "v2026-02-10A"
 
 local function _pcall(fn, ...)
     local ok, res = pcall(fn, ...)
@@ -74,7 +79,6 @@ local function _setUiBaseRuntimeVisibleBestEffort(uiId, visible)
 
     local okE, e = pcall(U.getUiStoreEntry, uiId)
 
-    -- v2026-02-06L:
     -- If runtime entry was removed during close/dispose, recreate minimal entry (state-only) so rtVisible is deterministic.
     if (not okE) or type(e) ~= "table" then
         if type(U.setUiRuntime) == "function" then
@@ -375,6 +379,70 @@ local function _callOrigBestEffort(fn, selfObj, ...)
     return nil
 end
 
+local function _hideCloseChromeBestEffort(bundle)
+    if type(bundle) ~= "table" then return end
+    local f = bundle.frame
+    if type(f) == "table" then
+        for _, obj in ipairs({
+            bundle.closeLabel,
+            f.closeLabel,
+            (type(f.window) == "table") and f.window.closeLabel or nil,
+        }) do
+            if type(obj) == "table" and type(obj.hide) == "function" then
+                pcall(function() obj:hide() end)
+            end
+        end
+    end
+end
+
+local function _applyFixedBestEffort(bundle)
+    if type(bundle) ~= "table" or type(bundle.frame) ~= "table" then return end
+    local f = bundle.frame
+
+    -- Best-effort: disable "raiseOnClick" style features (only if API exists)
+    if type(f.setRaiseOnClick) == "function" then
+        pcall(function() f:setRaiseOnClick(false) end)
+    end
+    if type(f.raiseOnClick) == "boolean" then
+        pcall(function() f.raiseOnClick = false end)
+    end
+
+    -- Best-effort: lock / disable move+resize if supported by Adjustable
+    for _, fnName in ipairs({
+        "lock", "setLocked", "setLock", "setMovable", "setResizable",
+        "setMoveable", -- some libs spell it this way
+    }) do
+        if type(f[fnName]) == "function" then
+            pcall(function()
+                if fnName == "setMovable" or fnName == "setMoveable" then
+                    f[fnName](f, false)
+                elseif fnName == "setResizable" then
+                    f[fnName](f, false)
+                else
+                    f[fnName](f, true)
+                end
+            end)
+        end
+    end
+
+    if type(f.window) == "table" then
+        local w = f.window
+        for _, fnName in ipairs({ "lock", "setLocked", "setMovable", "setResizable", "setMoveable" }) do
+            if type(w[fnName]) == "function" then
+                pcall(function()
+                    if fnName == "setMovable" or fnName == "setMoveable" then
+                        w[fnName](w, false)
+                    elseif fnName == "setResizable" then
+                        w[fnName](w, false)
+                    else
+                        w[fnName](w, true)
+                    end
+                end)
+            end
+        end
+    end
+end
+
 -- -------------------------------------------------------------------------
 -- Adjustable close/hide hook:
 -- Wrap frame:hide() (and close if present) so title-bar X updates DWKit
@@ -385,6 +453,8 @@ end
 --   - DO respect _dwkitSuppressHideHook (internal hides).
 --   - DO refresh ui_manager_ui AFTER the hide/close actually ran.
 --   - DO NOT call ui_manager_ui.apply() from refresh path (use refresh()).
+--   - If opts.noClose == true: we still keep hooks for programmatic hide(),
+--     but UI close chrome is hidden and X click is not wired.
 -- -------------------------------------------------------------------------
 local function _installAdjustableHideHookBestEffort(frame, bundle)
     if type(frame) ~= "table" or type(bundle) ~= "table" or type(bundle.meta) ~= "table" then
@@ -551,6 +621,8 @@ function M.create(opts)
             adjustable = false,
             nameFrame = nameFrame,
             nameContent = nameContent,
+            noClose = (opts.noClose == true),
+            fixed = (opts.fixed == true),
         },
     }
 
@@ -575,7 +647,7 @@ function M.create(opts)
             buttonstyle = Theme.closeStyle(),
             autoSave = true,
             autoLoad = true,
-            raiseOnClick = true,
+            raiseOnClick = (opts.fixed == true) and false or true,
             lockStyle = "standard",
         })
 
@@ -655,6 +727,14 @@ function M.create(opts)
 
     _registerRuntimeBestEffort(bundle)
 
+    -- Apply "fixed" + "noClose" chrome behavior after runtime registration so state exists either way.
+    if bundle.meta.fixed == true then
+        _applyFixedBestEffort(bundle)
+    end
+    if bundle.meta.noClose == true then
+        _hideCloseChromeBestEffort(bundle)
+    end
+
     local onClose = opts.onClose
     if type(onClose) ~= "function" then
         onClose = function(b)
@@ -665,6 +745,11 @@ function M.create(opts)
     end
 
     local function _onXClicked()
+        -- If noClose is enabled, ignore user close attempts (best-effort).
+        if bundle.meta and bundle.meta.noClose == true then
+            return
+        end
+
         local id = (bundle.meta and bundle.meta.uiId) or uiId
 
         -- deterministic runtime signal for UI Manager UI (rt:) (upsert-safe)
@@ -680,29 +765,32 @@ function M.create(opts)
         _refreshUiManagerUiBestEffort("ui_window:xclick", id)
     end
 
-    if bundle.meta.adjustable == true then
-        local frame = bundle.frame
-        local closeA = (type(frame) == "table") and frame.closeLabel or nil
-        local closeB = (type(frame) == "table" and type(frame.window) == "table") and frame.window.closeLabel or nil
+    -- Wire X click callbacks only if close is allowed.
+    if bundle.meta.noClose ~= true then
+        if bundle.meta.adjustable == true then
+            local frame = bundle.frame
+            local closeA = (type(frame) == "table") and frame.closeLabel or nil
+            local closeB = (type(frame) == "table" and type(frame.window) == "table") and frame.window.closeLabel or nil
 
-        local wired = false
-        if type(closeB) == "table" then
-            wired = _wireClickBestEffort(closeB, _onXClicked) or wired
-        end
-        if type(closeA) == "table" and closeA ~= closeB then
-            wired = _wireClickBestEffort(closeA, _onXClicked) or wired
-        end
+            local wired = false
+            if type(closeB) == "table" then
+                wired = _wireClickBestEffort(closeB, _onXClicked) or wired
+            end
+            if type(closeA) == "table" and closeA ~= closeB then
+                wired = _wireClickBestEffort(closeA, _onXClicked) or wired
+            end
 
-        if type(bundle.closeLabel) == "table" and bundle.closeLabel ~= closeA and bundle.closeLabel ~= closeB then
-            wired = _wireClickBestEffort(bundle.closeLabel, _onXClicked) or wired
-        end
+            if type(bundle.closeLabel) == "table" and bundle.closeLabel ~= closeA and bundle.closeLabel ~= closeB then
+                wired = _wireClickBestEffort(bundle.closeLabel, _onXClicked) or wired
+            end
 
-        if not wired and type(bundle.closeLabel) == "table" then
-            _wireClickBestEffort(bundle.closeLabel, _onXClicked)
-        end
-    else
-        if type(bundle.closeLabel) == "table" then
-            _wireClickBestEffort(bundle.closeLabel, _onXClicked)
+            if not wired and type(bundle.closeLabel) == "table" then
+                _wireClickBestEffort(bundle.closeLabel, _onXClicked)
+            end
+        else
+            if type(bundle.closeLabel) == "table" then
+                _wireClickBestEffort(bundle.closeLabel, _onXClicked)
+            end
         end
     end
 

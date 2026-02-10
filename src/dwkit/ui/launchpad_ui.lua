@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.launchpad_ui
 -- Owner       : UI
--- Version     : v2026-02-08B
+-- Version     : v2026-02-10A
 -- Purpose     :
 --   - Fixed, non-window LaunchPad button strip for temporary show/hide only.
 --   - Lists ONLY enabled UIs (excluding internal/admin surfaces).
@@ -24,7 +24,7 @@
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-02-08B"
+M.VERSION = "v2026-02-10A"
 
 local U = require("dwkit.ui.ui_base")
 local Theme = require("dwkit.ui.ui_theme")
@@ -87,6 +87,12 @@ end
 
 local function _shortLabel(uiId)
     if type(uiId) ~= "string" or uiId == "" then return "?" end
+
+    -- small, explicit mapping for common UIs (keeps strip legible)
+    if uiId == "chat_ui" then return "CH" end
+    if uiId == "presence_ui" then return "PR" end
+    if uiId == "roomentities_ui" then return "RO" end
+
     local seg = uiId:match("^([^_]+)") or uiId
     seg = tostring(seg)
     if #seg >= 2 then
@@ -271,6 +277,44 @@ local function _applyOneBestEffort(uiId, source)
     end
 end
 
+local function _syncVisibleSessionBestEffort(uiId, newVis, source)
+    local okM, mgr = pcall(require, "dwkit.ui.ui_manager")
+    if okM and type(mgr) == "table" and type(mgr.syncVisibleSession) == "function" then
+        pcall(mgr.syncVisibleSession, uiId, (newVis == true),
+            { source = source or "launchpad_ui:syncVisible", quiet = true })
+        return true
+    end
+    return false
+end
+
+local function _toggleChatUi(newVis)
+    local okUI, UI = pcall(require, "dwkit.ui.chat_ui")
+    if not okUI or type(UI) ~= "table" then
+        return false, "chat_ui module missing"
+    end
+
+    if newVis == true then
+        if type(UI.show) == "function" then
+            pcall(UI.show, { source = "launchpad_ui", fixed = false, noClose = false })
+        elseif type(UI.toggle) == "function" then
+            pcall(UI.toggle, { source = "launchpad_ui" })
+        end
+    else
+        if type(UI.hide) == "function" then
+            pcall(UI.hide, { source = "launchpad_ui" })
+        elseif type(UI.toggle) == "function" then
+            pcall(UI.toggle, { source = "launchpad_ui" })
+        end
+    end
+
+    -- Best-effort deterministic runtime-visible sync (since chat_ui is not dispatcher-applied)
+    pcall(U.setUiStateVisibleBestEffort, "chat_ui", (newVis == true))
+    pcall(U.setUiRuntime, "chat_ui",
+        { state = { visible = (newVis == true) }, meta = { source = "launchpad_ui:chat_direct" } })
+
+    return true, nil
+end
+
 local function _renderButtons(uiIds)
     if not _panel then return end
     _clearButtons()
@@ -319,8 +363,14 @@ local function _renderButtons(uiIds)
                     pcall(gs.setVisible, uiIdLocal, newVis, { noSave = true })
                 end
 
-                -- Apply target UI so rt.visible updates deterministically
-                _applyOneBestEffort(uiIdLocal, "launchpad_ui:toggle")
+                -- IMPORTANT: chat_ui does not implement apply(), so dispatcher applyOne won't show/hide it.
+                if uiIdLocal == "chat_ui" then
+                    _syncVisibleSessionBestEffort(uiIdLocal, newVis, "launchpad_ui:chat_direct")
+                    _toggleChatUi(newVis)
+                else
+                    -- Apply target UI so rt.visible updates deterministically (normal path)
+                    _applyOneBestEffort(uiIdLocal, "launchpad_ui:toggle")
+                end
 
                 -- Refresh UI Manager rows if open
                 _refreshUiManagerUiRows()
