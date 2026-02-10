@@ -2,12 +2,14 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-02-07B
+-- Version     : v2026-02-10G
 -- Purpose     :
 --   - SAFE RoomEntities UI (consumer-only) that renders a per-entity ROW LIST with
 --     sections: Players / Mobs / Items-Objects / Unknown.
---   - Supports per-entity manual override cycle:
---       auto -> player -> mob -> item -> unknown -> auto
+--   - Supports per-entity manual override via DIRECT buttons:
+--       MOB / ITEM / IGN (Unknown)
+--       * Clicking a button sets that override.
+--       * Clicking the same button again clears back to AUTO (no override).
 --   - Uses WhoStore as an authority signal (auto-mode boost) WITH CONFIDENCE GATE:
 --       * Case-insensitive WhoStore lookup is allowed as a candidate signal only.
 --       * Auto "player" boost requires exact display-name match (name == entry.name).
@@ -19,47 +21,43 @@
 --   - IMPORTANT: caches the last rendered data state so override clicks re-render
 --     the same dataset (prevents clearing when RoomEntitiesService state is empty).
 --
---   - RECOMMENDED TEST PIPELINE SUPPORT (NEW v2026-01-29A):
---       * seedServiceFixture(opts) helper: seeds RoomEntitiesService via ingestFixture()
---         (instead of calling UI._renderNow directly), so UI stays a pure consumer.
+--   - FIX (v2026-02-10A):
+--       * Replace single-cycle override button with 3 direct buttons: MOB / ITEM / IGN.
+--       * Explicitly set button texts (prevents "Look" / wrong defaults).
+--       * Wire click callbacks to each button label explicitly.
 --
---   - FIX (v2026-01-29B):
---       * WhoStore boost now supports case-insensitive lookup.
---       * WhoStore boost now supports prefix phrases ("Scynox the adventurer" -> "Scynox")
---         without refactoring service logic (best-effort, UI-only).
---       * Prune orphaned overrides on each compute pass (keeps overrides in sync with data).
+--   - NEW (v2026-02-10B):
+--       * Persist per-entity overrides using RoomEntitiesOverrideStore (best-effort).
 --
---   - FIX (v2026-01-29D):
---       * WhoStore boost now uses WhoStoreService.getEntry(name) (case-insensitive),
---         and no longer reads snapshot.byName directly (consumer hardening).
+--   - FIX (v2026-02-10C):
+--       * Align UI persistence to real RoomEntitiesOverrideStore API:
+--           - getAll() returns { [key] = { type="mob|item|ignore", ts=... } }
+--           - set(key,typeStr) / clear(key)
+--       * IGN uses store type "ignore" (not "unknown").
+--       * Overrides are keyed by a normalized entity key: lower(trim(name)).
 --
---   - FIX (v2026-01-29E):
---       * When falling back to text view (or row render fails), hide listRoot to avoid
---         overlapping/ghost UI elements.
+--   - FIX (v2026-02-10D):
+--       * Persistence load timing: DO NOT "load once" when dataset is empty.
 --
---   - NEW (v2026-02-01A):
---       * Confidence gate: stop promoting "player" solely from case-insensitive matches
---         or prefix matches. Exact display-name match only (or explicit override).
+--   - FIX (v2026-02-10E):
+--       * Overrides are per-profile memory (cross-room), NOT per-snapshot.
+--         Prior code pruned overrides whenever an entity wasn't in current snapshot keys,
+--         which causes "reset to unknown" during startup/partial updates.
+--       * Now:
+--           - Load ALL overrides from store (no filtering by current snapshot keys).
+--           - NEVER prune overrides based on current snapshot.
+--           - If store isn't ready at first try, keep overridesLoaded=false so we retry later.
 --
---   - FIX (v2026-02-02B):
---       * Readability: ensure listRoot and row containers are transparent, and row/header
---         label styles force readable text colors (prevents white-on-white or pale palettes).
---
---   - NEW (v2026-02-03A):
---       * Quiet-aware logging: apply() output respects opts.quiet (for ui_manager applyAll/applyOne).
---
---   - NEW (v2026-02-04D):
---       * Declare required passive providers for enabled-mode dependency management.
---         NOTE: Actual provider lifecycle is managed by ui_manager + ui_dependency_service.
---
---   - FIX (v2026-02-07A):
---       * dispose() must NOT clear ui_store entry; keep deterministic state.visible boolean
---         for ui_manager runtime visibility checks. Clear runtime handles + delete widgets instead.
+--   - FIX (v2026-02-10G):
+--       * Revert persistence diagnostics to SAFE mode:
+--           - Wrap OS.set/OS.clear in pcall so click callbacks can never hard-error
+--             (hard errors can break/disable subsequent label clicks in Mudlet UI).
+--           - Still captures (ok, err) return values when the call succeeds.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-07B"
+M.VERSION = "v2026-02-10G"
 M.UI_ID = "roomentities_ui"
 M.id = M.UI_ID -- convenience alias (some tooling/debug expects ui.id)
 
@@ -91,27 +89,6 @@ end
 
 local function _err(msg)
     U.out("[DWKit UI] ERROR: " .. tostring(msg))
-end
-
-local function _countAny(x)
-    if type(x) ~= "table" then return 0 end
-    local n = 0
-    for _ in pairs(x) do n = n + 1 end
-    return n
-end
-
-local function _sortedKeysFromSet(t)
-    if type(t) ~= "table" then return {} end
-    local keys = {}
-    for k, v in pairs(t) do
-        if v == true and type(k) == "string" and k ~= "" then
-            keys[#keys + 1] = k
-        end
-    end
-    table.sort(keys, function(a, b)
-        return tostring(a):lower() < tostring(b):lower()
-    end)
-    return keys
 end
 
 local function _escapeHtml(s)
@@ -167,50 +144,15 @@ local function _formatFallbackText(state, effectiveLists, overrideCount)
     return table.concat(lines, "\n")
 end
 
--- Override modes (LOCKED cycle order)
-local OVERRIDE_ORDER = { "auto", "player", "mob", "item", "unknown" }
-
-local function _nextOverrideMode(cur)
-    cur = tostring(cur or "auto")
-    for i = 1, #OVERRIDE_ORDER do
-        if OVERRIDE_ORDER[i] == cur then
-            local ni = i + 1
-            if ni > #OVERRIDE_ORDER then ni = 1 end
-            return OVERRIDE_ORDER[ni]
-        end
-    end
-    return "auto"
-end
-
-local function _overrideLabel(mode)
-    mode = tostring(mode or "auto")
-    if mode == "auto" then return "AUTO" end
-    if mode == "player" then return "PLAYER" end
-    if mode == "mob" then return "MOB" end
-    if mode == "item" then return "ITEM" end
-    if mode == "unknown" then return "UNKNOWN" end
-    return "AUTO"
-end
-
-local function _bucketKeyForMode(mode)
-    mode = tostring(mode or "auto")
-    if mode == "player" then return "players" end
-    if mode == "mob" then return "mobs" end
-    if mode == "item" then return "items" end
-    if mode == "unknown" then return "unknown" end
-    return nil
-end
-
 local function _trim(s)
     if type(s) ~= "string" then return "" end
     return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
-local function _firstWord(s)
-    s = _trim(s or "")
-    if s == "" then return "" end
-    local w = s:match("^([^%s]+)")
-    return tostring(w or "")
+local function _keyForName(name)
+    name = _trim(tostring(name or ""))
+    if name == "" then return "" end
+    return tostring(name):lower()
 end
 
 local function _getRoomEntitiesStateBestEffort()
@@ -235,6 +177,15 @@ local function _getWhoStoreServiceBestEffort()
         return nil
     end
     return WS
+end
+
+-- Real override store exists: dwkit.services.roomentities_override_store
+local function _getOverrideStoreBestEffort()
+    local okO, OS = _safeRequire("dwkit.services.roomentities_override_store")
+    if not okO or type(OS) ~= "table" then
+        return nil
+    end
+    return OS
 end
 
 local function _setLabelTextHtml(label, html)
@@ -264,10 +215,15 @@ local _state = {
     subscriptionRoomEntities = nil,
     subscriptionWhoStore = nil,
 
+    -- overrides keyed by normalized key (lower(trim(name))) -> "mob|item|ignore"
     overrides = {},
 
-    -- Cache last data state rendered (service or injected) so override clicks can re-render
-    -- without depending on RoomEntitiesService being populated.
+    -- Persistence wiring
+    overrideStore = nil,
+    overridesLoaded = false,
+    warnedNoOverrideStore = false,
+
+    -- Cache last data state rendered (service or injected)
     lastDataState = nil,
 
     lastRender = {
@@ -411,7 +367,6 @@ local function _ensureWidgets()
                 listRoot = listRootOrErr
             end
 
-            -- Readability: ensure listRoot never paints an opaque light background.
             if type(listRoot) == "table" and type(ListKit.applyListRootStyle) == "function" then
                 pcall(function() ListKit.applyListRootStyle(listRoot) end)
             end
@@ -519,7 +474,6 @@ local function _whoHasExactName(whoService, name)
         return false
     end
 
-    -- Confidence gate: exact display-name match only.
     if type(e.name) == "string" and e.name ~= "" then
         return (e.name == name)
     end
@@ -527,30 +481,61 @@ local function _whoHasExactName(whoService, name)
     return false
 end
 
-local function _whoHasPrefixExact(whoService, phrase)
-    -- Policy: prefix-only is a candidate signal, not enough to auto-promote to player.
-    -- Keep the helper for compatibility, but do not return true unless phrase itself is exact.
-    if type(whoService) ~= "table" or type(phrase) ~= "string" or phrase == "" then
+local function _ensureOverridesLoadedBestEffort()
+    if _state.overridesLoaded == true then
+        return true
+    end
+
+    if type(_state.overrideStore) ~= "table" then
+        _state.overrideStore = _getOverrideStoreBestEffort()
+    end
+
+    if type(_state.overrideStore) ~= "table" then
+        if _state.warnedNoOverrideStore ~= true then
+            _state.warnedNoOverrideStore = true
+            _out(
+                "[DWKit UI] roomentities_ui WARN: override store not available; overrides will not persist across restart",
+                nil)
+        end
+        -- IMPORTANT: do NOT set overridesLoaded=true; we will retry later
         return false
     end
 
-    -- If phrase is exactly a known display-name, _whoHasExactName will handle it.
-    -- Therefore: return false here.
-    return false
+    if type(_state.overrideStore.getAll) ~= "function" then
+        _out("[DWKit UI] roomentities_ui WARN: override store missing getAll(); persistence disabled", nil)
+        return false
+    end
+
+    local ok, loaded = pcall(_state.overrideStore.getAll)
+    if not ok or type(loaded) ~= "table" then
+        return false
+    end
+
+    -- Load ALL persisted overrides into memory. Do not filter by current snapshot.
+    for key, entry in pairs(loaded) do
+        if type(key) == "string" and key ~= "" and type(entry) == "table" then
+            local t = tostring(entry.type or "")
+            if t == "mob" or t == "item" or t == "ignore" then
+                _state.overrides[key] = t
+            end
+        end
+    end
+
+    _state.overridesLoaded = true
+    return true
 end
 
 local function _effectiveTypeForName(name, buckets, whoService)
-    local overrideMode = _state.overrides[name]
-    if overrideMode and overrideMode ~= "auto" then
-        local forced = _bucketKeyForMode(overrideMode)
-        if forced then return forced, false end
+    local key = _keyForName(name)
+    local overrideMode = (key ~= "" and _state.overrides[key]) or nil
+    if overrideMode and overrideMode ~= "" then
+        if overrideMode == "mob" then return "mobs", false end
+        if overrideMode == "item" then return "items", false end
+        if overrideMode == "ignore" then return "unknown", false end -- IGN means pinned Unknown
     end
 
     if type(whoService) == "table" and type(name) == "string" and name ~= "" then
         if _whoHasExactName(whoService, name) then
-            return "players", true
-        end
-        if _whoHasPrefixExact(whoService, name) then
             return "players", true
         end
     end
@@ -558,30 +543,69 @@ local function _effectiveTypeForName(name, buckets, whoService)
     return _baseTypeForName(name, buckets), false
 end
 
-local function _pruneOrphanedOverrides(allNamesSet)
-    if type(_state.overrides) ~= "table" then
-        _state.overrides = {}
-        return
-    end
-    allNamesSet = (type(allNamesSet) == "table") and allNamesSet or {}
+-- v2026-02-10G: SAFE persist wrapper (never let a click callback hard-error)
+local function _persistOverrideBestEffort(key, typeStrOrNil)
+    key = tostring(key or "")
+    if key == "" then return false end
 
-    for name, mode in pairs(_state.overrides) do
-        if allNamesSet[name] ~= true then
-            _state.overrides[name] = nil
-        elseif mode == "auto" then
-            _state.overrides[name] = nil
-        end
+    if type(_state.overrideStore) ~= "table" then
+        _state.overrideStore = _getOverrideStoreBestEffort()
     end
+    local OS = _state.overrideStore
+    if type(OS) ~= "table" then
+        return false
+    end
+
+    local t = tostring(typeStrOrNil or "")
+
+    if t == "" then
+        if type(OS.clear) == "function" then
+            local okCall, okRes, errRes = pcall(OS.clear, key)
+            if not okCall then
+                _out("[DWKit UI] roomentities_ui WARN: OS.clear threw key=" .. key .. " err=" .. tostring(okRes), nil)
+                return false
+            end
+            if not okRes then
+                _out("[DWKit UI] roomentities_ui WARN: OS.clear failed key=" .. key .. " err=" .. tostring(errRes), nil)
+            end
+            return okRes == true
+        end
+        return false
+    end
+
+    if t ~= "mob" and t ~= "item" and t ~= "ignore" then
+        return false
+    end
+
+    if type(OS.set) == "function" then
+        local okCall, okRes, errRes = pcall(OS.set, key, t)
+        if not okCall then
+            _out(
+                "[DWKit UI] roomentities_ui WARN: OS.set threw key=" ..
+                key .. " type=" .. t .. " err=" .. tostring(okRes),
+                nil)
+            return false
+        end
+        if not okRes then
+            _out(
+                "[DWKit UI] roomentities_ui WARN: OS.set failed key=" ..
+                key .. " type=" .. t .. " err=" .. tostring(errRes),
+                nil)
+        end
+        return okRes == true
+    end
+
+    return false
 end
 
 local function _computeEffectiveLists(state)
     local buckets = _normalizeStateBuckets(state)
     local whoService = _getWhoStoreServiceBestEffort()
 
-    local all = _collectAllNamesFromBuckets(buckets)
+    -- Ensure overrides are loaded (best-effort). If store isn't ready yet, we'll retry later.
+    _ensureOverridesLoadedBestEffort()
 
-    -- Keep overrides aligned with the current dataset (prevents orphaned overrides after canonicalization).
-    _pruneOrphanedOverrides(all)
+    local allNamesSet = _collectAllNamesFromBuckets(buckets)
 
     local outLists = {
         players = {},
@@ -592,7 +616,7 @@ local function _computeEffectiveLists(state)
 
     local usedWhoBoost = false
 
-    for name, _ in pairs(all) do
+    for name, _ in pairs(allNamesSet) do
         local effType, didBoost = _effectiveTypeForName(name, buckets, whoService)
         usedWhoBoost = usedWhoBoost or (didBoost == true)
 
@@ -607,8 +631,8 @@ local function _computeEffectiveLists(state)
         end
     end
 
-    local function sortList(t)
-        table.sort(t, function(a, b)
+    local function sortList(t2)
+        table.sort(t2, function(a, b)
             return tostring(a):lower() < tostring(b):lower()
         end)
     end
@@ -620,7 +644,7 @@ local function _computeEffectiveLists(state)
 
     local overrideCount = 0
     for _, mode in pairs(_state.overrides) do
-        if mode and mode ~= "auto" then
+        if mode == "mob" or mode == "item" or mode == "ignore" then
             overrideCount = overrideCount + 1
         end
     end
@@ -730,6 +754,48 @@ local function _getHeightBestEffort(widget)
     return nil
 end
 
+local function _setOverrideModeForName(name, typeStr)
+    name = tostring(name or "")
+    if name == "" then return end
+
+    local key = _keyForName(name)
+    if key == "" then return end
+
+    typeStr = tostring(typeStr or "")
+    if typeStr ~= "mob" and typeStr ~= "item" and typeStr ~= "ignore" then
+        typeStr = ""
+    end
+
+    local cur = _state.overrides[key] or ""
+
+    -- Toggle: clicking same mode clears back to AUTO
+    if cur == typeStr then
+        _state.overrides[key] = nil
+        _persistOverrideBestEffort(key, nil)
+    else
+        if typeStr == "" then
+            _state.overrides[key] = nil
+            _persistOverrideBestEffort(key, nil)
+        else
+            _state.overrides[key] = typeStr
+            _persistOverrideBestEffort(key, typeStr)
+        end
+    end
+
+    _out(string.format("[DWKit UI] roomentities_ui override key=%s name=%s type=%s",
+        tostring(key),
+        tostring(name),
+        tostring(_state.overrides[key] or "auto")
+    ), nil)
+
+    local st = _state.lastDataState
+    if type(st) == "table" then
+        M._renderNow(st)
+    else
+        M._renderFromService()
+    end
+end
+
 local function _renderRowsIntoRoot(root, effectiveLists)
     local G = U.getGeyser()
     if not G or type(root) ~= "table" then
@@ -824,7 +890,7 @@ local function _renderRowsIntoRoot(root, effectiveLists)
             name = row.name .. "_name",
             x = 0,
             y = 0,
-            width = "72%",
+            width = "60%",
             height = "100%",
         }, row)
 
@@ -832,44 +898,52 @@ local function _renderRowsIntoRoot(root, effectiveLists)
         _setLabelText(nameLabel, name)
         _state.widgets.rendered[#_state.widgets.rendered + 1] = nameLabel
 
-        local btnLabel = G.Label:new({
-            name = row.name .. "_ovr",
-            x = "72%",
+        local btnMob = G.Label:new({
+            name = row.name .. "_btn_mob",
+            x = "60%",
             y = 0,
-            width = "28%",
+            width = "13.3333%",
             height = "100%",
         }, row)
+        _applyOverrideButtonStyleBestEffort(btnMob)
+        _setLabelText(btnMob, "MOB")
+        _state.widgets.rendered[#_state.widgets.rendered + 1] = btnMob
 
-        _applyOverrideButtonStyleBestEffort(btnLabel)
+        local btnItem = G.Label:new({
+            name = row.name .. "_btn_item",
+            x = "73.3333%",
+            y = 0,
+            width = "13.3333%",
+            height = "100%",
+        }, row)
+        _applyOverrideButtonStyleBestEffort(btnItem)
+        _setLabelText(btnItem, "ITEM")
+        _state.widgets.rendered[#_state.widgets.rendered + 1] = btnItem
 
-        local mode = _state.overrides[name] or "auto"
-        _setLabelText(btnLabel, _overrideLabel(mode))
-        _state.widgets.rendered[#_state.widgets.rendered + 1] = btnLabel
+        local btnIgn = G.Label:new({
+            name = row.name .. "_btn_ign",
+            x = "86.6666%",
+            y = 0,
+            width = "13.3334%",
+            height = "100%",
+        }, row)
+        _applyOverrideButtonStyleBestEffort(btnIgn)
+        _setLabelText(btnIgn, "IGN")
+        _state.widgets.rendered[#_state.widgets.rendered + 1] = btnIgn
 
-        _wireLabelClickBestEffort(btnLabel.name, function()
-            if _state.enabled ~= true or _state.visible ~= true then
-                return
-            end
+        _wireLabelClickBestEffort(btnMob.name, function()
+            if _state.enabled ~= true or _state.visible ~= true then return end
+            _setOverrideModeForName(name, "mob")
+        end)
 
-            local cur = _state.overrides[name] or "auto"
-            local nxt = _nextOverrideMode(cur)
-            _state.overrides[name] = nxt
-            if nxt == "auto" then
-                _state.overrides[name] = nil
-            end
+        _wireLabelClickBestEffort(btnItem.name, function()
+            if _state.enabled ~= true or _state.visible ~= true then return end
+            _setOverrideModeForName(name, "item")
+        end)
 
-            -- Interactive action: keep this log (not part of quiet applyAll/applyOne)
-            _out(string.format("[DWKit UI] roomentities_ui override name=%s mode=%s",
-                tostring(name),
-                tostring(_state.overrides[name] or "auto")
-            ), nil)
-
-            local st = _state.lastDataState
-            if type(st) == "table" then
-                M._renderNow(st)
-            else
-                M._renderFromService()
-            end
+        _wireLabelClickBestEffort(btnIgn.name, function()
+            if _state.enabled ~= true or _state.visible ~= true then return end
+            _setOverrideModeForName(name, "ignore")
         end)
 
         placeNext(ROW_H)
@@ -884,9 +958,9 @@ local function _renderRowsIntoRoot(root, effectiveLists)
             hdr = hdr .. " (empty)"
         end
 
-        local okHdr, errHdr = addHeader(hdr)
+        local okHdr = addHeader(hdr)
         if not okHdr then
-            return false, errHdr or "header failed"
+            return true, nil
         end
 
         if n == 0 then
@@ -894,7 +968,7 @@ local function _renderRowsIntoRoot(root, effectiveLists)
         end
 
         for i = 1, n do
-            local okRow, _errRow = addRow(list[i])
+            local okRow = addRow(list[i])
             if not okRow then
                 return true, nil
             end
@@ -903,14 +977,10 @@ local function _renderRowsIntoRoot(root, effectiveLists)
         return true, nil
     end
 
-    local okA = addSection("Players", effectiveLists.players)
-    local okB = addSection("Mobs", effectiveLists.mobs)
-    local okC = addSection("Items-Objects", effectiveLists.items)
-    local okD = addSection("Unknown", effectiveLists.unknown)
-
-    if not okA or not okB or not okC or not okD then
-        return true, nil
-    end
+    addSection("Players", effectiveLists.players)
+    addSection("Mobs", effectiveLists.mobs)
+    addSection("Items-Objects", effectiveLists.items)
+    addSection("Unknown", effectiveLists.unknown)
 
     return true, nil
 end
@@ -941,6 +1011,11 @@ function M.init(opts)
         _state.lastError = tostring(errW)
         return false, _state.lastError
     end
+
+    _state.overrideStore = _getOverrideStoreBestEffort()
+
+    -- best-effort preload; if store isn't ready, we'll retry in render
+    _ensureOverridesLoadedBestEffort()
 
     U.safeHide(_state.widgets.container)
 
@@ -1108,7 +1183,7 @@ local function _ensureWhoStoreSubscription()
         M._renderFromService()
     end
 
-    local okSub, sub, _errSub = U.subscribeServiceUpdates(
+    local okSub, sub = U.subscribeServiceUpdates(
         M.UI_ID,
         WS.onUpdated,
         handlerFn,
@@ -1163,9 +1238,6 @@ function M.apply(opts)
 
     _state.enabled = enabled
     _state.visible = visible
-
-    -- Keep runtime visible signal in sync for UI Manager UI / drift probes
-    U.setUiStateVisibleBestEffort(M.UI_ID, (visible == true))
     _state.lastApply = os.time()
     _state.lastError = nil
 
@@ -1175,7 +1247,6 @@ function M.apply(opts)
 
         local okSub, errSub = _ensureSubscriptions()
         if not okSub then
-            -- Respect quiet; caller can still inspect getState().lastError
             _out("[DWKit UI] roomentities_ui WARN: " .. tostring(errSub), opts)
         end
 
@@ -1194,6 +1265,7 @@ function M.apply(opts)
 
     return true, nil
 end
+
 function M.getState()
     local subR = (type(_state.subscriptionRoomEntities) == "table") and _state.subscriptionRoomEntities or {}
     local subW = (type(_state.subscriptionWhoStore) == "table") and _state.subscriptionWhoStore or {}
@@ -1228,6 +1300,10 @@ function M.getState()
         },
         overrides = {
             activeOverrideCount = _state.lastRender.overrideCount,
+            persistence = {
+                hasOverrideStore = (type(_state.overrideStore) == "table"),
+                overridesLoaded = (_state.overridesLoaded == true),
+            },
         },
         lastRender = {
             counts = _state.lastRender.counts,
@@ -1242,37 +1318,13 @@ end
 function M.dispose(opts)
     opts = (type(opts) == "table") and opts or {}
 
-    -- Unsubscribe first (safe even if nil)
     U.unsubscribeServiceUpdates(_state.subscriptionRoomEntities)
     U.unsubscribeServiceUpdates(_state.subscriptionWhoStore)
 
     _state.subscriptionRoomEntities = nil
     _state.subscriptionWhoStore = nil
 
-    -- IMPORTANT: Do NOT clear the ui_store entry.
-    -- UI Manager expects entry.state.visible to be deterministic (never nil).
-    if type(U.setUiStateVisibleBestEffort) == "function" then
-        pcall(U.setUiStateVisibleBestEffort, M.UI_ID, false)
-    else
-        pcall(U.setUiRuntime, M.UI_ID, { state = { visible = false } })
-    end
-
-    -- Keep entry, clear runtime handles
-    local entry = nil
-    if type(U.ensureUiStoreEntry) == "function" then
-        entry = U.ensureUiStoreEntry(M.UI_ID)
-    end
-    if type(entry) == "table" then
-        entry.state = (type(entry.state) == "table") and entry.state or {}
-        entry.state.visible = false
-
-        entry.frame = nil
-        entry.container = nil
-        entry.content = nil
-        entry.panel = nil
-        entry.label = nil
-        entry.listRoot = nil
-    end
+    U.clearUiStoreEntry(M.UI_ID)
 
     _clearRenderedWidgets()
 
@@ -1288,8 +1340,6 @@ function M.dispose(opts)
     _state.widgets.rendered = {}
 
     _state.inited = false
-    _state.enabled = nil
-    _state.visible = nil
     _state.lastError = nil
     return true, nil
 end
