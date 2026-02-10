@@ -1,7 +1,8 @@
+-- FILE: src/dwkit/ui/ui_window.lua
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_window
 -- Owner       : UI
--- Version     : v2026-02-10A
+-- Version     : v2026-02-10B
 -- Purpose     :
 --   - Shared DWKit "frame" creator:
 --       * Prefer Adjustable.Container (movable/resizable + autoSave/autoLoad)
@@ -39,13 +40,17 @@
 --     - ADD: opts.noClose=true support (hide/disable title-bar X best-effort; still allows programmatic hide()).
 --     - ADD: opts.fixed=true support (best-effort lock: no move/resize/raise where supported by Adjustable).
 --     - NOTE: These are best-effort and must not break existing UIs if underlying APIs are missing.
+--
+--   v2026-02-10B:
+--     - CHANGE: Adjustable titleFormat default is now "l" unless opts.titleFormat is provided.
+--       (Prevents odd title rendering/squish in some layouts.)
 -- #########################################################################
 
 local Theme = require("dwkit.ui.ui_theme")
 
 local M = {}
 
-M.VERSION = "v2026-02-10A"
+M.VERSION = "v2026-02-10B"
 
 local function _pcall(fn, ...)
     local ok, res = pcall(fn, ...)
@@ -631,6 +636,11 @@ function M.create(opts)
         and type(Adjustable.Container) == "table"
         and type(Adjustable.Container.new) == "function"
     then
+        local tf = opts.titleFormat
+        if type(tf) ~= "string" or tf == "" then
+            tf = "l"
+        end
+
         local frame = Adjustable.Container:new({
             name = nameFrame,
             x = opts.x or 30,
@@ -639,7 +649,7 @@ function M.create(opts)
             height = opts.height or 120,
             titleText = title,
             titleTxtColor = "white",
-            titleFormat = "l##9",
+            titleFormat = tf,
             padding = pad,
             buttonsize = btnSz,
             buttonFontSize = btnFont,
