@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.chat_log_service
 -- Owner       : Services
--- Version     : v2026-02-10A
+-- Version     : v2026-02-11A
 -- Purpose     :
 --   - SAFE chat log service (data only) backed by chat_store.
 --   - Emits internal DWKit event on append/clear.
@@ -17,18 +17,23 @@
 --   - clear(opts?) -> boolean ok
 --   - getStats(opts?) -> table stats
 --
+-- Read API (for UI consumers):
+--   - getItems(n?, opts?) -> (items, meta)
+--     meta: { latestId, count, profileTag }
+--   - getState(opts?) -> table { items, latestId, count, profileTag }
+--
 -- Event:
 --   - DWKit:Service:ChatLog:Updated
 --     payload: { ts, state, delta?, source? }
 --
--- Persistence      : None
+-- Persistence      : None (store may be runtime-only; ok for v1 rendering)
 -- Automation Policy: Manual only
 -- Dependencies     : dwkit.core.identity, dwkit.services.chat_store
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-10A"
+M.VERSION = "v2026-02-11A"
 
 local ID = require("dwkit.core.identity")
 local PREFIX = tostring(ID.eventPrefix or "DWKit:")
@@ -127,6 +132,40 @@ function M.listRecent(n, opts)
     opts = (type(opts) == "table") and opts or {}
     local profileTag = _normProfile(opts)
     return Store.listRecent(n, profileTag)
+end
+
+-- UI consumer-friendly read surface
+function M.getItems(n, opts)
+    opts = (type(opts) == "table") and opts or {}
+    local profileTag = _normProfile(opts)
+
+    local items = Store.listRecent(n, profileTag)
+    local stats = Store.getStats(profileTag)
+
+    local latestId = 0
+    if type(items) == "table" and #items > 0 then
+        local last = items[#items]
+        latestId = tonumber(last and last.id or 0) or 0
+    end
+
+    local meta = {
+        latestId = latestId,
+        count = tonumber(stats.count or 0) or 0,
+        profileTag = profileTag,
+    }
+
+    return (type(items) == "table" and items or {}), meta
+end
+
+function M.getState(opts)
+    opts = (type(opts) == "table") and opts or {}
+    local items, meta = M.getItems(nil, opts)
+    return {
+        items = items,
+        latestId = tonumber(meta.latestId or 0) or 0,
+        count = tonumber(meta.count or 0) or 0,
+        profileTag = meta.profileTag,
+    }
 end
 
 function M.clear(opts)

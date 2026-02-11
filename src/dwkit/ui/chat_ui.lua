@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.chat_ui
 -- Owner       : UI
--- Version     : v2026-02-11A
+-- Version     : v2026-02-11G
 -- Purpose     :
 --   - SAFE Chat UI (consumer-only) displaying ChatLogService buffer.
 --   - Renders a DWKit-themed container with a tab row:
@@ -17,32 +17,37 @@
 --   - show(opts?) / hide(opts?) / toggle(opts?)
 --   - refresh(opts?) -> boolean ok
 --   - dispose() -> boolean ok
+--   - getLayoutDebug() -> table (sizes, best-effort)
 --
 -- Notes:
 --   - Tab definitions are LOCKED by agreement v2026-02-10C.
 --   - chat_ui is a DIRECT-CONTROL UI (see UI Manager direct-control rule).
+--   - Layout invariants:
+--       * No title/tab overlap: rely on ui_window content being true "Inside" area.
+--       * No bottom wasted gap: console fills remaining space via host container (-y px).
 -- #########################################################################
 
-local M = {}
+local M                      = {}
 
-M.VERSION = "v2026-02-11A"
+M.VERSION                    = "v2026-02-11G"
 
-local PREFIX = (DWKit and DWKit.getEventPrefix and DWKit.getEventPrefix()) or "DWKit:"
-local LogSvc = require("dwkit.services.chat_log_service")
-local UIW = require("dwkit.ui.ui_window")
+local PREFIX                 = (DWKit and DWKit.getEventPrefix and DWKit.getEventPrefix()) or "DWKit:"
+local LogSvc                 = require("dwkit.services.chat_log_service")
+local UIW                    = require("dwkit.ui.ui_window")
+local U                      = require("dwkit.ui.ui_base")
 
 local EV_SVC_CHATLOG_UPDATED = PREFIX .. "Service:ChatLog:Updated"
 
-local UI_ID = "chat_ui"
-local TITLE = "Chat"
+local UI_ID                  = "chat_ui"
+local TITLE                  = "Chat"
 
 -- Tab definitions (LOCKED by agreement v2026-02-10C)
-local TAB_ORDER = { "All", "SAY", "PRIVATE", "PUBLIC", "GRATS", "Other" }
+local TAB_ORDER              = { "All", "SAY", "PRIVATE", "PUBLIC", "GRATS", "Other" }
 
-local PRIVATE_CH = { TELL = true, ASK = true, WHISPER = true }
-local PUBLIC_CH  = { SHOUT = true, YELL = true, GOSSIP = true }
+local PRIVATE_CH             = { TELL = true, ASK = true, WHISPER = true }
+local PUBLIC_CH              = { SHOUT = true, YELL = true, GOSSIP = true }
 
-local st = {
+local st                     = {
     visible = false,
     bundle = nil,
 
@@ -51,9 +56,22 @@ local st = {
     tabBar = nil,
     tabButtons = {}, -- map tab -> label obj
 
+    consoleHost = nil,
     console = nil,
 
+    -- Layout computed at create time
+    layout = {
+        tabH = 24,
+        insetY = 0,
+        gapY = 2,
+        yContent = 0,
+        usedHostFill = true,
+    },
+
+    -- Event handler wiring
     handler = nil,
+    handlerKind = nil, -- "anon" | "named4" | "named3" | nil
+    handlerKey = nil,  -- for named: { group=, name=, event= }
 
     activeTab = "All",
     unread = {},     -- map tab -> count
@@ -167,6 +185,8 @@ local function _applyTabBarStyleBestEffort()
                 background-color: rgba(0,0,0,0);
                 border: 0px;
                 border-bottom: 1px solid #2a2f3a;
+                margin: 0px;
+                padding: 0px;
             ]])
         end)
     end
@@ -186,7 +206,10 @@ local function _switchTab(tab)
     tab = tostring(tab or "All")
     local okTab = false
     for _, t in ipairs(TAB_ORDER) do
-        if t == tab then okTab = true break end
+        if t == tab then
+            okTab = true
+            break
+        end
     end
     if not okTab then tab = "All" end
 
@@ -267,12 +290,51 @@ local function _applyConsoleTransparentBestEffort()
     end
 end
 
+local function _unregisterHandlerBestEffort()
+    if not st.handler then return end
+
+    if st.handlerKind == "anon" then
+        if type(killAnonymousEventHandler) == "function" then
+            pcall(function() killAnonymousEventHandler(st.handler) end)
+        end
+    elseif st.handlerKind == "named4" then
+        if type(killNamedEventHandler) == "function" and type(st.handlerKey) == "table" then
+            local k = st.handlerKey
+            pcall(function() killNamedEventHandler(k.group, k.name, k.event) end)
+        elseif type(killAnonymousEventHandler) == "function" then
+            pcall(function() killAnonymousEventHandler(st.handler) end)
+        end
+    elseif st.handlerKind == "named3" then
+        if type(killAnonymousEventHandler) == "function" then
+            pcall(function() killAnonymousEventHandler(st.handler) end)
+        end
+    else
+        if type(killAnonymousEventHandler) == "function" then
+            pcall(function() killAnonymousEventHandler(st.handler) end)
+        end
+    end
+
+    st.handler = nil
+    st.handlerKind = nil
+    st.handlerKey = nil
+end
+
 local function _ensureUi(opts)
     if type(st.bundle) == "table" and type(st.bundle.frame) == "table" then
         return true
     end
 
     opts = (type(opts) == "table") and opts or {}
+
+    local wantNoInsetInside = true
+    if opts.noInsetInside == false then
+        wantNoInsetInside = false
+    end
+
+    local pad = 0
+    if type(opts.padding) == "number" then
+        pad = tonumber(opts.padding) or 0
+    end
 
     st.bundle = UIW.create({
         uiId = UI_ID,
@@ -286,6 +348,17 @@ local function _ensureUi(opts)
         noClose = (opts.noClose == true),
 
         titleFormat = opts.titleFormat,
+
+        noInsetInside = (wantNoInsetInside == true),
+        padding = pad,
+
+        onClose = function(bundle)
+            st.visible = false
+            _unregisterHandlerBestEffort()
+            if type(bundle) == "table" and type(bundle.frame) == "table" then
+                pcall(function() U.safeHide(bundle.frame, UI_ID, { source = "chat_ui:onClose" }) end)
+            end
+        end,
     })
 
     if type(st.bundle) ~= "table" or type(st.bundle.content) ~= "table" then
@@ -299,16 +372,22 @@ local function _ensureUi(opts)
         return false
     end
 
-    -- IMPORTANT: negative sizing is "-N" (NO "px").
-    -- Top gap tweak: you asked for slightly more gap above tabs.
-    local tabH  = tonumber(opts.tabHeight or 24) or 24
-    local insetY = tonumber(opts.insetY or 8) or 8  -- was 6; slightly more breathing room
-    local gapY  = tonumber(opts.gapY or 2) or 2     -- small separation between tabs and console
+    -- Layout invariants:
+    -- - avoid profile-dependent inner-height math
+    -- - tab row + gap is fixed
+    local tabH             = tonumber(opts.tabHeight or 24) or 24
+    local insetY           = tonumber(opts.insetY or 0) or 0
+    local gapY             = tonumber(opts.gapY or 2) or 2
 
-    local yContent = insetY + tabH + gapY
+    local yContent         = insetY + tabH + gapY
 
-    -- Paint a single, full-height body background so no frame/content inset band can show.
-    st.bodyFill = G.Container:new({
+    st.layout.tabH         = tabH
+    st.layout.insetY       = insetY
+    st.layout.gapY         = gapY
+    st.layout.yContent     = yContent
+    st.layout.usedHostFill = true
+
+    st.bodyFill            = G.Container:new({
         name = tostring(st.bundle.meta.nameContent or "__DWKit_chat") .. "__bodyfill",
         x = 0,
         y = 0,
@@ -316,7 +395,7 @@ local function _ensureUi(opts)
         height = "100%",
     }, st.bundle.content)
 
-    st.tabBar = G.Container:new({
+    st.tabBar              = G.Container:new({
         name = tostring(st.bundle.meta.nameContent or "__DWKit_chat") .. "__tabbar",
         x = 0,
         y = insetY,
@@ -326,7 +405,6 @@ local function _ensureUi(opts)
 
     _applyTabBarStyleBestEffort()
 
-    -- Tab buttons
     st.tabButtons = {}
     local btnW = math.floor(100 / #TAB_ORDER)
     local xPct = 0
@@ -351,14 +429,22 @@ local function _ensureUi(opts)
         xPct = xPct + btnW
     end
 
-    -- Console fills remainder inside bodyFill (so bottom is always painted correctly).
-    st.console = G.MiniConsole:new({
-        name = tostring(st.bundle.meta.nameContent or "__DWKit_chat") .. "__console",
+    -- Console host fills remaining space deterministically (no profile-dependent pixel math).
+    st.consoleHost = G.Container:new({
+        name = tostring(st.bundle.meta.nameContent or "__DWKit_chat") .. "__consoleHost",
         x = 0,
         y = yContent,
         width = "100%",
-        height = "-" .. tostring(yContent),
+        height = "-" .. tostring(yContent) .. "px",
     }, st.bodyFill)
+
+    st.console = G.MiniConsole:new({
+        name = tostring(st.bundle.meta.nameContent or "__DWKit_chat") .. "__console",
+        x = 0,
+        y = 0,
+        width = "100%",
+        height = "100%",
+    }, st.consoleHost)
 
     pcall(function()
         if type(st.console.setFontSize) == "function" then
@@ -376,22 +462,78 @@ end
 
 local function _ensureHandler()
     if st.handler then return true end
-    if type(registerNamedEventHandler) ~= "function" then return false end
 
-    st.handler = registerNamedEventHandler("dwkit.chat_ui", EV_SVC_CHATLOG_UPDATED, function()
+    local function _cb()
         if st.visible then
             M.refresh({ source = "event:" .. EV_SVC_CHATLOG_UPDATED })
         end
-    end)
+    end
 
-    return st.handler ~= nil
+    if type(registerAnonymousEventHandler) == "function" then
+        local ok, id = pcall(registerAnonymousEventHandler, EV_SVC_CHATLOG_UPDATED, _cb)
+        if ok and id ~= nil then
+            st.handler = id
+            st.handlerKind = "anon"
+            return true
+        end
+    end
+
+    if type(registerNamedEventHandler) == "function" then
+        local group = "dwkit"
+        local name = "chat_ui"
+        local ok4, id4 = pcall(registerNamedEventHandler, group, name, EV_SVC_CHATLOG_UPDATED, _cb)
+        if ok4 and id4 ~= nil then
+            st.handler = id4
+            st.handlerKind = "named4"
+            st.handlerKey = { group = group, name = name, event = EV_SVC_CHATLOG_UPDATED }
+            return true
+        end
+
+        local ok3, id3 = pcall(registerNamedEventHandler, "dwkit.chat_ui", EV_SVC_CHATLOG_UPDATED, _cb)
+        if ok3 and id3 ~= nil then
+            st.handler = id3
+            st.handlerKind = "named3"
+            return true
+        end
+    end
+
+    return false
 end
 
-local function _unregisterHandlerBestEffort()
-    if type(killAnonymousEventHandler) ~= "function" then return end
-    if not st.handler then return end
-    pcall(function() killAnonymousEventHandler(st.handler) end)
-    st.handler = nil
+-- -------------------------------------------------------------------------
+-- ChatLogService API hardening
+-- -------------------------------------------------------------------------
+local function _getItemsBestEffort()
+    if type(LogSvc) == "table" and type(LogSvc.getItems) == "function" then
+        local ok, items, meta = pcall(LogSvc.getItems)
+        if ok then
+            return (type(items) == "table" and items or {}), (type(meta) == "table" and meta or {})
+        end
+    end
+
+    if type(LogSvc) == "table" and type(LogSvc.getState) == "function" then
+        local ok, st2 = pcall(LogSvc.getState)
+        if ok and type(st2) == "table" then
+            local items = st2.items or st2.buffer or st2.lines or {}
+            local meta = st2.meta
+            if type(meta) ~= "table" then
+                meta = { latestId = st2.latestId }
+            end
+            return (type(items) == "table" and items or {}), (type(meta) == "table" and meta or {})
+        end
+    end
+
+    local candidates = { "getAll", "list", "all" }
+    for _, fnName in ipairs(candidates) do
+        if type(LogSvc) == "table" and type(LogSvc[fnName]) == "function" then
+            local ok, items = pcall(LogSvc[fnName])
+            if ok then
+                return (type(items) == "table" and items or {}), {}
+            end
+        end
+    end
+
+    return {}, {}
 end
 
 function M.getVersion()
@@ -406,6 +548,15 @@ function M.getState()
     }
 end
 
+function M.getLayoutDebug()
+    return {
+        uiId = UI_ID,
+        version = M.VERSION,
+        visible = st.visible == true,
+        layout = st.layout,
+    }
+end
+
 function M.show(opts)
     opts = (type(opts) == "table") and opts or {}
 
@@ -415,11 +566,13 @@ function M.show(opts)
 
     _ensureHandler()
 
-    if type(st.bundle.frame) == "table" and type(st.bundle.frame.show) == "function" then
-        pcall(function() st.bundle.frame:show() end)
+    if type(st.bundle) == "table" and type(st.bundle.frame) == "table" then
+        pcall(function() U.safeShow(st.bundle.frame, UI_ID, { source = "chat_ui:show" }) end)
     end
 
     st.visible = true
+    pcall(U.setUiStateVisibleBestEffort, UI_ID, true)
+
     M.refresh({ source = "show", force = true })
     return true
 end
@@ -427,11 +580,14 @@ end
 function M.hide(opts)
     opts = (type(opts) == "table") and opts or {}
 
-    if type(st.bundle) == "table" and type(st.bundle.frame) == "table" and type(st.bundle.frame.hide) == "function" then
-        pcall(function() st.bundle.frame:hide() end)
+    if type(st.bundle) == "table" and type(st.bundle.frame) == "table" then
+        pcall(function() U.safeHide(st.bundle.frame, UI_ID, { source = "chat_ui:hide" }) end)
     end
 
     st.visible = false
+    _unregisterHandlerBestEffort()
+    pcall(U.setUiStateVisibleBestEffort, UI_ID, false)
+
     return true
 end
 
@@ -444,7 +600,7 @@ function M.refresh(opts)
     opts = (type(opts) == "table") and opts or {}
     if not st.visible then return true end
 
-    local items, meta = LogSvc.getItems()
+    local items, meta = _getItemsBestEffort()
     items = (type(items) == "table") and items or {}
     meta = (type(meta) == "table") and meta or {}
     local latestId = tonumber(meta.latestId or 0) or 0
@@ -488,17 +644,21 @@ end
 function M.dispose()
     _unregisterHandlerBestEffort()
 
-    if type(st.bundle) == "table" and type(st.bundle.dispose) == "function" then
-        pcall(function() st.bundle:dispose() end)
+    if type(st.bundle) == "table" and type(st.bundle.frame) == "table" then
+        pcall(function() U.safeHide(st.bundle.frame, UI_ID, { source = "chat_ui:dispose" }) end)
+        pcall(function() U.safeDelete(st.bundle.frame) end)
     end
 
     st.bundle = nil
     st.bodyFill = nil
     st.tabBar = nil
     st.tabButtons = {}
+    st.consoleHost = nil
     st.console = nil
 
     st.visible = false
+    pcall(U.setUiStateVisibleBestEffort, UI_ID, false)
+
     return true
 end
 

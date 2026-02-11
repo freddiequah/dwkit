@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_base
 -- Owner       : UI
--- Version     : v2026-02-07C
+-- Version     : v2026-02-11E
 -- Purpose     :
 --   - Shared SAFE helper utilities for DWKit UI modules.
 --   - Avoids copy/paste across UI modules (store, widgets, show/hide/delete, etc).
@@ -37,7 +37,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-07C"
+M.VERSION = "v2026-02-11E"
 
 local function _isNonEmptyString(s)
     return type(s) == "string" and s ~= ""
@@ -131,8 +131,8 @@ function M.ensureUiStoreEntry(uiId)
     return e
 end
 
--- Store runtime handles deterministically (frame/container/nameFrame/etc)
--- rt = { frame=?, container=?, nameFrame=?, nameContent=?, meta=?, state=? }
+-- Store runtime handles deterministically (frame/container/content/nameFrame/etc)
+-- rt = { frame=?, container=?, content=?, nameFrame=?, nameContent=?, meta=?, state=? }
 function M.setUiRuntime(uiId, rt)
     if not _isNonEmptyString(uiId) then return false end
     if type(rt) ~= "table" then return false end
@@ -143,6 +143,7 @@ function M.setUiRuntime(uiId, rt)
     -- Merge without destroying existing widget keys from ensureWidgets users
     if rt.frame ~= nil then e.frame = rt.frame end
     if rt.container ~= nil then e.container = rt.container end
+    if rt.content ~= nil then e.content = rt.content end
     if _isNonEmptyString(rt.nameFrame) then e.nameFrame = rt.nameFrame end
     if _isNonEmptyString(rt.nameContent) then e.nameContent = rt.nameContent end
     if type(rt.meta) == "table" then e.meta = rt.meta end
@@ -229,6 +230,14 @@ function M.getUiFrame(uiId)
     local e = M.getUiStoreEntry(uiId)
     if type(e) == "table" and type(e.frame) == "table" then
         return e.frame
+    end
+    return nil
+end
+
+function M.getUiContent(uiId)
+    local e = M.getUiStoreEntry(uiId)
+    if type(e) == "table" and type(e.content) == "table" then
+        return e.content
     end
     return nil
 end

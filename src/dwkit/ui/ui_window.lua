@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_window
 -- Owner       : UI
--- Version     : v2026-02-10B
+-- Version     : v2026-02-11E
 -- Purpose     :
 --   - Shared DWKit "frame" creator:
 --       * Prefer Adjustable.Container (movable/resizable + autoSave/autoLoad)
@@ -11,46 +11,29 @@
 --   - Returns { frame, content, closeLabel, meta } for UI modules to build into.
 --
 -- Key Fixes:
---   v2026-02-06D:
---     - Wrapped frame:hide() to sync visible=false and call ui_manager.applyOne().
---       (This introduced recursion: ui_manager.applyOne -> presence_ui.apply -> safeHide -> frame:hide -> loop.)
---   v2026-02-06E:
---     - FIX: hide-hook no longer calls ui_manager.applyOne() or ui_manager_ui.apply().
---       It ONLY syncs gui_settings.visible=false (noSave best-effort) to avoid recursion and login spam.
---   v2026-02-06F:
---     - FIX: hide-hook respects internal hides via _dwkitSuppressHideHook (set by ui_base.safeHide).
---   v2026-02-06H:
---     - FIX: UI Manager refresh must occur AFTER hide/close runs.
---   v2026-02-06I:
---     - Attempted: keep UI Manager visible by forcing cfg visible=true then calling apply().
---       This is NOT safe because apply() enforces cfg and can still close UI Manager.
---   v2026-02-06J:
---     - FIX: ui_window MUST NEVER call ui_manager_ui.apply() as a "refresh".
---       apply() enforces gui_settings.visible(ui_manager_ui) and can hide/close UI Manager.
---       Now: refresh path calls ui_manager_ui.refresh() (rows-only) if available; otherwise no-op.
---   v2026-02-06K:
---     - FIX: title-bar X / hide-hook now also updates ui_base runtime state (storeEntry.state.visible)
---       so UI Manager UI has a deterministic runtime signal (rt:) even when container:isVisible() is nil.
---       (No ui_manager.applyOne calls; no recursion.)
---   v2026-02-06L:
---     - FIX: Upsert ui_base runtime entry if it was removed during close/dispose path.
---       Ensures rtVisible never becomes nil after X/hide; deterministic boolean signal for UI Manager UI.
+--   (history preserved; see prior versions)
 --
---   v2026-02-10A:
---     - ADD: opts.noClose=true support (hide/disable title-bar X best-effort; still allows programmatic hide()).
---     - ADD: opts.fixed=true support (best-effort lock: no move/resize/raise where supported by Adjustable).
---     - NOTE: These are best-effort and must not break existing UIs if underlying APIs are missing.
+--   v2026-02-11C:
+--     - HARDEN: resolve real Adjustable "Inside" area more defensively.
+--     - ADD: if Inside cannot be resolved, create an insideShim container below header to prevent overlap.
 --
---   v2026-02-10B:
---     - CHANGE: Adjustable titleFormat default is now "l" unless opts.titleFormat is provided.
---       (Prevents odd title rendering/squish in some layouts.)
+--   v2026-02-11D:
+--     - FIX: shim header height is now guessed from actual titlebar widgets (closeLabel/title/etc),
+--       instead of a fixed 24px default. Prevents title overlap AND reduces bottom gap on profiles
+--       where Adjustable does not expose a usable Inside.
+--     - HARDEN: resolveInside now prefers explicit Inside keys first and avoids grabbing "content"
+--       style widgets that may still include titlebar chrome.
+--
+--   v2026-02-11E:
+--     - FIX: register bundle.content into Geyser maps by nameContent (discoverable across profiles).
+--     - ADD: store entry now includes content handle (ui_base.setUiRuntime content=?).
 -- #########################################################################
 
 local Theme = require("dwkit.ui.ui_theme")
 
 local M = {}
 
-M.VERSION = "v2026-02-10B"
+M.VERSION = "v2026-02-11E"
 
 local function _pcall(fn, ...)
     local ok, res = pcall(fn, ...)
@@ -207,22 +190,35 @@ local function _refreshUiManagerUiBestEffort(source, targetUiId)
     end
 end
 
--- Best-effort: register runtime frame in Geyser maps + store into ui_base
+-- Best-effort: register runtime frame+content in Geyser maps + store into ui_base
 local function _registerRuntimeBestEffort(bundle)
     if type(bundle) ~= "table" or type(bundle.meta) ~= "table" then return end
     local uiId = tostring(bundle.meta.uiId or "")
     local nameFrame = tostring(bundle.meta.nameFrame or "")
     local nameContent = tostring(bundle.meta.nameContent or "")
     local frame = bundle.frame
+    local content = bundle.content
 
     -- 1) Geyser maps for discoverability (best-effort only)
     local G = _G.Geyser
-    if type(G) == "table" and nameFrame ~= "" and type(frame) == "table" then
-        if type(G.windows) == "table" then
-            pcall(function() G.windows[nameFrame] = frame end)
+    if type(G) == "table" then
+        if nameFrame ~= "" and type(frame) == "table" then
+            if type(G.windows) == "table" then
+                pcall(function() G.windows[nameFrame] = frame end)
+            end
+            if type(G.containers) == "table" then
+                pcall(function() G.containers[nameFrame] = frame end)
+            end
         end
-        if type(G.containers) == "table" then
-            pcall(function() G.containers[nameFrame] = frame end)
+
+        -- IMPORTANT: register content by nameContent too (fixes profile-dependent nil lookups)
+        if nameContent ~= "" and type(content) == "table" then
+            if type(G.windows) == "table" then
+                pcall(function() G.windows[nameContent] = content end)
+            end
+            if type(G.containers) == "table" then
+                pcall(function() G.containers[nameContent] = content end)
+            end
         end
     end
 
@@ -234,6 +230,7 @@ local function _registerRuntimeBestEffort(bundle)
                 U.setUiRuntime(uiId, {
                     frame = frame,
                     container = frame,
+                    content = content,
                     nameFrame = (nameFrame ~= "" and nameFrame) or nil,
                     nameContent = (nameContent ~= "" and nameContent) or nil,
                     meta = bundle.meta,
@@ -299,14 +296,128 @@ local function _getAdjustableBestEffort()
     return nil
 end
 
-local function _resolveInsideParent(frame)
-    if type(frame) ~= "table" then return frame end
+local function _pickFirstWidget(tbl, keys)
+    if type(tbl) ~= "table" then return nil end
+    if type(keys) ~= "table" then return nil end
+    for _, k in ipairs(keys) do
+        local v = tbl[k]
+        if type(v) == "table" then
+            return v
+        end
+    end
+    return nil
+end
 
-    if type(frame.window) == "table" then
-        return frame.window.Inside or frame.window.inside or frame.window
+local function _parsePxBestEffort(v)
+    if type(v) == "number" then
+        if v > 0 then return math.floor(v) end
+        return nil
+    end
+    if type(v) == "string" then
+        local n = tonumber(v:match("(%d+)"))
+        if n and n > 0 then return math.floor(n) end
+    end
+    return nil
+end
+
+local function _getHeightBestEffort(obj)
+    if type(obj) ~= "table" then return nil end
+    if type(obj.get_height) == "function" then
+        local ok, h = pcall(function() return obj:get_height() end)
+        if ok then
+            h = _parsePxBestEffort(h)
+            if h then return h end
+        end
+    end
+    return _parsePxBestEffort(obj.height)
+end
+
+-- Try to guess header/titlebar height from actual widgets (best-effort).
+local function _guessHeaderHeightBestEffort(frame, bundle, fallback)
+    fallback = tonumber(fallback or 24) or 24
+    local candidates = {}
+
+    local function _push(obj)
+        if type(obj) ~= "table" then return end
+        local h = _getHeightBestEffort(obj)
+        if h and h > 0 then table.insert(candidates, h) end
     end
 
-    return frame.Inside or frame.inside or frame
+    if type(bundle) == "table" then
+        _push(bundle.closeLabel)
+    end
+
+    if type(frame) == "table" then
+        _push(frame.closeLabel)
+        _push(frame.minLabel)
+        _push(frame.titleLabel)
+        if type(frame.window) == "table" then
+            local w = frame.window
+            _push(w.closeLabel)
+            _push(w.minLabel)
+            _push(w.titleLabel)
+            _push(w.header)
+            _push(w.headerLabel)
+        end
+    end
+
+    local best = nil
+    for _, h in ipairs(candidates) do
+        if (not best) or h > best then best = h end
+    end
+
+    -- Clamp to a sane range
+    if type(best) == "number" then
+        if best < 18 then best = 18 end
+        if best > 60 then best = 60 end
+        return best
+    end
+
+    return fallback
+end
+
+-- Returns:
+--  insideParent (table), usedShim(bool), gotExplicitInside(bool)
+local function _resolveInsideParent(frame)
+    if type(frame) ~= "table" then return frame, false, false end
+
+    -- Adjustable commonly: frame.window.Inside exists
+    if type(frame.window) == "table" then
+        local w = frame.window
+
+        -- Prefer explicit Inside variants FIRST (this is the safe path)
+        local inside = _pickFirstWidget(w, {
+            "Inside", "inside", "InsideContainer", "insideContainer", "insideFrame",
+        })
+        if type(inside) == "table" then
+            return inside, false, true
+        end
+
+        -- Some builds expose a getter
+        if type(w.getInside) == "function" then
+            local ok, v = pcall(function() return w:getInside() end)
+            if ok and type(v) == "table" then
+                return v, false, true
+            end
+        end
+
+        -- As a last resort, use window itself (caller may shim it)
+        return w, false, false
+    end
+
+    local inside2 = _pickFirstWidget(frame, { "Inside", "inside", "InsideContainer", "insideContainer", "insideFrame" })
+    if type(inside2) == "table" then
+        return inside2, false, true
+    end
+
+    if type(frame.getInside) == "function" then
+        local ok, v = pcall(function() return frame:getInside() end)
+        if ok and type(v) == "table" then
+            return v, false, true
+        end
+    end
+
+    return frame, false, false
 end
 
 local function _applyFrameStyleBestEffort(frame)
@@ -448,18 +559,39 @@ local function _applyFixedBestEffort(bundle)
     end
 end
 
+-- OPT-IN: remove inset painting/padding on Adjustable "Inside" widget.
+local function _applyAdjustableInsideNoInsetBestEffort(insideParent)
+    if type(insideParent) ~= "table" then return end
+
+    -- Apply to Inside itself
+    if type(insideParent.setStyleSheet) == "function" then
+        pcall(function()
+            insideParent:setStyleSheet([[
+                background-color: rgba(0,0,0,0);
+                border: 0px;
+                border-radius: 0px;
+                margin: 0px;
+                padding: 0px;
+            ]])
+        end)
+    end
+
+    -- Some Adjustable versions nest widgets differently; try window too (best-effort).
+    if type(insideParent.window) == "table" and type(insideParent.window.setStyleSheet) == "function" then
+        pcall(function()
+            insideParent.window:setStyleSheet([[
+                background-color: rgba(0,0,0,0);
+                border: 0px;
+                border-radius: 0px;
+                margin: 0px;
+                padding: 0px;
+            ]])
+        end)
+    end
+end
+
 -- -------------------------------------------------------------------------
--- Adjustable close/hide hook:
--- Wrap frame:hide() (and close if present) so title-bar X updates DWKit
--- visible state (gui_settings.visible=false noSave) even if closeLabel callbacks do not fire.
---
--- Rules:
---   - DO NOT call ui_manager.applyOne() here (no recursion).
---   - DO respect _dwkitSuppressHideHook (internal hides).
---   - DO refresh ui_manager_ui AFTER the hide/close actually ran.
---   - DO NOT call ui_manager_ui.apply() from refresh path (use refresh()).
---   - If opts.noClose == true: we still keep hooks for programmatic hide(),
---     but UI close chrome is hidden and X click is not wired.
+-- Adjustable close/hide hook
 -- -------------------------------------------------------------------------
 local function _installAdjustableHideHookBestEffort(frame, bundle)
     if type(frame) ~= "table" or type(bundle) ~= "table" or type(bundle.meta) ~= "table" then
@@ -499,13 +631,8 @@ local function _installAdjustableHideHookBestEffort(frame, bundle)
             return
         end
 
-        -- deterministic runtime signal for UI Manager UI (upsert-safe)
         _setUiBaseRuntimeVisibleBestEffort(uiId, false)
-
-        -- session-only cfg signal
         _syncVisibleOffSessionBestEffort(uiId)
-
-        -- redraw rows (safe)
         _refreshUiManagerUiBestEffort("ui_window:hidehook:" .. tostring(source or "hide"), uiId)
     end
 
@@ -518,7 +645,6 @@ local function _installAdjustableHideHookBestEffort(frame, bundle)
         local suppressed = _isSuppressed(self)
         local r1, r2, r3, r4 = _callOrigBestEffort(origHide, self, ...)
 
-        -- AFTER hide
         _postHideUpdate("frame.hide", suppressed)
 
         frame._dwkitCloseInFlight = false
@@ -535,7 +661,6 @@ local function _installAdjustableHideHookBestEffort(frame, bundle)
             local suppressed = _isSuppressed(self)
             local r1, r2, r3, r4 = _callOrigBestEffort(origClose, self, ...)
 
-            -- AFTER close
             _postHideUpdate("frame.close", suppressed)
 
             frame._dwkitCloseInFlight = false
@@ -556,7 +681,6 @@ local function _installAdjustableHideHookBestEffort(frame, bundle)
                 local suppressed = _isSuppressed(self)
                 local r1, r2, r3, r4 = _callOrigBestEffort(origWinHide, self, ...)
 
-                -- AFTER hide
                 _postHideUpdate("frame.window.hide", suppressed)
 
                 frame._dwkitCloseInFlight = false
@@ -573,7 +697,6 @@ local function _installAdjustableHideHookBestEffort(frame, bundle)
                     local suppressed = _isSuppressed(self)
                     local r1, r2, r3, r4 = _callOrigBestEffort(origWinClose, self, ...)
 
-                    -- AFTER close
                     _postHideUpdate("frame.window.close", suppressed)
 
                     frame._dwkitCloseInFlight = false
@@ -608,6 +731,7 @@ function M.create(opts)
         return nil
     end
 
+    -- DEFAULT BEHAVIOR UNCHANGED: pad=6 unless caller explicitly passes opts.padding.
     local pad = tonumber(opts.padding or 6) or 6
     local btnSz = tonumber(opts.buttonSize or 18) or 18
     local btnFont = tonumber(opts.buttonFontSize or 9) or 9
@@ -682,7 +806,40 @@ function M.create(opts)
             bundle.closeLabel = closeA
         end
 
-        local insideParent = _resolveInsideParent(frame)
+        local insideParent, usedShim, gotExplicitInside = _resolveInsideParent(frame)
+
+        -- If we did NOT get an explicit Inside widget and we're effectively using the window itself,
+        -- create a shim below the true header height so content can never overlap titlebar.
+        if type(frame.window) == "table" and insideParent == frame.window and gotExplicitInside ~= true then
+            local headerH = _guessHeaderHeightBestEffort(frame, bundle, tonumber(opts.headerHeight or 24) or 24)
+            local shimName = tostring(nameFrame) .. "__insideShim"
+            local shim = G.Container:new({
+                name = shimName,
+                x = 0,
+                y = headerH,
+                width = "100%",
+                height = "-" .. tostring(headerH) .. "px",
+            }, frame.window)
+            if type(shim.setStyleSheet) == "function" then
+                pcall(function()
+                    shim:setStyleSheet([[
+                        background-color: rgba(0,0,0,0);
+                        border: 0px;
+                        margin: 0px;
+                        padding: 0px;
+                    ]])
+                end)
+            end
+            insideParent = shim
+            usedShim = true
+        end
+
+        bundle.meta.insideShim = (usedShim == true)
+
+        -- OPT-IN only.
+        if opts.noInsetInside == true then
+            _applyAdjustableInsideNoInsetBestEffort(insideParent)
+        end
 
         local content = G.Container:new({
             name = nameContent,
@@ -762,16 +919,9 @@ function M.create(opts)
 
         local id = (bundle.meta and bundle.meta.uiId) or uiId
 
-        -- deterministic runtime signal for UI Manager UI (rt:) (upsert-safe)
         _setUiBaseRuntimeVisibleBestEffort(id, false)
-
-        -- intent: user hide (session-only)
         _syncVisibleOffSessionBestEffort(id)
-
-        -- perform hide
         onClose(bundle)
-
-        -- refresh UI Manager rows (rows-only, safe)
         _refreshUiManagerUiBestEffort("ui_window:xclick", id)
     end
 
