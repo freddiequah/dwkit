@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_window
 -- Owner       : UI
--- Version     : v2026-02-11E
+-- Version     : v2026-02-11G
 -- Purpose     :
 --   - Shared DWKit "frame" creator:
 --       * Prefer Adjustable.Container (movable/resizable + autoSave/autoLoad)
@@ -27,13 +27,25 @@
 --   v2026-02-11E:
 --     - FIX: register bundle.content into Geyser maps by nameContent (discoverable across profiles).
 --     - ADD: store entry now includes content handle (ui_base.setUiRuntime content=?).
+--
+--   v2026-02-11F:
+--     - FIX: some Adjustable builds do NOT expose frame.window, yet still include titlebar chrome
+--       in the resolved inside parent. We now create insideShim whenever we did NOT get an explicit
+--       Inside widget, using frame.window OR frame as shim parent. This prevents title/tab overlap
+--       and removes bottom wasted gap on those profiles.
+--
+--   v2026-02-11G:
+--     - FIX: even when an "explicit" Inside exists on some builds (frame.Inside/getInside),
+--       it can still include titlebar chrome when frame.window is missing.
+--       We now FORCE insideShim whenever frame.window is NOT exposed, regardless of gotExplicitInside.
+--       Shim parent preference: frame.window -> frame (never shim under insideParent).
 -- #########################################################################
 
 local Theme = require("dwkit.ui.ui_theme")
 
 local M = {}
 
-M.VERSION = "v2026-02-11E"
+M.VERSION = "v2026-02-11G"
 
 local function _pcall(fn, ...)
     local ok, res = pcall(fn, ...)
@@ -808,9 +820,22 @@ function M.create(opts)
 
         local insideParent, usedShim, gotExplicitInside = _resolveInsideParent(frame)
 
-        -- If we did NOT get an explicit Inside widget and we're effectively using the window itself,
-        -- create a shim below the true header height so content can never overlap titlebar.
-        if type(frame.window) == "table" and insideParent == frame.window and gotExplicitInside ~= true then
+        -- v2026-02-11G FIX:
+        -- Some Adjustable builds do NOT expose frame.window, and their "Inside" (frame.Inside/getInside)
+        -- can still include titlebar chrome. In those cases, ALWAYS shim under the real frame.
+        local noWindow = (type(frame.window) ~= "table")
+
+        -- Shim if (a) no explicit Inside, OR (b) frame.window is missing.
+        if (gotExplicitInside ~= true) or (noWindow == true) then
+            local shimBase = nil
+
+            -- Shim base must be a stable chrome parent: prefer frame.window if present, else frame.
+            if type(frame.window) == "table" then
+                shimBase = frame.window
+            else
+                shimBase = frame
+            end
+
             local headerH = _guessHeaderHeightBestEffort(frame, bundle, tonumber(opts.headerHeight or 24) or 24)
             local shimName = tostring(nameFrame) .. "__insideShim"
             local shim = G.Container:new({
@@ -819,7 +844,8 @@ function M.create(opts)
                 y = headerH,
                 width = "100%",
                 height = "-" .. tostring(headerH) .. "px",
-            }, frame.window)
+            }, shimBase)
+
             if type(shim.setStyleSheet) == "function" then
                 pcall(function()
                     shim:setStyleSheet([[
@@ -830,6 +856,7 @@ function M.create(opts)
                     ]])
                 end)
             end
+
             insideParent = shim
             usedShim = true
         end
