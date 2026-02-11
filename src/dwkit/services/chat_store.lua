@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.chat_store
 -- Owner       : Services
--- Version     : v2026-02-10A
+-- Version     : v2026-02-11A
 -- Purpose     :
 --   - SAFE in-memory chat store (ring buffer).
 --   - Profile-portable: segmented by profileTag.
@@ -18,15 +18,11 @@
 --   - listRecent(n?, profileTag?) -> table list (oldest->newest)
 --   - clear(profileTag?) -> boolean ok
 --   - getStats(profileTag?) -> table stats
---
--- Persistence      : None
--- Automation Policy: Manual only
--- Dependencies     : None
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-10A"
+M.VERSION = "v2026-02-11A"
 
 local DEFAULT_MAX = 200
 
@@ -106,16 +102,16 @@ function M.append(msg, profileTag)
     end
 
     local item = {
-        id = b.nextId,
+        id = tonumber(b.nextId or 1) or 1,
         ts = tonumber(msg.ts) or os.time(),
         source = _isNonEmptyString(msg.source) and msg.source or nil,
         channel = _isNonEmptyString(msg.channel) and msg.channel or nil,
         speaker = _isNonEmptyString(msg.speaker) and msg.speaker or nil,
         text = text,
-        raw = msg.raw, -- optional
+        raw = msg.raw,
     }
 
-    b.nextId = b.nextId + 1
+    b.nextId = (tonumber(b.nextId or 1) or 1) + 1
     table.insert(b.items, item)
 
     -- ring trim
@@ -156,11 +152,16 @@ end
 function M.getStats(profileTag)
     profileTag = _normTag(profileTag)
     local b = M.ensure(profileTag)
+
+    local maxN = tonumber(b.max or DEFAULT_MAX) or DEFAULT_MAX
+    local countN = (type(b.items) == "table") and #b.items or 0
+    local nextIdN = tonumber(b.nextId or 1) or 1
+
     return {
         profileTag = profileTag,
-        max = b.max,
-        count = #(b.items or {}),
-        nextId = b.nextId,
+        max = maxN,
+        count = countN,
+        nextId = nextIdN,
     }
 end
 

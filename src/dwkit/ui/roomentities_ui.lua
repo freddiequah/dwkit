@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-02-10G
+-- Version     : v2026-02-11A
 -- Purpose     :
 --   - SAFE RoomEntities UI (consumer-only) that renders a per-entity ROW LIST with
 --     sections: Players / Mobs / Items-Objects / Unknown.
@@ -53,11 +53,19 @@
 --           - Wrap OS.set/OS.clear in pcall so click callbacks can never hard-error
 --             (hard errors can break/disable subsequent label clicks in Mudlet UI).
 --           - Still captures (ok, err) return values when the call succeeds.
+--
+--   - FIX (v2026-02-11A):
+--       * Button click reliability: STOP using Geyser.HBox for rows (HBox can ignore x/width
+--         and stack children unexpectedly, causing overlapping labels and "unclickable" buttons).
+--         Always render each row as a plain Container with explicit x/width regions.
+--       * Dispose correctness: dispose() must not clear/remove ui_store entry (align rtvis2
+--         deterministic visible state approach). Instead set module visible/enabled false and
+--         best-effort mark store state visible=false if helper exists.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-10G"
+M.VERSION = "v2026-02-11A"
 M.UI_ID = "roomentities_ui"
 M.id = M.UI_ID -- convenience alias (some tooling/debug expects ui.id)
 
@@ -853,30 +861,13 @@ local function _renderRowsIntoRoot(root, effectiveLists)
         end
 
         name = tostring(name or "")
-        local row = nil
-
-        pcall(function()
-            if type(G.HBox) == "table" and type(G.HBox.new) == "function" then
-                row = G.HBox:new({
-                    name = "__DWKit_roomentities_ui_row_" ..
-                        tostring(os.time()) .. "_" .. tostring(math.random(1000, 9999)),
-                    x = 0,
-                    y = yCursor,
-                    width = "100%",
-                    height = ROW_H,
-                }, root)
-            end
-        end)
-
-        if type(row) ~= "table" then
-            row = G.Container:new({
-                name = "__DWKit_roomentities_ui_rowC_" .. tostring(os.time()) .. "_" .. tostring(math.random(1000, 9999)),
-                x = 0,
-                y = yCursor,
-                width = "100%",
-                height = ROW_H,
-            }, root)
-        end
+        local row = G.Container:new({
+            name = "__DWKit_roomentities_ui_rowC_" .. tostring(os.time()) .. "_" .. tostring(math.random(1000, 9999)),
+            x = 0,
+            y = yCursor,
+            width = "100%",
+            height = ROW_H,
+        }, root)
 
         _state.widgets.rendered[#_state.widgets.rendered + 1] = row
 
@@ -933,17 +924,33 @@ local function _renderRowsIntoRoot(root, effectiveLists)
 
         _wireLabelClickBestEffort(btnMob.name, function()
             if _state.enabled ~= true or _state.visible ~= true then return end
-            _setOverrideModeForName(name, "mob")
+            local ok, errMsg = pcall(function()
+                _setOverrideModeForName(name, "mob")
+            end)
+            if not ok then
+                _out("[DWKit UI] roomentities_ui WARN: btn MOB click threw err=" .. tostring(errMsg), nil)
+            end
         end)
 
+        _wireLabelClickBestEffEffort = _wireLabelClickBestEffort -- keep local alias stable if tooling inspects
         _wireLabelClickBestEffort(btnItem.name, function()
             if _state.enabled ~= true or _state.visible ~= true then return end
-            _setOverrideModeForName(name, "item")
+            local ok, errMsg = pcall(function()
+                _setOverrideModeForName(name, "item")
+            end)
+            if not ok then
+                _out("[DWKit UI] roomentities_ui WARN: btn ITEM click threw err=" .. tostring(errMsg), nil)
+            end
         end)
 
         _wireLabelClickBestEffort(btnIgn.name, function()
             if _state.enabled ~= true or _state.visible ~= true then return end
-            _setOverrideModeForName(name, "ignore")
+            local ok, errMsg = pcall(function()
+                _setOverrideModeForName(name, "ignore")
+            end)
+            if not ok then
+                _out("[DWKit UI] roomentities_ui WARN: btn IGN click threw err=" .. tostring(errMsg), nil)
+            end
         end)
 
         placeNext(ROW_H)
@@ -1324,7 +1331,15 @@ function M.dispose(opts)
     _state.subscriptionRoomEntities = nil
     _state.subscriptionWhoStore = nil
 
-    U.clearUiStoreEntry(M.UI_ID)
+    -- IMPORTANT (rtvis2 alignment): after dispose we must not claim enabled/visible.
+    _state.enabled = false
+    _state.visible = false
+    _state.lastApply = os.time()
+
+    -- Best-effort: mark ui_store state visible=false if helper exists.
+    if type(U.setUiStateVisibleBestEffort) == "function" then
+        pcall(function() U.setUiStateVisibleBestEffort(M.UI_ID, false) end)
+    end
 
     _clearRenderedWidgets()
 

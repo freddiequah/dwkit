@@ -8,6 +8,7 @@ UPDATED: + Verification Plan Split: verification.lua (stable runner) + verificat
 UPDATED: + UI Architecture Contracts: Shared Frame + Content Kits, and UI semantics (ActionPad/Presence_UI/RoomEntities_UI) + ui_smoke console verification
 UPDATED: + Full-File Return Rule hardening: always return full files in one contiguous block; never split outputs; never truncate; preserve unrelated code.
 UPDATED: + Mojibake cleanup: normalize punctuation/quotes to avoid UTF-8 decode artifacts in this standard.
+UPDATED (NEW): + UI Cross-Profile Consistency Policy (layout invariants vs per-profile workspace persistence)
 
 GitHub PR Workflow via PowerShell (GitHub CLI "gh")
 
@@ -39,7 +40,6 @@ Hardening rules (MANDATORY):
 - No truncation: Never omit or elide any lines from a changed file. If the file is large, still return it in full.
 - Preserve unrelated code: Implement only the requested change. Do NOT delete, rewrite, or 'simplify' unrelated functions/sections (e.g., keep a/b/c/d/e intact when adding f).
 - Reverts follow the same rule: if reverting a file, return the full reverted file content in full.
-
 
 If the assistant is unsure it has the latest file content, it MUST request the full file content first and provide the exact commands to collect it.
 
@@ -161,6 +161,11 @@ NEW: UI Architecture Contracts:
 - UI semantics for ActionPad / Presence_UI / RoomEntities_UI
 - Console-first UI verification via dwverify ui_smoke (no screenshots)
 
+NEW: UI Cross-Profile Consistency Policy:
+- Defines what MUST remain consistent across profiles (layout invariants) vs what may vary (workspace preferences).
+- Defines strict persistence boundaries for UI state (geometry only; never persist layout internals).
+- Adds verification expectations to prevent regressions (dwverify suite must assert invariants).
+
 ==================================================
 ANCHOR PACK ALIGNMENT RECORD
 
@@ -260,6 +265,12 @@ Console-first UI verification gate:
 2026-02-07: Standard maintenance updates:
 - Fixed mojibake/UTF-8 punctuation artifacts in this document.
 - Hardened Full-File Return Workflow: no split delivery, no truncation, preserve unrelated code; full-file reverts required.
+
+2026-02-11: Added UI Cross-Profile Consistency Policy:
+- Declared layout invariants that must never differ across profiles (no overlap, no dead gaps, deterministic padding/inset/tab geometry).
+- Declared which settings may differ across profiles (enabled/visible preference, window x/y/w/h geometry).
+- Declared persistence boundaries: geometry-only persistence for UI windows; never persist layout internals or derived metrics.
+- Added verification expectation: dwverify suite must assert invariants on a "fresh profile" and an "existing profile" (where practical).
 
 ==================================================
 SECTION A — BOOTSTRAP (ALWAYS APPLIES)
@@ -411,7 +422,7 @@ Non-essential jobs:
 
 Explicitly NOT essential-default (current agreement):
 - ScorePoll (future) default OFF until ActionPad actually requires it and the user explicitly enables it.
-- Any other polling jobs default OFF (opt-in). 
+- Any other polling jobs default OFF (opt-in).
 
 F) Service vs Scheduler separation (LOCKED)
 - Parsing/capture services (e.g., WhoStore, future ScoreStore) may passively process output when it appears (Passive Capture).
@@ -885,6 +896,59 @@ Verification (Console-first; No screenshots)
 - Note:
   UI apply() reads gui_settings for enabled/visible.
   Verification steps MUST set gui_settings (noSave) then call apply({}) and print visible state.
+
+SECTION K.2 — UI CROSS-PROFILE CONSISTENCY POLICY (LOCKED)
+
+Purpose:
+Mudlet profiles are separate sandboxes. DWKit supports per-profile UI workspace preferences,
+but MUST NOT allow broken layout differences (title overlap, dead gaps) across profiles.
+
+A) Definitions (LOCKED)
+1) Workspace preferences (allowed to differ per profile):
+- enabled/disabled per UI (gui_settings)
+- visible/hidden per UI if "restore visible" is opted in
+- window geometry: x/y/w/h position and size
+- per-profile data (WhoStore contents, entity overrides, capture state)
+
+2) Layout invariants (MUST be consistent across profiles):
+- No overlap: header/title must never overlap tabs or content
+- No wasted gap: no unexplained bottom dead zone caused by padding/inset math
+- Deterministic internal spacing: padding/inset/tab/header geometry must be derived from theme/constants, not from persisted drift
+- Idempotent creation/show: showing a UI must produce the same internal layout given the same x/y/w/h
+
+Rule:
+Any violation of layout invariants is a BUG, not acceptable profile variance.
+
+B) Persistence boundaries (LOCKED)
+1) Allowed persisted UI window state (per profile):
+- geometry only: x, y, width, height (and optional "locked" flag if supported)
+
+2) Forbidden persisted UI window state (must NOT be stored; must NOT be restored):
+- internal padding/inset values
+- tabHeight/headerHeight/gapY (or any equivalent per-UI layout constants)
+- derived metrics: contentRect, innerHeight, rowStartY, scroll offsets as layout inputs
+- any cached offsets used to compute layout (must be recomputed)
+
+Rule:
+If persistence currently stores forbidden fields, it MUST be fixed by:
+- whitelisting persisted keys (geometry-only), or
+- stripping forbidden keys on save/load.
+
+C) Code-forced layout invariants (LOCKED)
+- UI modules may request frame options (e.g., noInsetInside, padding=0),
+  but the shared frame (ui_window) MUST enforce invariants even if opts are missing.
+- If a UI requires special layout (e.g., tab strip), it MUST set those values at creation time and re-assert them on show/apply.
+
+D) Verification requirement (LOCKED)
+Any change that touches ui_window, ui_base, persistence of UI state, or a UI layout MUST add/update a dwverify suite that:
+- enables and shows the UI via gui_settings (noSave) + apply/applyAll
+- prints the enforced invariant-relevant values (at minimum: x/y/w/h plus any padding/inset/tab/header values used in layout)
+- PASS criteria: no overlap + no dead gap observed; printed layout values match expected invariants
+- Lua steps must be single-line only (lua do ... end)
+
+Recommended suite naming:
+dwverify ui_layout_invariants
+and/or a UI-specific suite: dwverify chat_ui_layout
 
 ==================================================
 SECTION L — GUI SETTINGS (PER-PROFILE) (REQUIRED)
