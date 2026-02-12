@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_window
 -- Owner       : UI
--- Version     : v2026-02-11G
+-- Version     : v2026-02-12B
 -- Purpose     :
 --   - Shared DWKit "frame" creator:
 --       * Prefer Adjustable.Container (movable/resizable + autoSave/autoLoad)
@@ -39,13 +39,22 @@
 --       it can still include titlebar chrome when frame.window is missing.
 --       We now FORCE insideShim whenever frame.window is NOT exposed, regardless of gotExplicitInside.
 --       Shim parent preference: frame.window -> frame (never shim under insideParent).
+--
+--   v2026-02-12A:
+--     - ADD: best-effort Adjustable resize hook wrapper (frame/window resize + setSize variants)
+--       that calls opts.onResize(bundle, {source=..., w=..., h=...}) after a user-driven resize.
+--       This avoids relying on unreliable "user window resize" events across builds.
+--
+--   v2026-02-12B:
+--     - FIX: Adjustable resize hook guard flags were colliding, preventing actual function wrapping.
+--       Separate "hook installed" vs "function wrapped" flags so onResize reliably fires on drag-resize.
 -- #########################################################################
 
 local Theme = require("dwkit.ui.ui_theme")
 
 local M = {}
 
-M.VERSION = "v2026-02-11G"
+M.VERSION = "v2026-02-12B"
 
 local function _pcall(fn, ...)
     local ok, res = pcall(fn, ...)
@@ -726,6 +735,123 @@ local function _installAdjustableHideHookBestEffort(frame, bundle)
     return true
 end
 
+-- -------------------------------------------------------------------------
+-- Adjustable resize hook (NEW)
+-- -------------------------------------------------------------------------
+local function _installAdjustableResizeHookBestEffort(frame, bundle)
+    if type(frame) ~= "table" or type(bundle) ~= "table" or type(bundle.meta) ~= "table" then
+        return false
+    end
+
+    local onResize = bundle.meta.onResize
+    if type(onResize) ~= "function" then
+        return false
+    end
+
+    -- NOTE: separate flag from function-wrapping to avoid disabling the wrap.
+    if frame._dwkitResizeHookInstalled == true then
+        return true
+    end
+    frame._dwkitResizeHookInstalled = true
+
+    local function _isSuppressed(obj)
+        if type(obj) ~= "table" then return false end
+        if obj._dwkitSuppressResizeHook == true then return true end
+        if type(obj.window) == "table" and obj.window._dwkitSuppressResizeHook == true then return true end
+        return false
+    end
+
+    local function _getWHBestEffort(obj)
+        if type(obj) ~= "table" then return nil, nil end
+
+        local function _num(v)
+            v = tonumber(v)
+            return (v and v > 0) and v or nil
+        end
+
+        local w, h
+
+        for _, fn in ipairs({ "get_width", "getWidth", "width" }) do
+            if type(obj[fn]) == "function" then
+                local ok, v = pcall(function() return obj[fn](obj) end)
+                if ok then w = _num(v) break end
+            end
+        end
+
+        for _, fn in ipairs({ "get_height", "getHeight", "height" }) do
+            if type(obj[fn]) == "function" then
+                local ok, v = pcall(function() return obj[fn](obj) end)
+                if ok then h = _num(v) break end
+            end
+        end
+
+        return w, h
+    end
+
+    local function _postResize(source, suppressed)
+        if suppressed then return end
+
+        local w, h = _getWHBestEffort(frame)
+        if type(frame.window) == "table" then
+            local w2, h2 = _getWHBestEffort(frame.window)
+            w = w or w2
+            h = h or h2
+        end
+
+        pcall(onResize, bundle, { source = tostring(source or "resize"), w = w, h = h })
+    end
+
+    local function _wrapResize(target, sourceTag)
+        if type(target) ~= "table" then return false end
+        if target._dwkitResizeFnWrapped == true then return true end
+        target._dwkitResizeFnWrapped = true
+
+        local origResize = (type(target.resize) == "function") and target.resize or nil
+        local origSetSize = (type(target.setSize) == "function") and target.setSize or nil
+
+        if type(origResize) == "function" then
+            target.resize = function(self, ...)
+                local suppressed = _isSuppressed(self)
+                local r1, r2, r3, r4 = _callOrigBestEffort(origResize, self, ...)
+                _postResize(tostring(sourceTag) .. ".resize", suppressed)
+                return r1, r2, r3, r4
+            end
+        end
+
+        if type(origSetSize) == "function" then
+            target.setSize = function(self, ...)
+                local suppressed = _isSuppressed(self)
+                local r1, r2, r3, r4 = _callOrigBestEffort(origSetSize, self, ...)
+                _postResize(tostring(sourceTag) .. ".setSize", suppressed)
+                return r1, r2, r3, r4
+            end
+        end
+
+        -- Some stacks use setWidth/setHeight (rare); wrap if present.
+        for _, fnName in ipairs({ "setWidth", "setHeight" }) do
+            if type(target[fnName]) == "function" then
+                local orig = target[fnName]
+                target[fnName] = function(self, ...)
+                    local suppressed = _isSuppressed(self)
+                    local r1, r2, r3, r4 = _callOrigBestEffort(orig, self, ...)
+                    _postResize(tostring(sourceTag) .. "." .. fnName, suppressed)
+                    return r1, r2, r3, r4
+                end
+            end
+        end
+
+        return (type(origResize) == "function") or (type(origSetSize) == "function")
+    end
+
+    local any = false
+    any = _wrapResize(frame, "frame") or any
+    if type(frame.window) == "table" then
+        any = _wrapResize(frame.window, "frame.window") or any
+    end
+
+    return any
+end
+
 function M.create(opts)
     opts = (type(opts) == "table") and opts or {}
     local uiId = tostring(opts.uiId or "")
@@ -764,6 +890,9 @@ function M.create(opts)
             nameContent = nameContent,
             noClose = (opts.noClose == true),
             fixed = (opts.fixed == true),
+
+            -- NEW: optional per-frame resize callback (bundle-level)
+            onResize = (type(opts.onResize) == "function") and opts.onResize or nil,
         },
     }
 
@@ -879,6 +1008,9 @@ function M.create(opts)
         bundle.content = content
 
         _installAdjustableHideHookBestEffort(frame, bundle)
+
+        -- NEW: wrap the actual resize calls instead of relying on events
+        _installAdjustableResizeHookBestEffort(frame, bundle)
     else
         local frame = G.Container:new({
             name = nameFrame,
@@ -917,6 +1049,19 @@ function M.create(opts)
         bundle.content = content
         bundle.closeLabel = close
         bundle.meta.adjustable = false
+
+        -- Best-effort: also hook resize for non-Adjustable if caller asked
+        if type(bundle.meta.onResize) == "function" then
+            local origResize = (type(frame.resize) == "function") and frame.resize or nil
+            if type(origResize) == "function" and frame._dwkitResizeWrapped ~= true then
+                frame._dwkitResizeWrapped = true
+                frame.resize = function(self, ...)
+                    local r1, r2, r3, r4 = _callOrigBestEffort(origResize, self, ...)
+                    pcall(bundle.meta.onResize, bundle, { source = "geyser.frame.resize" })
+                    return r1, r2, r3, r4
+                end
+            end
+        end
     end
 
     _registerRuntimeBestEffort(bundle)
