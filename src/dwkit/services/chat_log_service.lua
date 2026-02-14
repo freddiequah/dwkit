@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.chat_log_service
 -- Owner       : Services
--- Version     : v2026-02-11A
+-- Version     : v2026-02-12A
 -- Purpose     :
 --   - SAFE chat log service (data only) backed by chat_store.
 --   - Emits internal DWKit event on append/clear.
@@ -33,7 +33,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-11A"
+M.VERSION = "v2026-02-12A"
 
 local ID = require("dwkit.core.identity")
 local PREFIX = tostring(ID.eventPrefix or "DWKit:")
@@ -121,6 +121,7 @@ function M.addLine(text, opts)
         text = text,
         channel = opts.channel,
         speaker = opts.speaker,
+        target = opts.target, -- NEW: first-class target carried to store/UI
         raw = opts.raw,
         source = opts.source or "manual",
         ts = opts.ts,

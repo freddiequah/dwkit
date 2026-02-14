@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.chat_router_service
 -- Owner       : Services
--- Version     : v2026-02-11B
+-- Version     : v2026-02-12A
 -- Purpose     :
 --   - SAFE router for "incoming lines" into ChatLogService.
 --   - Caller decides how to obtain lines (passive capture surfaces / fixtures / manual).
@@ -14,6 +14,7 @@
 --     meta (optional table):
 --       - source: string
 --       - speaker: string
+--       - target: string                 (NEW: first-class target; stored downstream)
 --       - raw: any
 --       - ts: number
 --       - profileTag: string
@@ -25,6 +26,7 @@
 --       - source: string
 --       - channel: string
 --       - speaker: string
+--       - target: string                 (NEW: first-class target; stored downstream)
 --       - raw: any
 --       - ts: number
 --       - profileTag: string
@@ -32,7 +34,7 @@
 --         If provided and returns false, line is ignored (not an error).
 --
 --   - ingestMudLine(line, meta?) -> boolean ok, string|nil err
---     Parses known MUD chat strings into channel/speaker/text then routes via push().
+--     Parses known MUD chat strings into channel/speaker/target/text then routes via push().
 --     meta (optional table):
 --       - source: string (default "capture:mud")
 --       - ts: number
@@ -44,7 +46,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-11B"
+M.VERSION = "v2026-02-12A"
 
 local Log = require("dwkit.services.chat_log_service")
 
@@ -67,9 +69,16 @@ local function _normSpeaker(sp)
     return sp
 end
 
+local function _normTarget(tg)
+    tg = _trim(tg)
+    if tg == "" then return nil end
+    return tg
+end
+
 local function _normText(t)
     if type(t) ~= "string" then return "" end
     t = t:gsub("\r", ""):gsub("\n", "")
+    t = _trim(t)
     return t
 end
 
@@ -104,19 +113,40 @@ function M.push(channel, text, meta)
         return false, "push(channel, text): text must be a non-empty string"
     end
 
+    local normText = _normText(text)
+    if normText == "" then
+        return false, "push(channel, text): text is empty after normalization"
+    end
+
+    -- channel: prefer explicit arg; fall back to meta.channel
     local ch = _normChannel(channel)
+    if ch == "" and _isNonEmptyString(meta.channel) then
+        ch = _normChannel(meta.channel)
+    end
+
+    local speaker = _normSpeaker(meta.speaker)
+    local target = _normTarget(meta.target)
+
+    -- Allow filter should see normalized inputs (but still receives raw/meta for advanced logic)
+    local allowMeta = {}
+    for k, v in pairs(meta) do allowMeta[k] = v end
+    allowMeta.channel = ch
+    allowMeta.speaker = speaker
+    allowMeta.target = target
+    allowMeta.text = normText
 
     if type(meta.allow) == "function" then
-        local okAllow, allowRes = pcall(meta.allow, ch, text, meta)
+        local okAllow, allowRes = pcall(meta.allow, ch, normText, allowMeta)
         if okAllow and allowRes == false then
             return true, nil -- ignore, not an error
         end
     end
 
-    return Log.addLine(text, {
+    return Log.addLine(normText, {
         source = meta.source or "router",
-        channel = (ch ~= "" and ch or meta.channel),
-        speaker = meta.speaker,
+        channel = (ch ~= "" and ch or nil),
+        speaker = speaker,
+        target = target, -- NEW: first-class field
         raw = meta.raw,
         ts = meta.ts,
         profileTag = meta.profileTag,
@@ -131,16 +161,22 @@ function M.ingestLine(text, opts)
         return false, "ingestLine(text): text must be a non-empty string"
     end
 
+    local normText = _normText(text)
+    if normText == "" then
+        return false, "ingestLine(text): text is empty after normalization"
+    end
+
     if type(opts.allow) == "function" then
-        local okAllow, allowRes = pcall(opts.allow, text, opts)
+        local okAllow, allowRes = pcall(opts.allow, normText, opts)
         if okAllow and allowRes == false then
             return true, nil -- ignore, not an error
         end
     end
 
-    return M.push(opts.channel, text, {
+    return M.push(opts.channel, normText, {
         source = opts.source or "router",
         speaker = opts.speaker,
+        target = opts.target,
         raw = opts.raw,
         ts = opts.ts,
         profileTag = opts.profileTag,
@@ -186,7 +222,7 @@ local function _parseMudLine(line)
         }
     end
 
-    -- 2) <Name> <verb>s, 'text'  (says/gossips/shouts/yells/congrats/asks)
+    -- 2) <Name> <verb>, 'text'  (says/gossips/shouts/yells/congrats/asks)
     speaker, verb, text = line:match("^(.-)%s+(%w+),%s+'(.*)'$")
     if speaker and verb and text then
         speaker = _normSpeaker(speaker)
@@ -208,7 +244,7 @@ local function _parseMudLine(line)
         return {
             speaker = "You",
             channel = "TELL",
-            target = _trim(target),
+            target = _normTarget(target),
             text = _normText(text),
             rawVerb = "tell",
         }
@@ -235,7 +271,7 @@ local function _parseMudLine(line)
         return {
             speaker = "You",
             channel = "WHISPER",
-            target = _trim(target),
+            target = _normTarget(target),
             text = _normText(text),
             rawVerb = "whisper",
         }
@@ -262,7 +298,7 @@ local function _parseMudLine(line)
         return {
             speaker = "You",
             channel = "ASK",
-            target = _trim(target),
+            target = _normTarget(target),
             text = _normText(text),
             rawVerb = "ask",
         }
@@ -297,9 +333,10 @@ function M.ingestMudLine(line, meta)
     if not parsed then
         -- Unknown format: safe ignore or route to Other? Here we route as Other by leaving channel blank.
         -- Caller can provide meta.allow to filter if preferred.
-        return M.push(meta.channel or "", line, {
+        return M.push(meta.channel or "", _normText(line), {
             source = meta.source or "capture:mud",
             speaker = meta.speaker,
+            target = meta.target,
             raw = meta.raw or line,
             ts = meta.ts,
             profileTag = meta.profileTag,
@@ -315,7 +352,7 @@ function M.ingestMudLine(line, meta)
         ts = meta.ts,
         profileTag = meta.profileTag,
         allow = meta.allow,
-        target = parsed.target, -- optional, stored in meta.raw only unless your log/UI uses it later
+        target = parsed.target, -- NEW: now first-class stored downstream
     })
 end
 
