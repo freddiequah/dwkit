@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.chat_router_service
 -- Owner       : Services
--- Version     : v2026-02-12A
+-- Version     : v2026-02-12B
 -- Purpose     :
 --   - SAFE router for "incoming lines" into ChatLogService.
 --   - Caller decides how to obtain lines (passive capture surfaces / fixtures / manual).
@@ -46,7 +46,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-12A"
+M.VERSION = "v2026-02-12B"
 
 local Log = require("dwkit.services.chat_log_service")
 
@@ -72,6 +72,13 @@ end
 local function _normTarget(tg)
     tg = _trim(tg)
     if tg == "" then return nil end
+
+    -- Normalize common target casing for consistent UI/logging:
+    -- "you" / "You" / "YOU" -> "You"
+    if tg:lower() == "you" then
+        return "You"
+    end
+
     return tg
 end
 
@@ -146,7 +153,7 @@ function M.push(channel, text, meta)
         source = meta.source or "router",
         channel = (ch ~= "" and ch or nil),
         speaker = speaker,
-        target = target, -- NEW: first-class field
+        target = target, -- first-class field
         raw = meta.raw,
         ts = meta.ts,
         profileTag = meta.profileTag,
@@ -258,7 +265,7 @@ local function _parseMudLine(line)
             return {
                 speaker = speaker,
                 channel = "TELL",
-                target = "you",
+                target = "You",
                 text = _normText(text),
                 rawVerb = "tells",
             }
@@ -285,7 +292,7 @@ local function _parseMudLine(line)
             return {
                 speaker = speaker,
                 channel = "WHISPER",
-                target = "you",
+                target = "You",
                 text = _normText(text),
                 rawVerb = "whispers",
             }
@@ -312,7 +319,7 @@ local function _parseMudLine(line)
             return {
                 speaker = speaker,
                 channel = "ASK",
-                target = "you",
+                target = "You",
                 text = _normText(text),
                 rawVerb = "asks",
             }
@@ -352,7 +359,7 @@ function M.ingestMudLine(line, meta)
         ts = meta.ts,
         profileTag = meta.profileTag,
         allow = meta.allow,
-        target = parsed.target, -- NEW: now first-class stored downstream
+        target = parsed.target,
     })
 end
 
