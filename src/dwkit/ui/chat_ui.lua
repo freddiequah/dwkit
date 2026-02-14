@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.chat_ui
 -- Owner       : UI
--- Version     : v2026-02-12B
+-- Version     : v2026-02-12C
 -- Purpose     :
 --   - SAFE Chat UI (consumer-only) displaying ChatLogService buffer.
 --   - Renders a DWKit-themed container with a tab row:
@@ -51,21 +51,23 @@
 --   v2026-02-12B:
 --     - FIX: rely on ui_window Adjustable resize hook (opts.onResize) so reflow is triggered when
 --       user drags-resizes the Adjustable container (not just main Mudlet window resize).
+--   v2026-02-12C:
+--     - NEW: render first-class message target (item.target) for PRIVATE channels.
 -- #########################################################################
 
-local M                      = {}
+local M                         = {}
 
-M.VERSION                    = "v2026-02-12B"
+M.VERSION                       = "v2026-02-12C"
 
-local PREFIX                 = (DWKit and DWKit.getEventPrefix and DWKit.getEventPrefix()) or "DWKit:"
-local LogSvc                 = require("dwkit.services.chat_log_service")
-local UIW                    = require("dwkit.ui.ui_window")
-local U                      = require("dwkit.ui.ui_base")
+local PREFIX                    = (DWKit and DWKit.getEventPrefix and DWKit.getEventPrefix()) or "DWKit:"
+local LogSvc                    = require("dwkit.services.chat_log_service")
+local UIW                       = require("dwkit.ui.ui_window")
+local U                         = require("dwkit.ui.ui_base")
 
-local EV_SVC_CHATLOG_UPDATED = PREFIX .. "Service:ChatLog:Updated"
+local EV_SVC_CHATLOG_UPDATED    = PREFIX .. "Service:ChatLog:Updated"
 
 -- Mudlet resize events (best-effort; names can vary by build)
-local EV_SYS_WINDOW_RESIZE   = "sysWindowResizeEvent"
+local EV_SYS_WINDOW_RESIZE      = "sysWindowResizeEvent"
 
 -- Best-effort "user window" resize events (these are known to vary by Mudlet build / scripts).
 -- We register them anyway; if they don't exist, they simply never fire.
@@ -77,16 +79,16 @@ local EV_USER_RESIZE_CANDIDATES = {
     "sysAdjustableContainerResizeEvent",
 }
 
-local UI_ID                  = "chat_ui"
-local TITLE                  = "Chat"
+local UI_ID                     = "chat_ui"
+local TITLE                     = "Chat"
 
 -- Tab definitions (LOCKED by agreement v2026-02-10C)
-local TAB_ORDER              = { "All", "SAY", "PRIVATE", "PUBLIC", "GRATS", "Other" }
+local TAB_ORDER                 = { "All", "SAY", "PRIVATE", "PUBLIC", "GRATS", "Other" }
 
-local PRIVATE_CH             = { TELL = true, ASK = true, WHISPER = true }
-local PUBLIC_CH              = { SHOUT = true, YELL = true, GOSSIP = true }
+local PRIVATE_CH                = { TELL = true, ASK = true, WHISPER = true }
+local PUBLIC_CH                 = { SHOUT = true, YELL = true, GOSSIP = true }
 
-local st                     = {
+local st                        = {
     visible = false,
     bundle = nil,
 
@@ -99,9 +101,9 @@ local st                     = {
     console = nil,
 
     inputHost = nil,
-    input = nil,          -- Geyser.CommandLine or best-effort widget
-    enableInput = true,   -- DEFAULT ON
-    sendToMud = false,    -- DEFAULT OFF
+    input = nil,        -- Geyser.CommandLine or best-effort widget
+    enableInput = true, -- DEFAULT ON
+    sendToMud = false,  -- DEFAULT OFF
 
     -- Layout computed at create time
     layout = {
@@ -112,7 +114,7 @@ local st                     = {
         usedHostFill = true,
 
         inputH = 26,
-        inputGapY = 0,      -- DEFAULT 0 (no gap)
+        inputGapY = 0, -- DEFAULT 0 (no gap)
         yConsole = 0,
         usedInput = true,
         inputKind = "none", -- "commandline" | "fallback" | "none"
@@ -183,10 +185,20 @@ end
 
 local function _mkLine(item)
     local speaker = _isNonEmptyString(item.speaker) and item.speaker or nil
-    local chan = _isNonEmptyString(item.channel) and ("[" .. item.channel .. "] ") or ""
+    local target  = _isNonEmptyString(item.target) and item.target or nil
+
+    local chRaw   = _isNonEmptyString(item.channel) and item.channel or ""
+    local chan    = (chRaw ~= "" and ("[" .. chRaw .. "] ") or "")
+
+    -- If target exists, render it as an arrow for private channels (and also OK for others if ever used).
+    if speaker and target then
+        return string.format("%s%s -> %s: %s", chan, speaker, target, tostring(item.text))
+    end
+
     if speaker then
         return string.format("%s%s: %s", chan, speaker, tostring(item.text))
     end
+
     return string.format("%s%s", chan, tostring(item.text))
 end
 
@@ -273,7 +285,10 @@ local function _switchTab(tab)
     tab = tostring(tab or "All")
     local okTab = false
     for _, t in ipairs(TAB_ORDER) do
-        if t == tab then okTab = true break end
+        if t == tab then
+            okTab = true
+            break
+        end
     end
     if not okTab then tab = "All" end
 
@@ -395,7 +410,10 @@ end
 -- ---------------------------
 -- Reflow helpers (key fix)
 -- ---------------------------
-local function _num(v) v = tonumber(v) return (v and v > 0) and v or nil end
+local function _num(v)
+    v = tonumber(v)
+    return (v and v > 0) and v or nil
+end
 
 local function _getWHBestEffort(obj)
     if type(obj) ~= "table" then return nil, nil end
@@ -405,14 +423,20 @@ local function _getWHBestEffort(obj)
     for _, fn in ipairs({ "get_width", "getWidth", "width" }) do
         if type(obj[fn]) == "function" then
             local ok, v = pcall(function() return obj[fn](obj) end)
-            if ok then w = _num(v) break end
+            if ok then
+                w = _num(v)
+                break
+            end
         end
     end
 
     for _, fn in ipairs({ "get_height", "getHeight", "height" }) do
         if type(obj[fn]) == "function" then
             local ok, v = pcall(function() return obj[fn](obj) end)
-            if ok then h = _num(v) break end
+            if ok then
+                h = _num(v)
+                break
+            end
         end
     end
 
@@ -631,7 +655,10 @@ local function _wireInputSubmitBestEffort(cmd, handlerFn)
     }) do
         if type(cmd[fnName]) == "function" then
             local ok = pcall(function() cmd[fnName](cmd, handlerFn) end)
-            if ok then wired = true break end
+            if ok then
+                wired = true
+                break
+            end
         end
     end
 
@@ -650,10 +677,10 @@ local function _wireInputSubmitBestEffort(cmd, handlerFn)
 end
 
 local function _eventMentionsThisFrameBestEffort(...)
-    -- Some resize events provide a "window/container name" as first arg (or within args).
-    -- We do a best-effort search for our frame/content names.
-    local frameName = (st.bundle and st.bundle.meta and st.bundle.meta.nameFrame) and tostring(st.bundle.meta.nameFrame) or ""
-    local contentName = (st.bundle and st.bundle.meta and st.bundle.meta.nameContent) and tostring(st.bundle.meta.nameContent) or ""
+    local frameName = (st.bundle and st.bundle.meta and st.bundle.meta.nameFrame) and tostring(st.bundle.meta.nameFrame) or
+        ""
+    local contentName = (st.bundle and st.bundle.meta and st.bundle.meta.nameContent) and
+        tostring(st.bundle.meta.nameContent) or ""
 
     if frameName == "" and contentName == "" then
         return true
@@ -673,7 +700,6 @@ local function _eventMentionsThisFrameBestEffort(...)
         end
     end
 
-    -- If event provides no usable args, we choose NOT to filter too hard (still safe to reflow).
     return false
 end
 
@@ -691,8 +717,6 @@ local function _ensureResizeReflowWiring()
 
     local frame = st.bundle and st.bundle.frame or nil
 
-    -- 1) Best-effort: if the frame exposes a resize callback, use it.
-    -- Different Mudlet/Geyser builds expose different method names; we try a few.
     if type(frame) == "table" then
         for _, fnName in ipairs({
             "setOnResize", "setResizeCallback", "setOnResizeCallback", "setResizeEvent", "setOnSizeChanged",
@@ -718,16 +742,15 @@ local function _ensureResizeReflowWiring()
         if type(registerNamedEventHandler) ~= "function" then return false end
         local ok, id = pcall(registerNamedEventHandler, group, name, ev, cb)
         if ok and id ~= nil then
-            table.insert(st.resizeHandlers, { id = id, kind = "named4", key = { group = group, name = name, event = ev }, event = ev })
+            table.insert(st.resizeHandlers,
+                { id = id, kind = "named4", key = { group = group, name = name, event = ev }, event = ev })
             return true
         end
         return false
     end
 
-    -- 2) Always hook main window resize (existing behavior).
     _registerAnon(EV_SYS_WINDOW_RESIZE, function() _doReflow() end)
 
-    -- 3) Also hook best-effort user-window resize events (still kept as extra safety net).
     for _, ev in ipairs(EV_USER_RESIZE_CANDIDATES) do
         _registerAnon(ev, function(_, ...)
             local mentioned = _eventMentionsThisFrameBestEffort(...)
@@ -787,7 +810,6 @@ local function _ensureUi(opts)
         noInsetInside = (wantNoInsetInside == true),
         padding = pad,
 
-        -- NEW: this is the reliable reflow trigger for Adjustable drag-resize
         onResize = function()
             if st.visible ~= true then return end
             pcall(_reflowLayoutBestEffort)
@@ -814,33 +836,39 @@ local function _ensureUi(opts)
         return false
     end
 
-    local tabH       = tonumber(opts.tabHeight or 24) or 24
-    local insetY     = tonumber(opts.insetY or 0) or 0
-    local gapY       = tonumber(opts.gapY or 2) or 2
-    local yContent   = insetY + tabH + gapY
+    local tabH             = tonumber(opts.tabHeight or 24) or 24
+    local insetY           = tonumber(opts.insetY or 0) or 0
+    local gapY             = tonumber(opts.gapY or 2) or 2
+    local yContent         = insetY + tabH + gapY
 
-    local inputH     = tonumber(opts.inputHeight or 26) or 26
-    local inputGapY  = tonumber(opts.inputGapY or 0) or 0
+    local inputH           = tonumber(opts.inputHeight or 26) or 26
+    local inputGapY        = tonumber(opts.inputGapY or 0) or 0
 
-    st.layout.tabH = tabH
-    st.layout.insetY = insetY
-    st.layout.gapY = gapY
-    st.layout.yContent = yContent
+    st.layout.tabH         = tabH
+    st.layout.insetY       = insetY
+    st.layout.gapY         = gapY
+    st.layout.yContent     = yContent
     st.layout.usedHostFill = true
 
-    st.layout.inputH = inputH
-    st.layout.inputGapY = inputGapY
-    st.layout.usedInput = (st.enableInput == true)
-    st.layout.inputKind = "none"
+    st.layout.inputH       = inputH
+    st.layout.inputGapY    = inputGapY
+    st.layout.usedInput    = (st.enableInput == true)
+    st.layout.inputKind    = "none"
 
-    st.bodyFill = G.Container:new({
+    st.bodyFill            = G.Container:new({
         name = tostring(st.bundle.meta.nameContent or "__DWKit_chat") .. "__bodyfill",
-        x = 0, y = 0, width = "100%", height = "100%",
+        x = 0,
+        y = 0,
+        width = "100%",
+        height = "100%",
     }, st.bundle.content)
 
-    st.tabBar = G.Container:new({
+    st.tabBar              = G.Container:new({
         name = tostring(st.bundle.meta.nameContent or "__DWKit_chat") .. "__tabbar",
-        x = 0, y = insetY, width = "100%", height = tabH,
+        x = 0,
+        y = insetY,
+        width = "100%",
+        height = tabH,
     }, st.bodyFill)
 
     _applyTabBarStyleBestEffort()
@@ -852,8 +880,10 @@ local function _ensureUi(opts)
     for _, tab in ipairs(TAB_ORDER) do
         local btn = G.Label:new({
             name = tostring(st.bundle.meta.nameContent or "__DWKit_chat") .. "__tab__" .. tab,
-            x = tostring(xPct) .. "%", y = 0,
-            width = tostring(btnW) .. "%", height = "100%",
+            x = tostring(xPct) .. "%",
+            y = 0,
+            width = tostring(btnW) .. "%",
+            height = "100%",
         }, st.tabBar)
 
         pcall(function()
@@ -870,15 +900,20 @@ local function _ensureUi(opts)
     local yConsole = yContent
     st.layout.yConsole = yConsole
 
-    -- Create with neutral geometry; reflow will set pixel-perfect sizes.
     st.consoleHost = G.Container:new({
         name = tostring(st.bundle.meta.nameContent or "__DWKit_chat") .. "__consoleHost",
-        x = 0, y = yConsole, width = "100%", height = "100%",
+        x = 0,
+        y = yConsole,
+        width = "100%",
+        height = "100%",
     }, st.bodyFill)
 
     st.console = G.MiniConsole:new({
         name = tostring(st.bundle.meta.nameContent or "__DWKit_chat") .. "__console",
-        x = 0, y = 0, width = "100%", height = "100%",
+        x = 0,
+        y = 0,
+        width = "100%",
+        height = "100%",
     }, st.consoleHost)
 
     pcall(function()
@@ -891,7 +926,10 @@ local function _ensureUi(opts)
     if st.enableInput == true then
         st.inputHost = G.Container:new({
             name = tostring(st.bundle.meta.nameContent or "__DWKit_chat") .. "__inputHost",
-            x = 0, y = 0, width = "100%", height = tostring(inputH) .. "px",
+            x = 0,
+            y = 0,
+            width = "100%",
+            height = tostring(inputH) .. "px",
         }, st.bodyFill)
 
         pcall(function()
@@ -909,7 +947,10 @@ local function _ensureUi(opts)
             local okCL, cl = pcall(function()
                 return G.CommandLine:new({
                     name = tostring(st.bundle.meta.nameContent or "__DWKit_chat") .. "__input",
-                    x = 0, y = 0, width = "100%", height = "100%",
+                    x = 0,
+                    y = 0,
+                    width = "100%",
+                    height = "100%",
                 }, st.inputHost)
             end)
 
@@ -955,7 +996,6 @@ local function _ensureUi(opts)
 
     _renderTabButtons()
 
-    -- early reflow (may be 0 until show, but harmless)
     pcall(_reflowLayoutBestEffort)
 
     return true
@@ -1075,10 +1115,7 @@ function M.show(opts)
     st.visible = true
     pcall(U.setUiStateVisibleBestEffort, UI_ID, true)
 
-    -- Ensure resize reflow wiring once we are alive (event-driven).
     pcall(_ensureResizeReflowWiring)
-
-    -- after actual show -> content sizes are real; reflow fixes bottom strip + anchors
     pcall(_reflowLayoutBestEffort)
 
     M.refresh({ source = "show", force = true })
@@ -1114,7 +1151,6 @@ function M.refresh(opts)
     opts = (type(opts) == "table") and opts or {}
     if not st.visible then return true end
 
-    -- Safety net: if anything changed layout-wise, reflow before rendering.
     pcall(_reflowLayoutBestEffort)
 
     local items, meta = _getItemsBestEffort()

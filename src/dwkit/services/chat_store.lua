@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.chat_store
 -- Owner       : Services
--- Version     : v2026-02-11A
+-- Version     : v2026-02-12A
 -- Purpose     :
 --   - SAFE in-memory chat store (ring buffer).
 --   - Profile-portable: segmented by profileTag.
@@ -22,7 +22,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-11A"
+M.VERSION = "v2026-02-12A"
 
 local DEFAULT_MAX = 200
 
@@ -107,6 +107,7 @@ function M.append(msg, profileTag)
         source = _isNonEmptyString(msg.source) and msg.source or nil,
         channel = _isNonEmptyString(msg.channel) and msg.channel or nil,
         speaker = _isNonEmptyString(msg.speaker) and msg.speaker or nil,
+        target = _isNonEmptyString(msg.target) and msg.target or nil, -- NEW: first-class target stored
         text = text,
         raw = msg.raw,
     }
