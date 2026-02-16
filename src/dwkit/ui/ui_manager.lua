@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_manager
 -- Owner       : UI
--- Version     : v2026-02-11C
+-- Version     : v2026-02-15B
 -- Purpose     :
 --   - SAFE dispatcher for applying UI modules registered in gui_settings.
 --   - Provides manual-only "apply all" and "apply one" capability.
@@ -16,37 +16,15 @@
 --     NOTE: Provider lifecycle is tied to "enabled", not "visible".
 --
 -- Key Fixes:
---   v2026-02-07C:
---     - Dispatcher enforces deterministic runtime-visible signal (ui_base storeEntry.state.visible)
---       after successful applyOne stand-up when cfgVisible is ON.
---   v2026-02-09A:
---     - Extend enforcement BOTH ways:
---         * cfgVisible=true  => rt state.visible MUST be true after apply()
---         * cfgVisible=false => rt state.visible MUST be false after apply()
---   v2026-02-09B:
---     - Cross-surface sync: refresh LaunchPad after applyOne/applyAll.
---   v2026-02-10A:
---     - FIX: cfgVisible=false must NOT call ui.apply().
---       Instead: call ui.hide() (preferred) or ui.dispose() (fallback),
---       then enforce rt visible=false.
---   v2026-02-10B:
---     - FIX: direct-control UIs (e.g. chat_ui) do NOT implement apply/hide.
---       UI Manager must call their show/hide/toggle APIs when cfgVisible flips.
---   v2026-02-11A:
---     - HARDEN: gui_settings visibility + setVisible signatures vary across builds.
---       Add tolerant _isVisibleBestEffort() probing + resilient syncVisibleSession().
---   v2026-02-11B:
---     - FIX: gui_settings may return "boolish" values (1/0/"true"/"false").
---       Normalize enabled/visible to true/false/nil correctly (do NOT lose false via `or` chaining),
---       and allow DIRECT UI path when visible is "boolish".
---   v2026-02-11C:
---     - FIX: New profiles may not list chat_ui because gui_settings only lists registered UIs.
---       Add chat_ui to KNOWN_UI_DEFAULTS so seedRegisteredDefaults() registers it (default disabled/hidden).
+--   v2026-02-15B:
+--     - FIX: direct-control UIs (chat_ui) must still claim providers when enabled.
+--       Ensure dependency claims occur BEFORE direct-control show/hide handling.
+--     - Add provider deps mapping for chat_ui -> { "chat_watch" }.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-11C"
+M.VERSION = "v2026-02-15B"
 
 local function _rawOut(line)
     line = tostring(line or "")
@@ -186,11 +164,6 @@ local function _isVisibleBestEffort(gs, uiId)
         return _boolish(v)
     end
 
-    -- IMPORTANT:
-    -- Do NOT use `or` chaining directly because false is a valid value.
-    -- Probe sequentially and return on first non-nil.
-
-    -- isVisible variants
     local v = _try("isVisible", uiId, true)
     if v ~= nil then return v end
     v = _try("isVisible", uiId, false)
@@ -202,7 +175,6 @@ local function _isVisibleBestEffort(gs, uiId)
     v = _try("isVisible", uiId)
     if v ~= nil then return v end
 
-    -- getVisible variants
     v = _try("getVisible", uiId, true)
     if v ~= nil then return v end
     v = _try("getVisible", uiId, false)
@@ -313,12 +285,12 @@ local function _applyDirectUiBestEffort(uiId, cfgVisible, opts)
     uiId = tostring(uiId or "")
     if DIRECT_UI[uiId] ~= true then return false end
 
-    local bVisible = _boolish(cfgVisible) -- normalize again (defensive)
+    local bVisible = _boolish(cfgVisible)
 
     if uiId == "chat_ui" then
         local okUI, UI = pcall(require, "dwkit.ui.chat_ui")
         if not okUI or type(UI) ~= "table" then
-            return true -- direct UI missing is not fatal to dispatcher
+            return true
         end
 
         local src = (type(opts) == "table" and opts.source) or "ui_manager:direct:chat"
@@ -345,7 +317,6 @@ local function _applyDirectUiBestEffort(uiId, cfgVisible, opts)
             return true
         end
 
-        -- cfgVisible unknown: do nothing (but not fatal)
         return true
     end
 
@@ -358,6 +329,10 @@ end
 
 local UI_PROVIDER_DEPS = {
     roomentities_ui = { "roomfeed_watch" },
+
+    -- NEW: chat UI depends on chat_watch provider (ChatCapture).
+    -- This must still apply even though chat_ui is a direct-control UI.
+    chat_ui = { "chat_watch" },
 }
 
 local function _getProvidersForUi(uiId, uiMod)
@@ -441,8 +416,6 @@ local function _hideOrDisposeBestEffort(uiId, ui, opts)
     return true, errD
 end
 
--- -------------------------------------------------------------------------
-
 function M.getModuleVersion()
     return M.VERSION
 end
@@ -469,7 +442,6 @@ function M.syncVisibleSession(uiId, visible, opts)
     local bVisible = (_boolish(visible) == true)
 
     if type(gs.setVisible) == "function" then
-        -- Resilient: attempt common signatures.
         local ok1 = pcall(gs.setVisible, uiId, bVisible, { noSave = true })
         if not ok1 then
             pcall(gs.setVisible, uiId, bVisible)
@@ -510,7 +482,7 @@ function M.applyOne(uiId, opts)
     end
 
     local enabled = _isEnabled(gs, uiId)
-    local cfgVisible = _isVisibleBestEffort(gs, uiId) -- true/false/nil (normalized)
+    local cfgVisible = _isVisibleBestEffort(gs, uiId)
 
     if not enabled then
         _out("[DWKit UI] SKIP uiId=" .. tostring(uiId) .. " (disabled)", opts)
@@ -525,8 +497,14 @@ function M.applyOne(uiId, opts)
         return true, nil
     end
 
+    -- NEW: Ensure deps even for direct-control UIs (chat_ui).
+    local okDepPre, errDepPre = _ensureDepsIfAny(uiId, nil,
+        { source = opts.source or "ui_manager:applyOne", quiet = true })
+    if not okDepPre then
+        return false, "dependency ensure failed: " .. tostring(errDepPre)
+    end
+
     -- Direct-control UI path (e.g. chat_ui)
-    -- IMPORTANT: allow cfgVisible boolish values already normalized; if nil, do nothing.
     if DIRECT_UI[uiId] == true and cfgVisible ~= nil then
         _applyDirectUiBestEffort(uiId, cfgVisible, opts)
         _refreshLaunchpadBestEffort(uiId, opts)

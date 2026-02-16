@@ -1,16 +1,18 @@
 -- #########################################################################
 -- Module Name : dwkit.services.ui_dependency_service
 -- Owner       : Services
--- Version     : v2026-02-04C
+-- Version     : v2026-02-15A
 -- Purpose     :
 --   - Dependency-safe lifecycle management for passive "providers" required by enabled UIs (Model A).
 --   - Providers are SAFE passive capture watchers (triggers/hooks) and MUST NOT send gameplay commands.
---   - Ensures required providers are running when at least one enabled UI depends on them.
---   - Releases providers when no enabled dependents remain.
+--   - Ensures required providers are running when at least one enabled dependent claims them.
+--   - Releases providers when no dependents remain.
 --   - Does NOT manage UI visibility. Dependencies are tied to "enabled", not "visible".
+--     (However, direct-control UIs MAY call ensure/release on show/hide as a best-effort gate.)
 --
 -- Providers (current):
 --   - roomfeed_watch : dwkit.capture.roomfeed_capture install/uninstall (passive triggers)
+--   - chat_watch     : dwkit.capture.chat_capture install/uninstall (passive triggers)
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -20,13 +22,12 @@
 --
 -- Notes:
 --   - This service is in-memory only; it does not persist dependency claims.
---   - If a provider is already installed externally (e.g., user ran "dwroom watch on"),
---     we will treat it as external and will NOT uninstall it when dependents release.
+--   - If a provider is already installed externally, we treat it as external and will NOT uninstall it.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-04C"
+M.VERSION = "v2026-02-15A"
 
 local ROOT = {
     uiClaims = {},  -- uiId -> { providerId=true, ... }
@@ -93,6 +94,9 @@ local function _providerState(providerId)
     return st
 end
 
+-- ----------------------------
+-- roomfeed_watch provider
+-- ----------------------------
 local function _isProviderInstalled_roomfeed()
     local okC, capOrErr = _safeRequire("dwkit.capture.roomfeed_capture")
     if not okC or type(capOrErr) ~= "table" then
@@ -142,6 +146,58 @@ local function _stopProvider_roomfeed(opts)
     return true, nil
 end
 
+-- ----------------------------
+-- chat_watch provider
+-- ----------------------------
+local function _isProviderInstalled_chat()
+    local okC, capOrErr = _safeRequire("dwkit.capture.chat_capture")
+    if not okC or type(capOrErr) ~= "table" then
+        return false, "ChatCapture not available: " .. tostring(capOrErr)
+    end
+    local cap = capOrErr
+
+    if type(cap.getDebugState) == "function" then
+        local ok, st = pcall(cap.getDebugState)
+        if ok and type(st) == "table" then
+            return (st.installed == true), nil
+        end
+    end
+
+    return false, nil
+end
+
+local function _startProvider_chat(opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    local okC, capOrErr = _safeRequire("dwkit.capture.chat_capture")
+    if not okC or type(capOrErr) ~= "table" then
+        return false, "ChatCapture not available: " .. tostring(capOrErr)
+    end
+    local cap = capOrErr
+
+    local ok, err = pcall(cap.install, { quiet = true, source = opts.source or "ui_dep:chat:start" })
+    if not ok then
+        return false, tostring(err)
+    end
+    return true, nil
+end
+
+local function _stopProvider_chat(opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    local okC, capOrErr = _safeRequire("dwkit.capture.chat_capture")
+    if not okC or type(capOrErr) ~= "table" then
+        return false, "ChatCapture not available: " .. tostring(capOrErr)
+    end
+    local cap = capOrErr
+
+    local ok, err = pcall(cap.uninstall, { quiet = true, source = opts.source or "ui_dep:chat:stop" })
+    if not ok then
+        return false, tostring(err)
+    end
+    return true, nil
+end
+
 local function _ensureProvider(providerId, opts)
     opts = (type(opts) == "table") and opts or {}
     providerId = tostring(providerId or "")
@@ -164,6 +220,34 @@ local function _ensureProvider(providerId, opts)
         end
 
         local ok, err = _startProvider_roomfeed(opts)
+        if not ok then
+            st.lastErr = err
+            return false, err
+        end
+        st.startedByManager = true
+        st.externalInstalled = false
+        st.lastEnsureTs = _nowTs()
+        return true, nil
+    end
+
+    if providerId == "chat_watch" then
+        local st = _providerState(providerId)
+
+        local installed, e = _isProviderInstalled_chat()
+        if e then
+            st.lastErr = e
+            return false, e
+        end
+
+        if installed == true then
+            if st.startedByManager ~= true then
+                st.externalInstalled = true
+            end
+            st.lastEnsureTs = _nowTs()
+            return true, nil
+        end
+
+        local ok, err = _startProvider_chat(opts)
         if not ok then
             st.lastErr = err
             return false, err
@@ -207,6 +291,31 @@ local function _releaseProviderIfUnused(providerId, opts)
         end
 
         local ok, err = _stopProvider_roomfeed(opts)
+        if not ok then
+            st.lastErr = err
+            return false, err
+        end
+
+        st.lastReleaseTs = _nowTs()
+        st.startedByManager = false
+        st.externalInstalled = false
+        return true, nil
+    end
+
+    if providerId == "chat_watch" then
+        local installed, e = _isProviderInstalled_chat()
+        if e then
+            st.lastErr = e
+            return false, e
+        end
+
+        if installed ~= true then
+            st.lastReleaseTs = _nowTs()
+            st.startedByManager = false
+            return true, nil
+        end
+
+        local ok, err = _stopProvider_chat(opts)
         if not ok then
             st.lastErr = err
             return false, err

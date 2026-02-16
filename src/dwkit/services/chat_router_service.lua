@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.chat_router_service
 -- Owner       : Services
--- Version     : v2026-02-12B
+-- Version     : v2026-02-15B
 -- Purpose     :
 --   - SAFE router for "incoming lines" into ChatLogService.
 --   - Caller decides how to obtain lines (passive capture surfaces / fixtures / manual).
@@ -14,7 +14,7 @@
 --     meta (optional table):
 --       - source: string
 --       - speaker: string
---       - target: string                 (NEW: first-class target; stored downstream)
+--       - target: string                 (first-class target; stored downstream)
 --       - raw: any
 --       - ts: number
 --       - profileTag: string
@@ -26,7 +26,7 @@
 --       - source: string
 --       - channel: string
 --       - speaker: string
---       - target: string                 (NEW: first-class target; stored downstream)
+--       - target: string                 (first-class target; stored downstream)
 --       - raw: any
 --       - ts: number
 --       - profileTag: string
@@ -35,6 +35,7 @@
 --
 --   - ingestMudLine(line, meta?) -> boolean ok, string|nil err
 --     Parses known MUD chat strings into channel/speaker/target/text then routes via push().
+--     IMPORTANT (chat-only milestone): non-chat lines are DROPPED (ignored), not routed to Other.
 --     meta (optional table):
 --       - source: string (default "capture:mud")
 --       - ts: number
@@ -46,7 +47,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-12B"
+M.VERSION = "v2026-02-15B"
 
 local Log = require("dwkit.services.chat_log_service")
 
@@ -57,6 +58,17 @@ local function _trim(s)
     return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
+-- Best-effort strip ANSI escape codes (common in MUD output).
+local function _stripAnsi(s)
+    if type(s) ~= "string" then return "" end
+    -- CSI sequences like ESC[ ... letter
+    s = s:gsub("\27%[[0-9;?]*[A-Za-z]", "")
+    -- OSC sequences like ESC] ... BEL or ESC\
+    s = s:gsub("\27%][^\7]*\7", "")
+    s = s:gsub("\27%][^\27]*\27\\", "")
+    return s
+end
+
 local function _normChannel(ch)
     if type(ch) ~= "string" then return "" end
     ch = _trim(ch):upper()
@@ -64,13 +76,13 @@ local function _normChannel(ch)
 end
 
 local function _normSpeaker(sp)
-    sp = _trim(sp)
+    sp = _trim(_stripAnsi(tostring(sp or "")))
     if sp == "" then return nil end
     return sp
 end
 
 local function _normTarget(tg)
-    tg = _trim(tg)
+    tg = _trim(_stripAnsi(tostring(tg or "")))
     if tg == "" then return nil end
 
     -- Normalize common target casing for consistent UI/logging:
@@ -85,8 +97,35 @@ end
 local function _normText(t)
     if type(t) ~= "string" then return "" end
     t = t:gsub("\r", ""):gsub("\n", "")
+    t = _stripAnsi(t)
     t = _trim(t)
     return t
+end
+
+local function _looksLikePrompt(line)
+    line = tostring(line or "")
+    line = _stripAnsi(line)
+    line = _trim(line)
+    if line == "" then return false end
+
+    -- Common Deathwish-ish prompt: <716(716)Hp 100(100)Mp 82(82)Mv>
+    if line:match("^<%s*%d+%(%d+%)Hp%s+%d+%(%d+%)Mp%s+%d+%(%d+%)Mv%s*>%s*$") then
+        return true
+    end
+
+    -- Sometimes two prompts appear on one line:
+    if line:find("Hp", 1, true) and line:find("Mp", 1, true) and line:find("Mv", 1, true) then
+        -- if the whole line is basically prompt-ish (angle brackets + stats), drop it
+        if line:match("^<.*Hp.*Mp.*Mv.*>$") then
+            return true
+        end
+        -- or repeated prompts:
+        if line:match("^<.*Hp.*Mv.*>%s*<.*Hp.*Mv.*>$") then
+            return true
+        end
+    end
+
+    return false
 end
 
 local function _mapVerbToChannel(verbUpper)
@@ -212,7 +251,8 @@ end
 --   Xi asks you, 'hi'
 -- -------------------------------------------------------------------------
 local function _parseMudLine(line)
-    line = _trim(tostring(line or ""))
+    -- normalize and strip ANSI first (critical for real capture)
+    line = _normText(tostring(line or ""))
     if line == "" then return nil end
 
     local speaker, verb, target, text
@@ -220,13 +260,17 @@ local function _parseMudLine(line)
     -- 1) You <verb>, 'text'
     verb, text = line:match("^You%s+(%w+),%s+'(.*)'$")
     if verb and text then
-        return {
-            speaker = "You",
-            channel = _mapVerbToChannel(verb),
-            target = nil,
-            text = _normText(text),
-            rawVerb = verb,
-        }
+        local ch = _mapVerbToChannel(verb)
+        if ch ~= "" then
+            return {
+                speaker = "You",
+                channel = ch,
+                target = nil,
+                text = _normText(text),
+                rawVerb = verb,
+            }
+        end
+        return nil
     end
 
     -- 2) <Name> <verb>, 'text'  (says/gossips/shouts/yells/congrats/asks)
@@ -336,22 +380,24 @@ function M.ingestMudLine(line, meta)
         return false, "ingestMudLine(line): line must be a non-empty string"
     end
 
-    local parsed = _parseMudLine(line)
-    if not parsed then
-        -- Unknown format: safe ignore or route to Other? Here we route as Other by leaving channel blank.
-        -- Caller can provide meta.allow to filter if preferred.
-        return M.push(meta.channel or "", _normText(line), {
-            source = meta.source or "capture:mud",
-            speaker = meta.speaker,
-            target = meta.target,
-            raw = meta.raw or line,
-            ts = meta.ts,
-            profileTag = meta.profileTag,
-            allow = meta.allow,
-        })
+    -- Chat-only milestone:
+    -- Drop prompts / empty / non-chat lines so Chat UI remains chat-focused.
+    if _looksLikePrompt(line) then
+        return true, nil
     end
 
-    -- Route text (no channel prefix here). UI will add [CHANNEL] when needed.
+    local parsed = _parseMudLine(line)
+    if not parsed then
+        -- Non-chat: ignore (SAFE, not an error).
+        return true, nil
+    end
+
+    -- If parse produced an unmapped channel, treat as non-chat.
+    if type(parsed.channel) ~= "string" or parsed.channel == "" then
+        return true, nil
+    end
+
+    -- Route parsed chat line. UI will add [CHANNEL] when needed.
     return M.push(parsed.channel, parsed.text, {
         source = meta.source or "capture:mud",
         speaker = parsed.speaker,
