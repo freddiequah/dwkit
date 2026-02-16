@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.chat_ui
 -- Owner       : UI
--- Version     : v2026-02-12C
+-- Version     : v2026-02-15A
 -- Purpose     :
 --   - SAFE Chat UI (consumer-only) displaying ChatLogService buffer.
 --   - Renders a DWKit-themed container with a tab row:
@@ -27,50 +27,28 @@
 -- Notes:
 --   - Tab definitions are LOCKED by agreement v2026-02-10C.
 --   - chat_ui is a DIRECT-CONTROL UI (see UI Manager direct-control rule).
---   - Layout invariants:
---       * No title/tab overlap: rely on ui_window content being true "Inside" area.
---       * No bottom wasted gap: console fills remaining space above input deterministically.
---   - IMPORTANT: Some Mudlet/Geyser builds do not reliably honor:
---       (a) negative-y anchors inside nested Containers
---       (b) height="100%" resizing inside Qt-wrapped containers
---     We therefore reflow using measured pixel sizes, and also force bodyFill to match
---     bundle.content pixel size before laying out console/input.
 --
 -- Key Fixes:
---   v2026-02-11M:
---     - Avoid negative-y and negative-height semantics entirely (create with neutral geometry,
---       then force pixel-perfect reflow).
---     - Add a small bottomFudge (default 22px) because some builds under-report content height,
---       leaving a visible strip at the bottom.
---   v2026-02-11N:
---     - Reflow on resize (event-driven, no timers): hook sysWindowResizeEvent (and best-effort
---       frame resize callbacks when available).
---   v2026-02-12A:
---     - HARDEN: also hook best-effort "user window resized" events (varies by build) and filter
---       to this UI's frame name when event args provide a target.
---   v2026-02-12B:
---     - FIX: rely on ui_window Adjustable resize hook (opts.onResize) so reflow is triggered when
---       user drags-resizes the Adjustable container (not just main Mudlet window resize).
 --   v2026-02-12C:
 --     - NEW: render first-class message target (item.target) for PRIVATE channels.
+--   v2026-02-15A:
+--     - NEW: wire real capture via ui_dependency_service provider "chat_watch" (dwkit.capture.chat_capture).
 -- #########################################################################
 
 local M                         = {}
 
-M.VERSION                       = "v2026-02-12C"
+M.VERSION                       = "v2026-02-15A"
 
 local PREFIX                    = (DWKit and DWKit.getEventPrefix and DWKit.getEventPrefix()) or "DWKit:"
 local LogSvc                    = require("dwkit.services.chat_log_service")
 local UIW                       = require("dwkit.ui.ui_window")
 local U                         = require("dwkit.ui.ui_base")
+local Dep                       = require("dwkit.services.ui_dependency_service")
 
 local EV_SVC_CHATLOG_UPDATED    = PREFIX .. "Service:ChatLog:Updated"
 
--- Mudlet resize events (best-effort; names can vary by build)
 local EV_SYS_WINDOW_RESIZE      = "sysWindowResizeEvent"
 
--- Best-effort "user window" resize events (these are known to vary by Mudlet build / scripts).
--- We register them anyway; if they don't exist, they simply never fire.
 local EV_USER_RESIZE_CANDIDATES = {
     "sysUserWindowResizeEvent",
     "sysUserWindowResizedEvent",
@@ -82,7 +60,6 @@ local EV_USER_RESIZE_CANDIDATES = {
 local UI_ID                     = "chat_ui"
 local TITLE                     = "Chat"
 
--- Tab definitions (LOCKED by agreement v2026-02-10C)
 local TAB_ORDER                 = { "All", "SAY", "PRIVATE", "PUBLIC", "GRATS", "Other" }
 
 local PRIVATE_CH                = { TELL = true, ASK = true, WHISPER = true }
@@ -95,17 +72,16 @@ local st                        = {
     bodyFill = nil,
 
     tabBar = nil,
-    tabButtons = {}, -- map tab -> label obj
+    tabButtons = {},
 
     consoleHost = nil,
     console = nil,
 
     inputHost = nil,
-    input = nil,        -- Geyser.CommandLine or best-effort widget
-    enableInput = true, -- DEFAULT ON
-    sendToMud = false,  -- DEFAULT OFF
+    input = nil,
+    enableInput = true,
+    sendToMud = false,
 
-    -- Layout computed at create time
     layout = {
         tabH = 24,
         insetY = 0,
@@ -114,14 +90,13 @@ local st                        = {
         usedHostFill = true,
 
         inputH = 26,
-        inputGapY = 0, -- DEFAULT 0 (no gap)
+        inputGapY = 0,
         yConsole = 0,
         usedInput = true,
-        inputKind = "none", -- "commandline" | "fallback" | "none"
+        inputKind = "none",
 
-        bottomFudge = 22,   -- some builds under-report contentH; add small fudge to eliminate bottom strip
+        bottomFudge = 22,
 
-        -- measured (best-effort)
         measured = {
             contentW = nil,
             contentH = nil,
@@ -135,17 +110,15 @@ local st                        = {
         },
     },
 
-    -- ChatLog update handler wiring
     handler = nil,
-    handlerKind = nil, -- "anon" | "named4" | "named3" | nil
-    handlerKey = nil,  -- for named: { group=, name=, event= }
+    handlerKind = nil,
+    handlerKey = nil,
 
-    -- Resize handler wiring (event-driven, no timers)
-    resizeHandlers = nil, -- { {id=, kind=, key=, event=} ... }
+    resizeHandlers = nil,
 
     activeTab = "All",
-    unread = {},     -- map tab -> count
-    lastSeenId = {}, -- map tab -> last seen id
+    unread = {},
+    lastSeenId = {},
     lastRenderedId = 0,
 }
 
@@ -190,7 +163,6 @@ local function _mkLine(item)
     local chRaw   = _isNonEmptyString(item.channel) and item.channel or ""
     local chan    = (chRaw ~= "" and ("[" .. chRaw .. "] ") or "")
 
-    -- If target exists, render it as an arrow for private channels (and also OK for others if ever used).
     if speaker and target then
         return string.format("%s%s -> %s: %s", chan, speaker, target, tostring(item.text))
     end
@@ -407,9 +379,6 @@ local function _focusInputBestEffort()
     end
 end
 
--- ---------------------------
--- Reflow helpers (key fix)
--- ---------------------------
 local function _num(v)
     v = tonumber(v)
     return (v and v > 0) and v or nil
@@ -476,7 +445,6 @@ local function _reflowLayoutBestEffort()
         return false
     end
 
-    -- Some builds under-report content height (leaves visible strip). Add a small fudge.
     local fudge = tonumber(st.layout.bottomFudge or 0) or 0
     local targetH = math.max(0, contentH + fudge)
 
@@ -678,9 +646,9 @@ end
 
 local function _eventMentionsThisFrameBestEffort(...)
     local frameName = (st.bundle and st.bundle.meta and st.bundle.meta.nameFrame) and tostring(st.bundle.meta.nameFrame) or
-        ""
+    ""
     local contentName = (st.bundle and st.bundle.meta and st.bundle.meta.nameContent) and
-        tostring(st.bundle.meta.nameContent) or ""
+    tostring(st.bundle.meta.nameContent) or ""
 
     if frameName == "" and contentName == "" then
         return true
@@ -744,7 +712,7 @@ local function _ensureResizeReflowWiring()
         if ok and id ~= nil then
             table.insert(st.resizeHandlers,
                 { id = id, kind = "named4", key = { group = group, name = name, event = ev }, event = ev })
-            return true
+            return true, nil
         end
         return false
     end
@@ -816,6 +784,13 @@ local function _ensureUi(opts)
         end,
 
         onClose = function(bundle)
+            -- Best-effort: release capture provider on close (direct-control UI)
+            pcall(function()
+                if type(Dep) == "table" and type(Dep.releaseUi) == "function" then
+                    Dep.releaseUi(UI_ID, { source = "chat_ui:onClose", quiet = true })
+                end
+            end)
+
             st.visible = false
             _unregisterHandlerBestEffort()
             _unregisterResizeHandlersBestEffort()
@@ -1074,6 +1049,22 @@ local function _getItemsBestEffort()
     return {}, {}
 end
 
+local function _depEnsureChatWatchBestEffort(source)
+    if type(Dep) == "table" and type(Dep.ensureUi) == "function" then
+        pcall(function()
+            Dep.ensureUi(UI_ID, { "chat_watch" }, { source = source or "chat_ui:dep:ensure", quiet = true })
+        end)
+    end
+end
+
+local function _depReleaseChatWatchBestEffort(source)
+    if type(Dep) == "table" and type(Dep.releaseUi) == "function" then
+        pcall(function()
+            Dep.releaseUi(UI_ID, { source = source or "chat_ui:dep:release", quiet = true })
+        end)
+    end
+end
+
 function M.getVersion()
     return M.VERSION
 end
@@ -1115,6 +1106,9 @@ function M.show(opts)
     st.visible = true
     pcall(U.setUiStateVisibleBestEffort, UI_ID, true)
 
+    -- NEW: claim chat_watch provider while visible (best-effort gate for real capture -> router)
+    _depEnsureChatWatchBestEffort("chat_ui:show")
+
     pcall(_ensureResizeReflowWiring)
     pcall(_reflowLayoutBestEffort)
 
@@ -1138,6 +1132,9 @@ function M.hide(opts)
     _unregisterHandlerBestEffort()
     _unregisterResizeHandlersBestEffort()
     pcall(U.setUiStateVisibleBestEffort, UI_ID, false)
+
+    -- NEW: release chat_watch provider when hidden (best-effort)
+    _depReleaseChatWatchBestEffort("chat_ui:hide")
 
     return true
 end
@@ -1197,6 +1194,9 @@ end
 function M.dispose()
     _unregisterHandlerBestEffort()
     _unregisterResizeHandlersBestEffort()
+
+    -- NEW: release provider on dispose (best-effort)
+    _depReleaseChatWatchBestEffort("chat_ui:dispose")
 
     if type(st.bundle) == "table" and type(st.bundle.frame) == "table" then
         pcall(function() U.safeHide(st.bundle.frame, UI_ID, { source = "chat_ui:dispose" }) end)
