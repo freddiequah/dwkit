@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-23J
+-- Version     : v2026-02-23K
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-23J"
+M.VERSION = "v2026-02-23K"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -177,7 +177,7 @@ local SUITES = {
             },
             {
                 cmd =
-                'lua do local UI=require("dwkit.ui.chat_manager_ui"); local Mgr=require("dwkit.services.chat_manager"); local pre=(Mgr.getFeature("all_unread_badge")==true); local want=(not pre); local okSet,errSet=Mgr.setFeature("all_unread_badge", want, {source="dwverify:cm:live:set", apply=false}); if okSet==false then error("setFeature failed: "..tostring(errSet)) end; UI.refresh({source="dwverify:cm:live:refresh1",force=false}); local dbg=UI.getLayoutDebug(); local row=(dbg.rowWidgets or {}).all_unread_badge; if type(row)~="table" then error("Missing rowWidgets all_unread_badge after refresh") end; local got=tostring(row.toggleText or ""); local wantTxt=want and "ON" or "OFF"; if not got:find(wantTxt,1,true) then error("Expected toggleText to include "..wantTxt.."; got "..got) end; print(string.format("[dwverify-cm] PASS live_readback all_unread_badge %s->%s toggleText=%s", tostring(pre), tostring(want), got)) end',
+                'lua do local UI=require("dwkit.ui.chat_manager_ui"); local Mgr=require("dwkit.services.chat_manager"); local pre=(Mgr.getFeature("all_unread_badge")==true); local want=(not pre); local okSet,errSet=Mgr.setFeature("all_unread_badge", want, {source="dwverify:cm:live:set", apply=false}); if okSet==false then error("setFeature failed: "..tostring(errSet)) end; UI.refresh({source="dwverify:cm:live:refresh1",force=false}); local dbg=UI.getLayoutDebug(); local row=(dbg.rowWidgets or {}).all_unread_badge; if type(row)~="table" then error("Missing rowWidgets all_unread_badge after refresh") end; local got=tostring(row.toggleText or ""); local wantTxt=want and "Disable" or "Enable"; if not got:find(wantTxt,1,true) then error("Expected toggleText to include "..wantTxt.."; got "..got) end; print(string.format("[dwverify-cm] PASS live_readback all_unread_badge %s->%s toggleText=%s", tostring(pre), tostring(want), got)) end',
                 note =
                 "ASSERT: external setFeature(apply=false) + refresh(force=false) updates toggleText deterministically.",
             },
