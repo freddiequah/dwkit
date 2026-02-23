@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_manager
 -- Owner       : UI
--- Version     : v2026-02-23C
+-- Version     : v2026-02-23D
 -- Purpose     :
 --   - SAFE dispatcher for applying UI modules registered in gui_settings.
 --   - Provides manual-only "apply all" and "apply one" capability.
@@ -27,11 +27,15 @@
 --       Prefer default=false queries first when probing isVisible/getVisible signatures.
 --       This prevents chat_ui (direct-control) or any UI from auto-showing due to
 --       probe order when visible persistence is OFF or signatures vary.
+--
+--   v2026-02-23D:
+--     - NEW: seed chat_manager_ui into gui_settings defaults so it appears in UI Manager
+--       list on new profiles (default enabled=false, visible=false).
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-23C"
+M.VERSION = "v2026-02-23D"
 
 local function _rawOut(line)
     line = tostring(line or "")
@@ -897,6 +901,10 @@ M.KNOWN_UI_DEFAULTS = {
     -- Direct-control UI: ensure it appears in UI Manager list on new profiles.
     -- Default OFF so it does not auto-run unless user enables it.
     chat_ui = { enabled = false, visible = false },
+
+    -- NEW: ensure Chat Manager UI appears in UI Manager list on new profiles.
+    -- Default OFF so it does not auto-run unless user enables it.
+    chat_manager_ui = { enabled = false, visible = false },
 }
 
 function M.seedRegisteredDefaults(opts)
