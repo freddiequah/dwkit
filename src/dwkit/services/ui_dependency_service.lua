@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.ui_dependency_service
 -- Owner       : Services
--- Version     : v2026-02-15A
+-- Version     : v2026-02-16A
 -- Purpose     :
 --   - Dependency-safe lifecycle management for passive "providers" required by enabled UIs (Model A).
 --   - Providers are SAFE passive capture watchers (triggers/hooks) and MUST NOT send gameplay commands.
@@ -23,11 +23,14 @@
 -- Notes:
 --   - This service is in-memory only; it does not persist dependency claims.
 --   - If a provider is already installed externally, we treat it as external and will NOT uninstall it.
+--   - Transaction safety:
+--       * ensureUi will not mutate refs/claims unless all new providers ensure successfully.
+--       * releaseUi will not mutate refs/claims unless all required provider stops succeed.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-15A"
+M.VERSION = "v2026-02-16A"
 
 local ROOT = {
     uiClaims = {},  -- uiId -> { providerId=true, ... }
@@ -92,6 +95,22 @@ local function _providerState(providerId)
         ROOT.providers[providerId] = st
     end
     return st
+end
+
+local function _refsGet(pid)
+    return tonumber(ROOT.refs[pid] or 0) or 0
+end
+
+local function _refsClone()
+    local t = {}
+    for pid, v in pairs(ROOT.refs) do
+        t[pid] = tonumber(v or 0) or 0
+    end
+    return t
+end
+
+local function _refsCommit(newRefs)
+    ROOT.refs = newRefs
 end
 
 -- ----------------------------
@@ -261,14 +280,9 @@ local function _ensureProvider(providerId, opts)
     return false, "unknown providerId: " .. tostring(providerId)
 end
 
-local function _releaseProviderIfUnused(providerId, opts)
+local function _stopProvider(providerId, opts)
     opts = (type(opts) == "table") and opts or {}
     providerId = tostring(providerId or "")
-
-    local rc = tonumber(ROOT.refs[providerId] or 0) or 0
-    if rc > 0 then
-        return true, nil
-    end
 
     local st = _providerState(providerId)
 
@@ -387,28 +401,54 @@ function M.ensureUi(uiId, providers, opts)
     local prevSet = ROOT.uiClaims[uiId]
     if type(prevSet) ~= "table" then prevSet = {} end
 
+    -- Determine which providers are newly added vs already claimed.
+    local toAdd = {}
     for pid, v in pairs(nextSet) do
         if v == true and prevSet[pid] ~= true then
-            ROOT.refs[pid] = (tonumber(ROOT.refs[pid] or 0) or 0) + 1
+            toAdd[#toAdd + 1] = pid
+        end
+    end
+
+    -- Transaction step 1: ensure all newly-added providers first (no state mutation yet).
+    for _, pid in ipairs(toAdd) do
+        local ok, err = _ensureProvider(pid, opts)
+        if not ok then
+            return false, tostring(err)
+        end
+    end
+
+    -- Transaction step 2: compute and commit new refs + claims.
+    local newRefs = _refsClone()
+
+    for pid, v in pairs(nextSet) do
+        if v == true and prevSet[pid] ~= true then
+            newRefs[pid] = (tonumber(newRefs[pid] or 0) or 0) + 1
         end
     end
 
     for pid, v in pairs(prevSet) do
         if v == true and nextSet[pid] ~= true then
-            ROOT.refs[pid] = (tonumber(ROOT.refs[pid] or 0) or 0) - 1
-            if (tonumber(ROOT.refs[pid] or 0) or 0) < 0 then
-                ROOT.refs[pid] = 0
+            newRefs[pid] = (tonumber(newRefs[pid] or 0) or 0) - 1
+            if (tonumber(newRefs[pid] or 0) or 0) < 0 then
+                newRefs[pid] = 0
             end
         end
     end
 
     ROOT.uiClaims[uiId] = nextSet
+    _refsCommit(newRefs)
 
-    for pid, v in pairs(nextSet) do
-        if v == true then
-            local ok, err = _ensureProvider(pid, opts)
-            if not ok then
-                return false, tostring(err)
+    -- Step 3: for removed providers that may have hit 0, stop if unused.
+    for pid, v in pairs(prevSet) do
+        if v == true and nextSet[pid] ~= true then
+            local rc = tonumber(ROOT.refs[pid] or 0) or 0
+            if rc <= 0 then
+                local ok, err = _stopProvider(pid, opts)
+                if not ok then
+                    -- NOTE: We do not roll back committed claims/refs here to avoid flip-flop;
+                    --       caller can retry release. Provider state records lastErr.
+                    return false, tostring(err)
+                end
             end
         end
     end
@@ -429,23 +469,33 @@ function M.releaseUi(uiId, opts)
         return true, nil
     end
 
+    -- Compute would-be refs after removing this UI's claims (no commit yet).
+    local newRefs = _refsClone()
     for pid, v in pairs(prevSet) do
         if v == true then
-            ROOT.refs[pid] = (tonumber(ROOT.refs[pid] or 0) or 0) - 1
-            if (tonumber(ROOT.refs[pid] or 0) or 0) < 0 then
-                ROOT.refs[pid] = 0
+            newRefs[pid] = (tonumber(newRefs[pid] or 0) or 0) - 1
+            if (tonumber(newRefs[pid] or 0) or 0) < 0 then
+                newRefs[pid] = 0
             end
         end
     end
 
-    ROOT.uiClaims[uiId] = nil
-
-    for pid, _ in pairs(prevSet) do
-        local ok, err = _releaseProviderIfUnused(pid, opts)
-        if not ok then
-            return false, tostring(err)
+    -- Transaction step 1: attempt to stop any providers that would drop to 0.
+    for pid, v in pairs(prevSet) do
+        if v == true then
+            local rcAfter = tonumber(newRefs[pid] or 0) or 0
+            if rcAfter <= 0 then
+                local ok, err = _stopProvider(pid, opts)
+                if not ok then
+                    return false, tostring(err)
+                end
+            end
         end
     end
+
+    -- Transaction step 2: commit refs + claims removal.
+    ROOT.uiClaims[uiId] = nil
+    _refsCommit(newRefs)
 
     return true, nil
 end

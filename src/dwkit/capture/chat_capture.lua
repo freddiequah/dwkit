@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.capture.chat_capture
 -- Owner       : Capture
--- Version     : v2026-02-15B
+-- Version     : v2026-02-16A
 -- Purpose     :
 --   - SAFE passive capture of MUD output lines for chat parsing.
 --   - Installs a single tempRegexTrigger line hook (^(.*)$) and forwards lines to:
@@ -11,6 +11,7 @@
 --
 -- Public API:
 --   - getVersion() -> string
+--   - isInstalled() -> boolean
 --   - install(opts?) -> boolean ok, string|nil err
 --   - uninstall(opts?) -> boolean ok, string|nil err
 --   - getDebugState() -> table
@@ -24,7 +25,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-15B"
+M.VERSION = "v2026-02-16A"
 
 local Ctx = require("dwkit.core.mudlet_ctx")
 
@@ -36,7 +37,7 @@ local ROOT = {
     lastErr = nil,
     lastLine = nil,
 
-    -- NEW: ignore breadcrumbs (why we dropped a line before forwarding)
+    -- ignore breadcrumbs (why we dropped a line before forwarding)
     lastIgnoreTs = nil,
     lastIgnoreKind = nil, -- "empty" | "prompt"
     lastIgnoreLine = nil,
@@ -104,6 +105,11 @@ function M.getVersion()
     return tostring(M.VERSION or "unknown")
 end
 
+-- NEW: deterministic provider contract (preferred by manager)
+function M.isInstalled()
+    return (ROOT.installed == true and ROOT.lineTriggerId ~= nil) and true or false
+end
+
 function M.getDebugState()
     return {
         installed = (ROOT.installed == true),
@@ -149,11 +155,9 @@ function M.install(opts)
         return false, ROOT.lastErr
     end
 
-    -- Install a single catch-all line hook. We keep processing minimal and SAFE.
     local trigId = ctx.tempRegexTrigger("^(.*)$", function()
         local line = ""
         if type(_G) == "table" and type(_G.matches) == "table" then
-            -- matches[1] usually contains the full line for tempRegexTrigger("^(.*)$", ...)
             line = tostring(_G.matches[1] or _G.matches[0] or "")
         end
 

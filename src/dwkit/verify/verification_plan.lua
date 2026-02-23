@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-10D"
+M.VERSION = "v2026-02-22A"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -361,6 +361,45 @@ local SUITES = {
         },
     },
 
+    -- NEW: Chat command surface smoke suite (Phase 1)
+    chat_smoke = {
+        title = "chat_smoke",
+        description =
+        "Phase 1 dwchat surface: enable/disable/visible semantics, tabs/tab, clear, send/input toggles. SAFE only; no gameplay sends required.",
+        delay = 0.30,
+        steps = {
+            { cmd = "dwcommands safe",  note = "Confirm dwchat appears in SAFE list (registry wiring + alias wiring)." },
+
+            { cmd = "dwchat disable",   note = "Disable persists enabled=OFF and forces visible OFF + disposes best-effort." },
+            { cmd = "dwchat status",    note = "Expect enabled=false visible=false." },
+
+            { cmd = "dwchat",           note = "Default open/show. Should persist enabled=ON and set visible=ON (session)." },
+            { cmd = "dwchat status",    note = "Expect enabled=true visible=true." },
+
+            { cmd = "dwchat tabs",      note = "Expect: All, SAY, PRIVATE, PUBLIC, GRATS, Other." },
+            { cmd = "dwchat tab SAY",   note = "Switch active tab to SAY." },
+            { cmd = "dwchat status",    note = "Expect activeTab=SAY." },
+            { cmd = "dwchat tab Other", note = "Switch active tab to Other." },
+
+            { cmd = "dwchat clear",     note = "Clear chat log (service or UI). Should not error." },
+
+            { cmd = "dwchat send on",   note = "Flip sendToMud ON (still manual-on-Enter only)." },
+            { cmd = "dwchat send off",  note = "Flip sendToMud OFF." },
+
+            { cmd = "dwchat input off", note = "Best-effort input OFF." },
+            { cmd = "dwchat input on",  note = "Best-effort input ON." },
+
+            { cmd = "dwchat hide",      note = "Hide UI (visible OFF), enabled should remain true." },
+            { cmd = "dwchat status",    note = "Expect visible=false enabled=true." },
+
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); local en=(type(gs.isEnabled)=="function") and (gs.isEnabled("chat_ui",false)==true) or false; local UI=require("dwkit.ui.chat_ui"); local s=UI.getState(); print(string.format("[dwverify-chat] enabled=%s visible=%s activeTab=%s", tostring(en), tostring(s and s.visible), tostring(s and s.activeTab))) end',
+                note = "Authoritative check: enabled from gui_settings, visible/tab from chat_ui.getState().",
+            },
+        },
+    },
+
     -- (rest of your suites unchanged)
     -- NOTE: Keeping everything else exactly as provided to avoid collateral breakage.
 
@@ -388,7 +427,7 @@ local SUITES = {
             {
                 cmd =
                 'lua do local gs=require("dwkit.config.gui_settings"); gs.setEnabled("roomentities_ui",false,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("roomentities_ui",{source="dwverify:ui_dep:disable"}); if ok==false then error("applyOne(roomentities_ui) failed: "..tostring(err)) end; local Dep=require("dwkit.services.ui_dependency_service"); local st=Dep.getState(); local rc=0; if type(st)=="table" and type(st.refs)=="table" then rc=tonumber(st.refs["roomfeed_watch"] or 0) or 0 end; local C=require("dwkit.capture.roomfeed_capture"); local installed=false; if type(C.getDebugState)=="function" then local s=C.getDebugState(); installed=(s and s.installed==true) end; if rc~=0 then error("Expected refcount=0 after disable; got "..tostring(rc)) end; if installed==true then error("Expected provider uninstalled after disable (manager-owned); installed still true") end; print(string.format("[dwverify-ui-dep] PASS disable rc=%s installed=%s", tostring(rc), tostring(installed))) end',
-                note = "Disable then applyOne; ASSERT: refcount=0 and provider uninstalled (when manager-owned).",
+                note = "Disable then applyOne; ASSERT: refcount=0 and provider uninstalled (manager-owned).",
             },
 
             { cmd = "dwroom watch on",  note = "External install: user turns on watcher manually (external-owned)." },

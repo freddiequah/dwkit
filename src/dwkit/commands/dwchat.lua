@@ -1,0 +1,592 @@
+-- #########################################################################
+-- Module Name : dwkit.commands.dwchat
+-- Owner       : Commands
+-- Version     : v2026-02-23A
+-- Purpose     :
+--   - Command handler for "dwchat" (SAFE)
+--   - Phase 1 objective: provide a deterministic command surface to control chat_ui:
+--       * open/show (default)
+--       * hide/close
+--       * toggle
+--       * status (prints state)
+--       * enable/disable (persist enabled flag; does NOT auto-show unless requested)
+--       * tabs (prints available tabs)
+--       * tab <name> (switch active tab)
+--       * clear (clears chat log)
+--       * send on|off (controls chat_ui sendToMud flag; still manual-on-enter only)
+--       * input on|off (best-effort input enable; may require chat_ui already created)
+--
+-- Design notes:
+--   - Direct-control UI: chat_ui is applied via dwkit.ui.ui_manager.applyOne("chat_ui")
+--     so dependency claims are handled centrally (ui_dependency_service via ui_manager).
+--   - Visible is session-only by default (noSave=true).
+--   - SAFE: no gameplay commands, no timers, no hidden automation.
+--
+-- Status semantics (FIX v2026-02-22B):
+--   - "enabled" must be sourced from gui_settings (authoritative), not chat_ui.getState().
+--   - "visible" prefers chat_ui.getState().visible; fallback to ui_base runtime store state.visible.
+--
+-- Sync semantics (FIX v2026-02-23A):
+--   - hide/close/disable/toggle must go through ui_manager.applyOne("chat_ui")
+--     so LaunchPad + runtime-visible stay in sync (applyOne triggers launchpad refresh).
+--   - ui_manager_ui row refresh is best-effort (only if module is present/open).
+--
+-- Public API:
+--   - dispatch(ctx, tokens)
+--   - dispatch(tokens)   (best-effort)
+-- #########################################################################
+
+local M = {}
+
+M.VERSION = "v2026-02-23A"
+
+local function _out(ctx, line)
+    if type(ctx) == "table" and type(ctx.out) == "function" then
+        ctx.out(line)
+        return
+    end
+    if type(cecho) == "function" then
+        cecho(tostring(line or "") .. "\n")
+    elseif type(echo) == "function" then
+        echo(tostring(line or "") .. "\n")
+    else
+        print(tostring(line or ""))
+    end
+end
+
+local function _err(ctx, msg)
+    _out(ctx, "[DWKit Chat] ERROR: " .. tostring(msg))
+end
+
+local function _isArrayLike(t)
+    if type(t) ~= "table" then return false end
+    local n = #t
+    if n == 0 then return false end
+    for i = 1, n do
+        if t[i] == nil then return false end
+    end
+    return true
+end
+
+local function _parseTokens(tokens)
+    if not (_isArrayLike(tokens) and tostring(tokens[1] or "") == "dwchat") then
+        return "", "", ""
+    end
+    local sub = tostring(tokens[2] or "")
+    local uiId = tostring(tokens[3] or "")
+    local arg3 = tostring(tokens[4] or "")
+    return sub, uiId, arg3
+end
+
+local function _safeRequire(ctx, modName)
+    if type(ctx) == "table" and type(ctx.safeRequire) == "function" then
+        local ok, modOrErr = ctx.safeRequire(modName)
+        if ok and type(modOrErr) == "table" then
+            return true, modOrErr, nil
+        end
+        return false, nil, tostring(modOrErr)
+    end
+    local ok, modOrErr = pcall(require, modName)
+    if ok and type(modOrErr) == "table" then
+        return true, modOrErr, nil
+    end
+    return false, nil, tostring(modOrErr)
+end
+
+local function _getGuiSettingsFromCtx(ctx)
+    if type(ctx) == "table" and type(ctx.getGuiSettings) == "function" then
+        local ok, gs = pcall(ctx.getGuiSettings)
+        if ok and type(gs) == "table" then
+            return gs
+        end
+    end
+    return nil
+end
+
+local function _ensureVisiblePersistenceSession(gs)
+    if type(gs) ~= "table" or type(gs.enableVisiblePersistence) ~= "function" then
+        return true
+    end
+    pcall(gs.enableVisiblePersistence, { noSave = true })
+    return true
+end
+
+local function _setEnabled(gs, on)
+    if type(gs) ~= "table" or type(gs.setEnabled) ~= "function" then
+        return false, "guiSettings.setEnabled not available"
+    end
+    local ok, err = gs.setEnabled("chat_ui", (on == true), nil) -- persisted enable/disable
+    if ok ~= true then
+        return false, tostring(err or "setEnabled failed")
+    end
+    return true, nil
+end
+
+local function _setVisibleSession(gs, on)
+    if type(gs) ~= "table" or type(gs.setVisible) ~= "function" then
+        return false, "guiSettings.setVisible not available"
+    end
+    local ok, err = gs.setVisible("chat_ui", (on == true), { noSave = true })
+    if ok ~= true then
+        return false, tostring(err or "setVisible failed")
+    end
+    return true, nil
+end
+
+local function _getCfgVisibleBestEffort(gs)
+    if type(gs) ~= "table" then return nil end
+
+    if type(gs.getVisible) == "function" then
+        local ok, v = pcall(gs.getVisible, "chat_ui", false)
+        if ok then return (v == true) end
+    end
+    if type(gs.isVisible) == "function" then
+        local ok, v = pcall(gs.isVisible, "chat_ui", false)
+        if ok then return (v == true) end
+    end
+    return nil
+end
+
+local function _refreshUiManagerUiBestEffort()
+    local ok, UI = pcall(require, "dwkit.ui.ui_manager_ui")
+    if not ok or type(UI) ~= "table" then return false end
+
+    -- Prefer refresh() (does not enforce ui_manager_ui visible flag)
+    if type(UI.refresh) == "function" then
+        pcall(UI.refresh, { source = "dwchat:sync", quiet = true })
+        return true
+    end
+
+    -- Fallback: apply() (may hide itself if cfg visible off)
+    if type(UI.apply) == "function" then
+        pcall(UI.apply, { source = "dwchat:sync", quiet = true })
+        return true
+    end
+
+    return false
+end
+
+local function _applyChatViaUiManager(ctx, source)
+    local okUM, UM = _safeRequire(ctx, "dwkit.ui.ui_manager")
+    if okUM and type(UM.applyOne) == "function" then
+        local okCall, okFlag, errOrNil = pcall(UM.applyOne, "chat_ui", { source = source or "dwchat", quiet = true })
+        if okCall and okFlag ~= false then
+            pcall(_refreshUiManagerUiBestEffort)
+            return true, nil
+        end
+        return false, tostring(errOrNil or "ui_manager.applyOne(chat_ui) failed")
+    end
+
+    -- fallback: direct chat_ui control (still SAFE; but may not sync launchpad)
+    local okUI, UI = _safeRequire(ctx, "dwkit.ui.chat_ui")
+    if okUI and type(UI.show) == "function" then
+        local okCall, errOrNil = pcall(UI.show, { source = source or "dwchat", fixed = false, noClose = false })
+        if okCall then
+            pcall(_refreshUiManagerUiBestEffort)
+            return true, nil
+        end
+        return false, tostring(errOrNil or "chat_ui.show failed")
+    end
+
+    return false, "ui_manager/chat_ui not available"
+end
+
+-- IMPORTANT: hide must go through ui_manager.applyOne so LaunchPad refresh occurs.
+local function _hideChatViaUiManagerBestEffort(ctx, source)
+    local okUM, UM = _safeRequire(ctx, "dwkit.ui.ui_manager")
+    if okUM and type(UM.applyOne) == "function" then
+        pcall(UM.applyOne, "chat_ui", { source = source or "dwchat:hide", quiet = true })
+        pcall(_refreshUiManagerUiBestEffort)
+        return true
+    end
+
+    -- fallback: direct hide (may not refresh launchpad)
+    local okUI, UI = _safeRequire(ctx, "dwkit.ui.chat_ui")
+    if okUI and type(UI.hide) == "function" then
+        pcall(UI.hide, { source = source or "dwchat:hide" })
+        pcall(_refreshUiManagerUiBestEffort)
+        return true
+    end
+
+    return true
+end
+
+-- Toggle MUST flip cfg visible then applyOne (direct chat_ui.toggle bypasses manager surfaces).
+local function _toggleViaUiManagerBestEffort(ctx, gs, source)
+    local cur = _getCfgVisibleBestEffort(gs)
+    if cur == nil then cur = false end
+
+    _ensureVisiblePersistenceSession(gs)
+    pcall(_setVisibleSession, gs, (cur ~= true))
+
+    return _applyChatViaUiManager(ctx, source or "dwchat:toggle")
+end
+
+-- FIX: enabled MUST be read from gui_settings; visible from chat_ui state or ui_base runtime fallback.
+local function _getRuntimeVisibleFallback()
+    local okB, U = pcall(require, "dwkit.ui.ui_base")
+    if not okB or type(U) ~= "table" or type(U.getUiStoreEntry) ~= "function" then
+        return nil
+    end
+    local okE, e = pcall(U.getUiStoreEntry, "chat_ui")
+    if not okE or type(e) ~= "table" or type(e.state) ~= "table" then
+        return nil
+    end
+    if e.state.visible == true then return true end
+    if e.state.visible == false then return false end
+    return nil
+end
+
+local function _printStatus(ctx, gs)
+    local enabled = nil
+    if type(gs) == "table" and type(gs.isEnabled) == "function" then
+        local okE, v = pcall(gs.isEnabled, "chat_ui", false)
+        if okE then enabled = (v == true) end
+    end
+    if enabled == nil then enabled = false end
+
+    local okUI, UI = _safeRequire(ctx, "dwkit.ui.chat_ui")
+
+    local visible = nil
+    local activeTab = "?"
+    local unreadOther = 0
+
+    if okUI and type(UI) == "table" and type(UI.getState) == "function" then
+        local okS, s = pcall(UI.getState)
+        if okS and type(s) == "table" then
+            if s.visible == true then visible = true end
+            if s.visible == false then visible = false end
+            if type(s.activeTab) == "string" then activeTab = s.activeTab end
+            unreadOther = (s.unread and s.unread.Other) or 0
+        end
+    end
+
+    if visible == nil then
+        local rt = _getRuntimeVisibleFallback()
+        if rt ~= nil then visible = rt end
+    end
+
+    if visible == nil then visible = false end
+
+    _out(ctx, string.format(
+        "[DWKit Chat] status visible=%s enabled=%s activeTab=%s unreadOther=%s",
+        tostring(visible),
+        tostring(enabled),
+        tostring(activeTab),
+        tostring(unreadOther)
+    ))
+    return true
+end
+
+local function _usage(ctx)
+    _out(ctx, "[DWKit Chat] Usage:")
+    _out(ctx, "  dwchat")
+    _out(ctx, "  dwchat open|show")
+    _out(ctx, "  dwchat hide|close")
+    _out(ctx, "  dwchat toggle")
+    _out(ctx, "  dwchat status")
+    _out(ctx, "  dwchat enable")
+    _out(ctx, "  dwchat disable")
+    _out(ctx, "  dwchat tabs")
+    _out(ctx, "  dwchat tab <All|SAY|PRIVATE|PUBLIC|GRATS|Other>")
+    _out(ctx, "  dwchat clear")
+    _out(ctx, "  dwchat send on|off")
+    _out(ctx, "  dwchat input on|off")
+end
+
+local function _parseOnOff(s)
+    s = tostring(s or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+    if s == "on" or s == "true" or s == "1" then return true end
+    if s == "off" or s == "false" or s == "0" then return false end
+    return nil
+end
+
+local function _printTabs(ctx)
+    local okUI, UI, e = _safeRequire(ctx, "dwkit.ui.chat_ui")
+    if not okUI then
+        return false, "chat_ui not available: " .. tostring(e)
+    end
+
+    local tabs = nil
+    if type(UI.getTabs) == "function" then
+        local ok, t = pcall(UI.getTabs)
+        if ok and type(t) == "table" then tabs = t end
+    end
+
+    if type(tabs) ~= "table" then
+        tabs = { "All", "SAY", "PRIVATE", "PUBLIC", "GRATS", "Other" }
+    end
+
+    _out(ctx, "[DWKit Chat] tabs: " .. tostring(table.concat(tabs, ", ")))
+    return true, nil
+end
+
+local function _setTab(ctx, tab)
+    tab = tostring(tab or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if tab == "" then
+        return false, "tab required"
+    end
+
+    local okUI, UI, e = _safeRequire(ctx, "dwkit.ui.chat_ui")
+    if not okUI then
+        return false, "chat_ui not available: " .. tostring(e)
+    end
+
+    if type(UI.setActiveTab) == "function" then
+        local ok, okFlag, errOrNil = pcall(UI.setActiveTab, tab, { source = "dwchat:tab" })
+        if ok and okFlag ~= false then
+            pcall(_refreshUiManagerUiBestEffort)
+            return true, nil
+        end
+        return false, tostring(errOrNil or "chat_ui.setActiveTab failed")
+    end
+
+    if type(UI.getTabs) == "function" then
+        return false, "chat_ui.setActiveTab not available"
+    end
+
+    return false, "chat_ui control API not available (missing setActiveTab)"
+end
+
+local function _clearChat(ctx)
+    local okUI, UI = _safeRequire(ctx, "dwkit.ui.chat_ui")
+    if okUI and type(UI.clear) == "function" then
+        local ok, okFlag, errOrNil = pcall(UI.clear, { source = "dwchat:clear" })
+        if ok and okFlag ~= false then
+            return true, nil
+        end
+        return false, tostring(errOrNil or "chat_ui.clear failed")
+    end
+
+    local okS, SvcOrErr = pcall(require, "dwkit.services.chat_log_service")
+    if okS and type(SvcOrErr) == "table" and type(SvcOrErr.clear) == "function" then
+        local ok2 = pcall(SvcOrErr.clear, { source = "dwchat:clear" })
+        if ok2 then
+            _out(ctx, "[DWKit Chat] cleared (chat_log_service)")
+            return true, nil
+        end
+        return false, "chat_log_service.clear failed"
+    end
+
+    return false, "clear not available (chat_ui.clear + chat_log_service.clear missing)"
+end
+
+local function _setSendToMud(ctx, on)
+    local okUI, UI, e = _safeRequire(ctx, "dwkit.ui.chat_ui")
+    if not okUI then
+        return false, "chat_ui not available: " .. tostring(e)
+    end
+    if type(UI.setSendToMud) ~= "function" then
+        return false, "chat_ui.setSendToMud not available"
+    end
+    local ok, okFlag, errOrNil = pcall(UI.setSendToMud, (on == true), { source = "dwchat:send" })
+    if ok and okFlag ~= false then
+        pcall(_refreshUiManagerUiBestEffort)
+        return true, nil
+    end
+    return false, tostring(errOrNil or "chat_ui.setSendToMud failed")
+end
+
+local function _setInputEnabled(ctx, on)
+    local okUI, UI, e = _safeRequire(ctx, "dwkit.ui.chat_ui")
+    if not okUI then
+        return false, "chat_ui not available: " .. tostring(e)
+    end
+    if type(UI.setInputEnabled) ~= "function" then
+        return false, "chat_ui.setInputEnabled not available"
+    end
+    local ok, okFlag, errOrNil = pcall(UI.setInputEnabled, (on == true), { source = "dwchat:input" })
+    if ok and okFlag ~= false then
+        pcall(_refreshUiManagerUiBestEffort)
+        return true, nil
+    end
+    return false, tostring(errOrNil or "chat_ui.setInputEnabled failed")
+end
+
+function M.dispatch(...)
+    local a1, a2 = ...
+    local ctx = nil
+    local tokens = nil
+
+    if type(a1) == "table" and _isArrayLike(a2) then
+        ctx = a1
+        tokens = a2
+    elseif _isArrayLike(a1) then
+        tokens = a1
+    else
+        return false, "invalid args"
+    end
+
+    local sub, arg2, arg3 = _parseTokens(tokens)
+    sub = tostring(sub or "")
+
+    if sub == "" then sub = "open" end
+
+    local gs = _getGuiSettingsFromCtx(ctx)
+    if type(gs) ~= "table" then
+        local okGS, gs2 = pcall(require, "dwkit.config.gui_settings")
+        if okGS and type(gs2) == "table" then gs = gs2 end
+    end
+    if type(gs) ~= "table" then
+        _err(ctx, "guiSettings not available")
+        return false, "guiSettings not available"
+    end
+
+    do
+        local okUM, UM = _safeRequire(ctx, "dwkit.ui.ui_manager")
+        if okUM and type(UM.seedRegisteredDefaults) == "function" then
+            pcall(UM.seedRegisteredDefaults, { save = false })
+        end
+    end
+
+    if sub == "status" then
+        _printStatus(ctx, gs)
+        return true, nil
+    end
+
+    if sub == "tabs" then
+        local ok, err = _printTabs(ctx)
+        if not ok then
+            _err(ctx, tostring(err))
+            return false, err
+        end
+        return true, nil
+    end
+
+    if sub == "tab" then
+        local tabName = tostring(arg2 or "")
+        if tabName == "" then
+            _usage(ctx)
+            return true, nil
+        end
+        local ok, err = _setTab(ctx, tabName)
+        if not ok then
+            _err(ctx, tostring(err))
+            return false, err
+        end
+        _out(ctx, "[DWKit Chat] tab set: " .. tostring(tabName))
+        return true, nil
+    end
+
+    if sub == "clear" then
+        local ok, err = _clearChat(ctx)
+        if not ok then
+            _err(ctx, tostring(err))
+            return false, err
+        end
+        _out(ctx, "[DWKit Chat] cleared")
+        return true, nil
+    end
+
+    if sub == "send" then
+        local v = _parseOnOff(arg2)
+        if v == nil then
+            _usage(ctx)
+            return true, nil
+        end
+        local ok, err = _setSendToMud(ctx, v)
+        if not ok then
+            _err(ctx, tostring(err))
+            return false, err
+        end
+        _out(ctx, "[DWKit Chat] sendToMud=" .. (v and "ON" or "OFF") .. " (manual on Enter)")
+        return true, nil
+    end
+
+    if sub == "input" then
+        local v = _parseOnOff(arg2)
+        if v == nil then
+            _usage(ctx)
+            return true, nil
+        end
+        local ok, err = _setInputEnabled(ctx, v)
+        if not ok then
+            _err(ctx, tostring(err))
+            return false, err
+        end
+        _out(ctx, "[DWKit Chat] input=" .. (v and "ON" or "OFF"))
+        return true, nil
+    end
+
+    if sub == "enable" then
+        local ok, err = _setEnabled(gs, true)
+        if not ok then
+            _err(ctx, "enable failed: " .. tostring(err))
+            return false, err
+        end
+        pcall(_refreshUiManagerUiBestEffort)
+        _out(ctx, "[DWKit Chat] enabled=ON (chat_ui)")
+        return true, nil
+    end
+
+    if sub == "disable" then
+        local ok, err = _setEnabled(gs, false)
+        if not ok then
+            _err(ctx, "disable failed: " .. tostring(err))
+            return false, err
+        end
+
+        _ensureVisiblePersistenceSession(gs)
+        pcall(_setVisibleSession, gs, false)
+
+        -- IMPORTANT: route through applyOne so LaunchPad sync occurs.
+        pcall(_applyChatViaUiManager, ctx, "dwchat:disable")
+
+        _out(ctx, "[DWKit Chat] enabled=OFF (chat_ui)")
+        return true, nil
+    end
+
+    if sub == "hide" or sub == "close" then
+        _ensureVisiblePersistenceSession(gs)
+        local okV, errV = _setVisibleSession(gs, false)
+        if not okV then
+            _err(ctx, "setVisible OFF failed: " .. tostring(errV))
+        end
+
+        -- IMPORTANT: use applyOne (not disposeOne) so LaunchPad refresh occurs.
+        _hideChatViaUiManagerBestEffort(ctx, "dwchat:hide")
+
+        _out(ctx, "[DWKit Chat] hidden (chat_ui)")
+        return true, nil
+    end
+
+    if sub == "toggle" then
+        local okT, errT = _toggleViaUiManagerBestEffort(ctx, gs, "dwchat:toggle")
+        if not okT and errT then
+            _err(ctx, "toggle failed: " .. tostring(errT))
+            return false, errT
+        end
+        _out(ctx, "[DWKit Chat] toggled (chat_ui)")
+        return true, nil
+    end
+
+    if sub == "open" or sub == "show" then
+        _ensureVisiblePersistenceSession(gs)
+
+        local okEn, errEn = _setEnabled(gs, true)
+        if not okEn then
+            _err(ctx, "enable failed: " .. tostring(errEn))
+            return false, errEn
+        end
+
+        local okVis, errVis = _setVisibleSession(gs, true)
+        if not okVis then
+            _err(ctx, "setVisible ON failed: " .. tostring(errVis))
+            return false, errVis
+        end
+
+        local okApply, errApply = _applyChatViaUiManager(ctx, "dwchat")
+        if not okApply then
+            _err(ctx, "apply failed: " .. tostring(errApply))
+            return false, errApply
+        end
+
+        _out(ctx, "[DWKit Chat] shown (dwchat)")
+        return true, nil
+    end
+
+    _usage(ctx)
+    return true, nil
+end
+
+return M
