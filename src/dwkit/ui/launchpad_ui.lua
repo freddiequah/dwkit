@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.launchpad_ui
 -- Owner       : UI
--- Version     : v2026-02-10A
+-- Version     : v2026-02-23A
 -- Purpose     :
 --   - Fixed, non-window LaunchPad button strip for temporary show/hide only.
 --   - Lists ONLY enabled UIs (excluding internal/admin surfaces).
@@ -24,7 +24,7 @@
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-02-10A"
+M.VERSION = "v2026-02-23A"
 
 local U = require("dwkit.ui.ui_base")
 local Theme = require("dwkit.ui.ui_theme")
@@ -90,6 +90,7 @@ local function _shortLabel(uiId)
 
     -- small, explicit mapping for common UIs (keeps strip legible)
     if uiId == "chat_ui" then return "CH" end
+    if uiId == "chat_manager_ui" then return "CM" end
     if uiId == "presence_ui" then return "PR" end
     if uiId == "roomentities_ui" then return "RO" end
 
