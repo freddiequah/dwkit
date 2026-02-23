@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.chat_ui
 -- Owner       : UI
--- Version     : v2026-02-23A
+-- Version     : v2026-02-23B
 -- Purpose     :
 --   - SAFE Chat UI (consumer-only) displaying ChatLogService buffer.
 --   - Renders a DWKit-themed container with a tab row:
@@ -16,14 +16,14 @@
 --       * Optional sendToMud=true will call send(text) ONLY on user submit (still manual).
 --   - No timers, no GMCP.
 --
--- Phase 2 (v2026-02-23A):
---   - Adds best-effort feature config surface consumed from chat_manager:
+-- Phase 2 (v2026-02-23B):
+--   - Feature effects are implemented (not just stored):
 --       * all_unread_badge (default OFF)
 --       * auto_scroll_follow (default OFF)
 --       * per_tab_line_limit (default OFF) + per_tab_line_limit_n (default 500)
 --       * timestamp_prefix (default OFF)
---       * debug_overlay (default OFF)
---   - Defaults preserve v1 behavior unchanged.
+--       * debug_overlay (default OFF)  -> ALSO affects layout (no extra gap when OFF)
+--   - Adds renderDebug instrumentation for deterministic dwverify assertions.
 --
 -- Public API:
 --   - getVersion() -> string
@@ -40,7 +40,7 @@
 --   - setSendToMud(on, opts?) -> boolean ok
 --   - setInputEnabled(on, opts?) -> boolean ok, string|nil err (best-effort)
 --
--- Phase 2 Control Surface (NEW):
+-- Phase 2 Control Surface:
 --   - setFeatureConfig(cfg, opts?) -> boolean ok (best-effort)
 --   - getFeatureConfig() -> table { features = {...} } (best-effort)
 --
@@ -53,7 +53,7 @@
 
 local M                         = {}
 
-M.VERSION                       = "v2026-02-23A"
+M.VERSION                       = "v2026-02-23B"
 
 local PREFIX                    = (DWKit and DWKit.getEventPrefix and DWKit.getEventPrefix()) or "DWKit:"
 local LogSvc                    = require("dwkit.services.chat_log_service")
@@ -97,10 +97,10 @@ local st                        = {
     enableInput = true,
     sendToMud = false,
 
-    -- NEW: optional debug label
+    -- debug label (slot; height collapses to 0 when feature OFF)
     debugLabel = nil,
 
-    -- NEW: feature config (defaults preserve v1)
+    -- Feature config (defaults preserve v1)
     featureCfg = {
         features = {
             all_unread_badge = false,
@@ -112,6 +112,21 @@ local st                        = {
         },
     },
 
+    -- Render instrumentation for deterministic dwverify
+    renderDebug = {
+        lastActiveTab = "All",
+        lastTabCount = 0,   -- count of items matching active tab (before slicing)
+        lastShownCount = 0, -- rendered lines count (after slicing)
+        lastLimitOn = false,
+        lastLimitN = nil,
+        lastTimestampOn = false,
+        lastDebugOverlayOn = false,
+        lastConsoleY = nil,
+        lastContentY = nil,
+        lastFirstLine = "",
+        lastLastLine = "",
+    },
+
     layout = {
         tabH = 24,
         insetY = 0,
@@ -119,9 +134,12 @@ local st                        = {
         yContent = 0,
         usedHostFill = true,
 
+        debugH = 16,  -- reserved height when debug overlay ON
+        yDebug = 0,   -- computed
+        yConsole = 0, -- computed
+
         inputH = 26,
         inputGapY = 0,
-        yConsole = 0,
         usedInput = true,
         inputKind = "none",
 
@@ -245,7 +263,6 @@ local function _scrollToBottomBestEffort()
     if feats.auto_scroll_follow ~= true then return end
     if type(st.console) ~= "table" then return end
 
-    -- Best-effort: call whichever exists.
     for _, fn in ipairs({ "scrollToEnd", "scrollToBottom", "scrollToBottomLine", "scrollEnd" }) do
         if type(st.console[fn]) == "function" then
             pcall(function() st.console[fn](st.console) end)
@@ -385,24 +402,6 @@ local function _renderTabButtons()
         _applyTabStyleBestEffort(tab)
     end
     _applyDebugLabelBestEffort()
-end
-
-local function _switchTab(tab)
-    tab = tostring(tab or "All")
-    local okTab = false
-    for _, t in ipairs(TAB_ORDER) do
-        if t == tab then
-            okTab = true
-            break
-        end
-    end
-    if not okTab then tab = "All" end
-
-    st.activeTab = tab
-    st.unread[tab] = 0
-    _renderTabButtons()
-
-    M.refresh({ source = "tab_switch", force = true })
 end
 
 local function _wireClickBestEffort(labelObj, fn)
@@ -569,6 +568,36 @@ local function _moveResizeBestEffort(obj, x, y, w, h)
     return okAny
 end
 
+local function _computeYConsoleBestEffort()
+    local feats = (st.featureCfg and st.featureCfg.features) or {}
+    local debugOn = (feats.debug_overlay == true)
+
+    local yContent = tonumber(st.layout.yContent or 0) or 0
+    local debugH = tonumber(st.layout.debugH or 0) or 0
+    if debugH < 0 then debugH = 0 end
+
+    st.layout.yDebug = yContent
+    st.layout.yConsole = yContent + (debugOn and debugH or 0)
+
+    st.renderDebug.lastDebugOverlayOn = debugOn
+    st.renderDebug.lastConsoleY = st.layout.yConsole
+    st.renderDebug.lastContentY = yContent
+
+    -- Best-effort: collapse debug label height when OFF
+    if type(st.debugLabel) == "table" then
+        if debugOn then
+            _moveResizeBestEffort(st.debugLabel, 0, yContent, "100%", debugH)
+        else
+            _moveResizeBestEffort(st.debugLabel, 0, yContent, "100%", 0)
+        end
+    end
+
+    -- Best-effort: move consoleHost to computed yConsole (height will be finalized in reflow)
+    if type(st.consoleHost) == "table" then
+        _moveResizeBestEffort(st.consoleHost, 0, st.layout.yConsole, "100%", "100%")
+    end
+end
+
 local function _reflowLayoutBestEffort()
     if type(st.bundle) ~= "table" or type(st.bundle.content) ~= "table" then return false end
     if type(st.bodyFill) ~= "table" then return false end
@@ -578,6 +607,9 @@ local function _reflowLayoutBestEffort()
     if not contentW or not contentH then
         return false
     end
+
+    -- recompute yConsole based on debug overlay flag (real feature effect)
+    pcall(_computeYConsoleBestEffort)
 
     local fudge = tonumber(st.layout.bottomFudge or 0) or 0
     local targetH = math.max(0, contentH + fudge)
@@ -979,6 +1011,32 @@ local function _ensureUi(opts)
     local btnW = math.floor(100 / #TAB_ORDER)
     local xPct = 0
 
+    local function _switchTab(tab)
+        tab = tostring(tab or "All")
+        local okTab = false
+        for _, t in ipairs(TAB_ORDER) do
+            if t == tab then
+                okTab = true
+                break
+            end
+        end
+        if not okTab then tab = "All" end
+
+        st.activeTab = tab
+        st.unread[tab] = 0
+
+        -- Feature: all_unread_badge uses st.unread["All"] as aggregate; clear when user views All.
+        if tab == "All" then
+            st.unread["All"] = 0
+            local seenAll = tonumber(st.lastSeenId["All"] or 0) or 0
+            st.lastSeenId["AllUnread"] = math.max(tonumber(st.lastSeenId["AllUnread"] or 0) or 0, seenAll)
+        end
+
+        _renderTabButtons()
+
+        M.refresh({ source = "tab_switch", force = true })
+    end
+
     for _, tab in ipairs(TAB_ORDER) do
         local btn = G.Label:new({
             name = tostring(st.bundle.meta.nameContent or "__DWKit_chat") .. "__tab__" .. tab,
@@ -999,25 +1057,20 @@ local function _ensureUi(opts)
         xPct = xPct + btnW
     end
 
-    -- NEW: debug label slot (below tab row; only visible when debug_overlay ON)
+    -- Debug label (height collapses to 0 when feature OFF)
     st.debugLabel = G.Label:new({
         name = tostring(st.bundle.meta.nameContent or "__DWKit_chat") .. "__debugLabel",
         x = 0,
         y = yContent,
         width = "100%",
-        height = 16,
+        height = 0,
     }, st.bodyFill)
 
-    local yConsole = yContent
-    -- If debug overlay enabled, console starts below debugLabel; else the label is transparent
-    yConsole = yContent + 16
-
-    st.layout.yConsole = yConsole
-
+    -- consoleHost starts at yConsole (computed dynamically)
     st.consoleHost = G.Container:new({
         name = tostring(st.bundle.meta.nameContent or "__DWKit_chat") .. "__consoleHost",
         x = 0,
-        y = yConsole,
+        y = yContent,
         width = "100%",
         height = "100%",
     }, st.bodyFill)
@@ -1214,6 +1267,7 @@ function M.getLayoutDebug()
         sendToMud = (st.sendToMud == true),
         layout = st.layout,
         featureCfg = st.featureCfg,
+        renderDebug = st.renderDebug,
     }
 end
 
@@ -1233,8 +1287,12 @@ function M.setFeatureConfig(cfg, opts)
         st.featureCfg.features[k] = v
     end
 
+    -- Feature effects: debug overlay affects layout, tabs may change labels (All unread)
     _renderTabButtons()
     _applyDebugLabelBestEffort()
+    if st.visible == true then
+        pcall(_reflowLayoutBestEffort)
+    end
 
     if st.visible == true and opts.apply ~= false then
         M.refresh({ source = opts.source or "chat_ui:setFeatureConfig", force = true })
@@ -1261,7 +1319,31 @@ function M.setActiveTab(tab, opts)
     opts = (type(opts) == "table") and opts or {}
     tab = tostring(tab or "")
     if tab == "" then return false, "tab required" end
-    _switchTab(tab)
+
+    -- Best-effort: mimic internal tab switching logic without duplicating click handler
+    local wanted = tab
+    local okTab = false
+    for _, t in ipairs(TAB_ORDER) do
+        if t == wanted then
+            okTab = true
+            break
+        end
+    end
+    if not okTab then wanted = "All" end
+
+    st.activeTab = wanted
+    st.unread[wanted] = 0
+    if wanted == "All" then
+        st.unread["All"] = 0
+        local seenAll = tonumber(st.lastSeenId["All"] or 0) or 0
+        st.lastSeenId["AllUnread"] = math.max(tonumber(st.lastSeenId["AllUnread"] or 0) or 0, seenAll)
+    end
+
+    _renderTabButtons()
+    if st.visible == true then
+        M.refresh({ source = "setActiveTab", force = true })
+    end
+
     return true, nil
 end
 
@@ -1278,6 +1360,13 @@ function M.clear(opts)
     st.unread = {}
     st.lastSeenId = {}
     st.lastRenderedId = 0
+
+    -- render debug reset
+    st.renderDebug.lastTabCount = 0
+    st.renderDebug.lastShownCount = 0
+    st.renderDebug.lastFirstLine = ""
+    st.renderDebug.lastLastLine = ""
+
     _renderTabButtons()
     if st.visible == true then
         M.refresh({ source = "clear", force = true })
@@ -1395,7 +1484,7 @@ function M.refresh(opts)
         return true
     end
 
-    -- Unread accounting (unchanged v1 semantics)
+    -- Unread accounting (v1 semantics + All unread badge optional)
     for _, it in ipairs(items) do
         local id = tonumber(it.id or 0) or 0
         local tab = _tabForChannel(it.channel)
@@ -1413,8 +1502,6 @@ function M.refresh(opts)
             st.lastSeenId[tab] = math.max(tonumber(st.lastSeenId[tab] or 0) or 0, id)
         end
 
-        -- Optional: All unread badge uses st.unread["All"] as an aggregate.
-        -- Default OFF; only computed when feature enabled to preserve baseline.
         local feats = (st.featureCfg and st.featureCfg.features) or {}
         if feats.all_unread_badge == true then
             if "All" ~= st.activeTab then
@@ -1431,32 +1518,55 @@ function M.refresh(opts)
 
     _renderTabButtons()
 
-    -- Render list (optionally limit the rendered slice)
-    local feats = (st.featureCfg and st.featureCfg.features) or {}
-    local renderItems = items
-
-    if feats.per_tab_line_limit == true then
-        local n = tonumber(feats.per_tab_line_limit_n or 500) or 500
-        if n < 50 then n = 50 end
-        if n > 3000 then n = 3000 end
-        if #items > n then
-            local start = (#items - n) + 1
-            local sliced = {}
-            for i = start, #items do
-                table.insert(sliced, items[i])
-            end
-            renderItems = sliced
+    -- Build tab-matching list first (per-tab limit must be per active tab)
+    local tabItems = {}
+    for _, it in ipairs(items) do
+        if _passesTab(it, st.activeTab) then
+            tabItems[#tabItems + 1] = it
         end
     end
 
-    _clearConsole()
-    for _, it in ipairs(renderItems) do
-        if _passesTab(it, st.activeTab) then
-            _appendConsoleLine(_mkLine(it))
+    local feats = (st.featureCfg and st.featureCfg.features) or {}
+    local limitOn = (feats.per_tab_line_limit == true)
+    local limitN = tonumber(feats.per_tab_line_limit_n or 500) or 500
+    if limitN < 50 then limitN = 50 end
+    if limitN > 3000 then limitN = 3000 end
+
+    local renderItems = tabItems
+    if limitOn and #tabItems > limitN then
+        local start = (#tabItems - limitN) + 1
+        local sliced = {}
+        for i = start, #tabItems do
+            sliced[#sliced + 1] = tabItems[i]
         end
+        renderItems = sliced
+    end
+
+    -- Render
+    _clearConsole()
+
+    local firstLine = ""
+    local lastLine = ""
+
+    for i = 1, #renderItems do
+        local line = _mkLine(renderItems[i])
+        if i == 1 then firstLine = tostring(line or "") end
+        lastLine = tostring(line or "")
+        _appendConsoleLine(line)
     end
 
     st.lastRenderedId = latestId
+
+    -- Update debug instrumentation
+    st.renderDebug.lastActiveTab = tostring(st.activeTab)
+    st.renderDebug.lastTabCount = tonumber(#tabItems) or 0
+    st.renderDebug.lastShownCount = tonumber(#renderItems) or 0
+    st.renderDebug.lastLimitOn = (limitOn == true)
+    st.renderDebug.lastLimitN = (limitOn == true) and limitN or nil
+    st.renderDebug.lastTimestampOn = (feats.timestamp_prefix == true)
+    st.renderDebug.lastFirstLine = firstLine
+    st.renderDebug.lastLastLine = lastLine
+
     _applyDebugLabelBestEffort()
     _scrollToBottomBestEffort()
 
