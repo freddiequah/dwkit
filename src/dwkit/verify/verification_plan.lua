@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-22A"
+M.VERSION = "v2026-02-23A"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -397,6 +397,56 @@ local SUITES = {
                 'lua do local gs=require("dwkit.config.gui_settings"); local en=(type(gs.isEnabled)=="function") and (gs.isEnabled("chat_ui",false)==true) or false; local UI=require("dwkit.ui.chat_ui"); local s=UI.getState(); print(string.format("[dwverify-chat] enabled=%s visible=%s activeTab=%s", tostring(en), tostring(s and s.visible), tostring(s and s.activeTab))) end',
                 note = "Authoritative check: enabled from gui_settings, visible/tab from chat_ui.getState().",
             },
+        },
+    },
+
+    -- NEW: Chat Phase 2 full verification (store routing + unread deltas + tab clear)
+    chat_phase2_full = {
+        title = "chat_phase2_full",
+        description =
+        "Phase 2 full: clear chat, inject unique markers via chat_capture fixture, assert store routing (channel/speaker/target/text), assert unread deltas, and assert clear-on-tab-view (SAY/PRIVATE/GRATS). SAFE; no sends; PUBLIC validated as delta>=1.",
+        delay = 0.30,
+        steps = {
+            { cmd = "dwchat",         note = "Ensure chat_ui is enabled+visible for UI-side tab clear checks." },
+            { cmd = "dwchat tab All", note = "Set active tab to All so unread counters accumulate on non-All tabs." },
+            { cmd = "dwchat clear",   note = "Reset ChatLogService + UI unread/seen state to a clean baseline." },
+
+            {
+                cmd =
+                'lua do local UI=require("dwkit.ui.chat_ui"); local s=UI.getState(); local u=s.unread or {}; _G.DWVERIFY_CHAT_BEFORE={SAY=tonumber(u.SAY or 0) or 0, PRIVATE=tonumber(u.PRIVATE or 0) or 0, PUBLIC=tonumber(u.PUBLIC or 0) or 0, GRATS=tonumber(u.GRATS or 0) or 0, Other=tonumber(u.Other or 0) or 0}; print(string.format("[dwverify-chat] BEFORE active=%s SAY=%d PRIVATE=%d PUBLIC=%d GRATS=%d Other=%d", tostring(s.activeTab), _G.DWVERIFY_CHAT_BEFORE.SAY, _G.DWVERIFY_CHAT_BEFORE.PRIVATE, _G.DWVERIFY_CHAT_BEFORE.PUBLIC, _G.DWVERIFY_CHAT_BEFORE.GRATS, _G.DWVERIFY_CHAT_BEFORE.Other)) end',
+                note = "Snapshot unread baseline into _G.DWVERIFY_CHAT_BEFORE (used for delta assertion).",
+            },
+
+            { cmd = 'lua do require("dwkit.capture.chat_capture")._testIngestLine("You say, \'[DWKitTEST_SAY_001]\'") end',            note = "Inject SAY marker (fixture path; no MUD dependency)." },
+            { cmd = 'lua do require("dwkit.capture.chat_capture")._testIngestLine("Vzae gossips, \'[DWKitTEST_PUBLIC_001]\'") end',    note = "Inject PUBLIC marker (GOSSIP)." },
+            { cmd = 'lua do require("dwkit.capture.chat_capture")._testIngestLine("Vzae tells you, \'[DWKitTEST_PRIVATE_001]\'") end', note = "Inject PRIVATE marker (TELL -> target You)." },
+            { cmd = 'lua do require("dwkit.capture.chat_capture")._testIngestLine("Vzae congrats, \'[DWKitTEST_GRATS_001]\'") end',    note = "Inject GRATS marker." },
+
+            {
+                cmd =
+                'lua do local UI=require("dwkit.ui.chat_ui"); local s=UI.getState(); local u=s.unread or {}; local after={SAY=tonumber(u.SAY or 0) or 0, PRIVATE=tonumber(u.PRIVATE or 0) or 0, PUBLIC=tonumber(u.PUBLIC or 0) or 0, GRATS=tonumber(u.GRATS or 0) or 0, Other=tonumber(u.Other or 0) or 0}; local b=_G.DWVERIFY_CHAT_BEFORE or {}; local dS=(after.SAY or 0)-(tonumber(b.SAY or 0) or 0); local dP=(after.PRIVATE or 0)-(tonumber(b.PRIVATE or 0) or 0); local dU=(after.PUBLIC or 0)-(tonumber(b.PUBLIC or 0) or 0); local dG=(after.GRATS or 0)-(tonumber(b.GRATS or 0) or 0); local dO=(after.Other or 0)-(tonumber(b.Other or 0) or 0); print(string.format("[dwverify-chat] AFTER active=%s SAY=%d PRIVATE=%d PUBLIC=%d GRATS=%d Other=%d", tostring(s.activeTab), after.SAY, after.PRIVATE, after.PUBLIC, after.GRATS, after.Other)); print(string.format("[dwverify-chat] DELTA SAY=%d PRIVATE=%d PUBLIC=%d GRATS=%d Other=%d", dS, dP, dU, dG, dO)); if dS~=1 then error("ΔSAY expected +1; got "..tostring(dS)) end; if dP~=1 then error("ΔPRIVATE expected +1; got "..tostring(dP)) end; if dG~=1 then error("ΔGRATS expected +1; got "..tostring(dG)) end; if dO~=0 then error("ΔOther expected +0; got "..tostring(dO)) end; if dU<1 then error("ΔPUBLIC expected >= +1; got "..tostring(dU)) end end',
+                note =
+                "ASSERT unread deltas: SAY=+1 PRIVATE=+1 GRATS=+1 Other=+0 PUBLIC>=+1 (PUBLIC may include live gossip).",
+            },
+
+            {
+                cmd =
+                'lua do local Log=require("dwkit.services.chat_log_service"); local items,meta=Log.getItems(60); local function findNeedle(needle) for _,it in ipairs(items or {}) do local t=tostring(it.text or ""); if t:find(needle,1,true) then return it end end return nil end; local a=findNeedle("[DWKitTEST_SAY_001]"); local b=findNeedle("[DWKitTEST_PUBLIC_001]"); local c=findNeedle("[DWKitTEST_PRIVATE_001]"); local d=findNeedle("[DWKitTEST_GRATS_001]"); print(string.format("[dwverify-chat] store meta.latestId=%s meta.count=%s", tostring(meta and meta.latestId), tostring(meta and meta.count))); local function chk(lbl,it,expCh,expSp,expTg) if type(it)~="table" then error("Missing item: "..lbl) end; print(string.format("[dwverify-chat] item %s id=%s ch=%s sp=%s tg=%s text=%s", lbl, tostring(it.id), tostring(it.channel), tostring(it.speaker), tostring(it.target), tostring(it.text))); if tostring(it.channel)~=tostring(expCh) then error(lbl..": expected channel "..tostring(expCh).." got "..tostring(it.channel)) end; if expSp~=nil and tostring(it.speaker)~=tostring(expSp) then error(lbl..": expected speaker "..tostring(expSp).." got "..tostring(it.speaker)) end; if expTg~=nil and tostring(it.target)~=tostring(expTg) then error(lbl..": expected target "..tostring(expTg).." got "..tostring(it.target)) end end; chk("SAY",a,"SAY","You",nil); chk("PUBLIC",b,"GOSSIP","Vzae",nil); chk("PRIVATE",c,"TELL","Vzae","You"); chk("GRATS",d,"GRATS","Vzae",nil); print("[dwverify-chat] PASS store routing checks") end',
+                note =
+                "ASSERT store routing: channel/speaker/target/text for the 4 markers (FAILs suite if any mismatch).",
+            },
+
+            { cmd = "dwchat tab SAY",                                                                                                                                                                                                                                                                                 note = "Switch to SAY; must clear SAY unread immediately." },
+            { cmd = 'lua do local UI=require("dwkit.ui.chat_ui"); local u=(UI.getState().unread or {}); local n=tonumber(u.SAY or 0) or 0; print(string.format("[dwverify-chat] tab-clear SAY unread=%d", n)); if n~=0 then error("Expected SAY unread=0 after viewing tab; got "..tostring(n)) end end',             note = "ASSERT SAY unread cleared." },
+
+            { cmd = "dwchat tab PRIVATE",                                                                                                                                                                                                                                                                             note = "Switch to PRIVATE; must clear PRIVATE unread immediately." },
+            { cmd = 'lua do local UI=require("dwkit.ui.chat_ui"); local u=(UI.getState().unread or {}); local n=tonumber(u.PRIVATE or 0) or 0; print(string.format("[dwverify-chat] tab-clear PRIVATE unread=%d", n)); if n~=0 then error("Expected PRIVATE unread=0 after viewing tab; got "..tostring(n)) end end', note = "ASSERT PRIVATE unread cleared." },
+
+            { cmd = "dwchat tab GRATS",                                                                                                                                                                                                                                                                               note = "Switch to GRATS; must clear GRATS unread immediately." },
+            { cmd = 'lua do local UI=require("dwkit.ui.chat_ui"); local u=(UI.getState().unread or {}); local n=tonumber(u.GRATS or 0) or 0; print(string.format("[dwverify-chat] tab-clear GRATS unread=%d", n)); if n~=0 then error("Expected GRATS unread=0 after viewing tab; got "..tostring(n)) end end',       note = "ASSERT GRATS unread cleared." },
+
+            { cmd = "dwchat tab All",                                                                                                                                                                                                                                                                                 note = "Return to All at end (neutral resting state)." },
+            { cmd = 'lua do print("[dwverify-chat] PASS chat_phase2_full") end',                                                                                                                                                                                                                                      note = "Final PASS marker for easy copy/paste." },
         },
     },
 
