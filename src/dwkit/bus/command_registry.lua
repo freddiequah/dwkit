@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-01-26B
+-- Version     : v2026-02-22A
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -41,7 +41,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-05A"
+M.VERSION = "v2026-02-22A"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -190,6 +190,43 @@ local REG = {
                 "Backed by DWKit.config.guiSettings (dwkit.config.gui_settings).",
                 "This command only changes stored flags; it does NOT show/hide UI elements directly.",
                 "Visible control requires visible persistence to be enabled in guiSettings; dwgui enables it on-demand for visible subcommands.",
+            },
+        },
+
+        -- NEW (Phase 1): chat command surface
+        dwchat = {
+            command     = "dwchat",
+            aliases     = {},
+            ownerModule = "dwkit.commands.dwchat",
+            description =
+            "Controls the DWKit Chat UI (chat_ui): open/hide/toggle/status, enable/disable, tabs, clear, and SAFE input toggles (send/input).",
+            syntax      =
+            "dwchat [open|show|hide|close|toggle|status|enable|disable|tabs|tab <name>|clear|send on|off|input on|off]",
+            examples    = {
+                "dwchat",
+                "dwchat status",
+                "dwchat hide",
+                "dwchat toggle",
+                "dwchat enable",
+                "dwchat disable",
+                "dwchat tabs",
+                "dwchat tab SAY",
+                "dwchat tab Other",
+                "dwchat clear",
+                "dwchat send on",
+                "dwchat send off",
+                "dwchat input off",
+                "dwchat input on",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Phase 1 deterministic command surface for chat_ui.",
+                "Prefers ui_manager.applyOne(\"chat_ui\") when available so dependency claims (chat_watch) are handled centrally.",
+                "Visible is session-only by default (noSave=true). Enabled is persisted when explicitly opened/enabled.",
+                "send on|off only flips chat_ui sendToMud flag; sending to MUD only occurs on explicit user Enter submit (still manual).",
+                "input on|off is best-effort and depends on chat_ui exposing setter APIs (implemented in your current build).",
             },
         },
 
@@ -983,7 +1020,6 @@ function M.validateAll(opts)
                     _mkIssue(defName ~= "" and defName or keyName, "registry key must equal def.command"))
             end
 
-            -- strictness: arrays must be well-formed; allow empty arrays but entries must be non-empty strings
             local okA, errA = _validateStringArray("aliases", def.aliases, true)
             if not okA then table.insert(issues, _mkIssue(defName, errA)) end
 

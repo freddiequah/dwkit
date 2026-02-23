@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.chat_ui
 -- Owner       : UI
--- Version     : v2026-02-15A
+-- Version     : v2026-02-22B
 -- Purpose     :
 --   - SAFE Chat UI (consumer-only) displaying ChatLogService buffer.
 --   - Renders a DWKit-themed container with a tab row:
@@ -24,26 +24,28 @@
 --   - dispose() -> boolean ok
 --   - getLayoutDebug() -> table (sizes, best-effort)
 --
+-- Phase 1 Control Surface (NEW v2026-02-22B):
+--   - getTabs() -> string[] (TAB_ORDER copy)
+--   - setActiveTab(tab, opts?) -> boolean ok, string|nil err
+--   - clear(opts?) -> boolean ok, string|nil err      (clears ChatLogService)
+--   - setSendToMud(on, opts?) -> boolean ok
+--   - setInputEnabled(on, opts?) -> boolean ok, string|nil err (best-effort)
+--
 -- Notes:
 --   - Tab definitions are LOCKED by agreement v2026-02-10C.
 --   - chat_ui is a DIRECT-CONTROL UI (see UI Manager direct-control rule).
---
--- Key Fixes:
---   v2026-02-12C:
---     - NEW: render first-class message target (item.target) for PRIVATE channels.
---   v2026-02-15A:
---     - NEW: wire real capture via ui_dependency_service provider "chat_watch" (dwkit.capture.chat_capture).
+--   - Provider lifecycle is ENABLED-based (Model A) and is owned by ui_manager + ui_dependency_service.
+--     Therefore chat_ui MUST NOT ensure/release providers on show/hide/dispose.
 -- #########################################################################
 
 local M                         = {}
 
-M.VERSION                       = "v2026-02-15A"
+M.VERSION                       = "v2026-02-22B"
 
 local PREFIX                    = (DWKit and DWKit.getEventPrefix and DWKit.getEventPrefix()) or "DWKit:"
 local LogSvc                    = require("dwkit.services.chat_log_service")
 local UIW                       = require("dwkit.ui.ui_window")
 local U                         = require("dwkit.ui.ui_base")
-local Dep                       = require("dwkit.services.ui_dependency_service")
 
 local EV_SVC_CHATLOG_UPDATED    = PREFIX .. "Service:ChatLog:Updated"
 
@@ -646,9 +648,9 @@ end
 
 local function _eventMentionsThisFrameBestEffort(...)
     local frameName = (st.bundle and st.bundle.meta and st.bundle.meta.nameFrame) and tostring(st.bundle.meta.nameFrame) or
-    ""
+        ""
     local contentName = (st.bundle and st.bundle.meta and st.bundle.meta.nameContent) and
-    tostring(st.bundle.meta.nameContent) or ""
+        tostring(st.bundle.meta.nameContent) or ""
 
     if frameName == "" and contentName == "" then
         return true
@@ -784,13 +786,6 @@ local function _ensureUi(opts)
         end,
 
         onClose = function(bundle)
-            -- Best-effort: release capture provider on close (direct-control UI)
-            pcall(function()
-                if type(Dep) == "table" and type(Dep.releaseUi) == "function" then
-                    Dep.releaseUi(UI_ID, { source = "chat_ui:onClose", quiet = true })
-                end
-            end)
-
             st.visible = false
             _unregisterHandlerBestEffort()
             _unregisterResizeHandlersBestEffort()
@@ -945,6 +940,8 @@ local function _ensureUi(opts)
 
             local function _onSubmit()
                 if st.visible ~= true then return end
+                if st.enableInput ~= true then return end
+
                 local text = _getCommandLineTextBestEffort(st.input)
                 text = tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")
                 if text == "" then
@@ -1049,22 +1046,6 @@ local function _getItemsBestEffort()
     return {}, {}
 end
 
-local function _depEnsureChatWatchBestEffort(source)
-    if type(Dep) == "table" and type(Dep.ensureUi) == "function" then
-        pcall(function()
-            Dep.ensureUi(UI_ID, { "chat_watch" }, { source = source or "chat_ui:dep:ensure", quiet = true })
-        end)
-    end
-end
-
-local function _depReleaseChatWatchBestEffort(source)
-    if type(Dep) == "table" and type(Dep.releaseUi) == "function" then
-        pcall(function()
-            Dep.releaseUi(UI_ID, { source = source or "chat_ui:dep:release", quiet = true })
-        end)
-    end
-end
-
 function M.getVersion()
     return M.VERSION
 end
@@ -1090,6 +1071,92 @@ function M.getLayoutDebug()
     }
 end
 
+-- -------------------------------------------------------------------------
+-- Phase 1 Control Surface (NEW)
+-- -------------------------------------------------------------------------
+
+function M.getTabs()
+    local out = {}
+    for i = 1, #TAB_ORDER do out[i] = TAB_ORDER[i] end
+    return out
+end
+
+function M.setActiveTab(tab, opts)
+    opts = (type(opts) == "table") and opts or {}
+    tab = tostring(tab or "")
+    if tab == "" then return false, "tab required" end
+    _switchTab(tab)
+    return true, nil
+end
+
+function M.clear(opts)
+    opts = (type(opts) == "table") and opts or {}
+    if type(LogSvc) ~= "table" or type(LogSvc.clear) ~= "function" then
+        return false, "chat_log_service.clear not available"
+    end
+    local ok = pcall(LogSvc.clear, { source = opts.source or "chat_ui:clear" })
+    if not ok then
+        return false, "chat_log_service.clear failed"
+    end
+
+    -- reset UI-side counters and rerender if visible
+    st.unread = {}
+    st.lastSeenId = {}
+    st.lastRenderedId = 0
+    _renderTabButtons()
+    if st.visible == true then
+        M.refresh({ source = "clear", force = true })
+    end
+
+    return true, nil
+end
+
+function M.setSendToMud(on, opts)
+    opts = (type(opts) == "table") and opts or {}
+    st.sendToMud = (on == true)
+    if st.visible == true and st.enableInput == true and st.layout.inputKind == "commandline" then
+        _focusInputBestEffort()
+    end
+    return true
+end
+
+function M.setInputEnabled(on, opts)
+    opts = (type(opts) == "table") and opts or {}
+    local want = (on == true)
+
+    -- best-effort: if input was never created (rare; default build has it), refuse safely
+    if want == true and type(st.inputHost) ~= "table" then
+        return false, "inputHost not available (chat_ui was created with enableInput=false)"
+    end
+
+    st.enableInput = want
+
+    if type(st.inputHost) == "table" then
+        if want == true then
+            pcall(function()
+                if type(st.inputHost.show) == "function" then st.inputHost:show() end
+                if type(st.input) == "table" and type(st.input.show) == "function" then st.input:show() end
+            end)
+        else
+            pcall(function()
+                if type(st.input) == "table" and type(st.input.hide) == "function" then st.input:hide() end
+                if type(st.inputHost.hide) == "function" then st.inputHost:hide() end
+            end)
+        end
+    end
+
+    pcall(_reflowLayoutBestEffort)
+    if want == true and st.visible == true then
+        _focusInputBestEffort()
+    end
+
+    return true, nil
+end
+
+-- -------------------------------------------------------------------------
+-- Visible controls
+-- -------------------------------------------------------------------------
+
 function M.show(opts)
     opts = (type(opts) == "table") and opts or {}
 
@@ -1105,9 +1172,6 @@ function M.show(opts)
 
     st.visible = true
     pcall(U.setUiStateVisibleBestEffort, UI_ID, true)
-
-    -- NEW: claim chat_watch provider while visible (best-effort gate for real capture -> router)
-    _depEnsureChatWatchBestEffort("chat_ui:show")
 
     pcall(_ensureResizeReflowWiring)
     pcall(_reflowLayoutBestEffort)
@@ -1132,9 +1196,6 @@ function M.hide(opts)
     _unregisterHandlerBestEffort()
     _unregisterResizeHandlersBestEffort()
     pcall(U.setUiStateVisibleBestEffort, UI_ID, false)
-
-    -- NEW: release chat_watch provider when hidden (best-effort)
-    _depReleaseChatWatchBestEffort("chat_ui:hide")
 
     return true
 end
@@ -1194,9 +1255,6 @@ end
 function M.dispose()
     _unregisterHandlerBestEffort()
     _unregisterResizeHandlersBestEffort()
-
-    -- NEW: release provider on dispose (best-effort)
-    _depReleaseChatWatchBestEffort("chat_ui:dispose")
 
     if type(st.bundle) == "table" and type(st.bundle.frame) == "table" then
         pcall(function() U.safeHide(st.bundle.frame, UI_ID, { source = "chat_ui:dispose" }) end)

@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.capture.roomfeed_capture
 -- Owner       : Capture
--- Version     : v2026-02-09B
+-- Version     : v2026-02-16A
 -- Purpose     :
 --   - Passive capture of room output blocks (movement room header, look output)
 --     without GMCP and without sending any commands.
@@ -70,6 +70,7 @@
 --
 -- Public API  :
 --   - getVersion() -> string
+--   - isInstalled() -> boolean
 --   - install(opts?) -> boolean ok, string|nil err
 --   - uninstall(opts?) -> boolean ok, string|nil err
 --   - status(opts?) -> table state  (also prints unless opts.quiet=true)
@@ -92,7 +93,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-09B"
+M.VERSION = "v2026-02-16A"
 
 local function _nowTs()
     return os.time()
@@ -701,6 +702,11 @@ end
 
 function M.getVersion()
     return tostring(M.VERSION)
+end
+
+-- NEW: deterministic provider contract (preferred by dependency manager)
+function M.isInstalled()
+    return (ROOT.installed == true and ROOT.lineTriggerId ~= nil) and true or false
 end
 
 -- Verification-only helper: deterministically ingest a supplied snapshot buffer.
