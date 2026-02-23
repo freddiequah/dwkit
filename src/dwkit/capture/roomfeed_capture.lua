@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.capture.roomfeed_capture
 -- Owner       : Capture
--- Version     : v2026-02-16A
+-- Version     : v2026-02-23B
 -- Purpose     :
 --   - Passive capture of room output blocks (movement room header, look output)
 --     without GMCP and without sending any commands.
@@ -68,6 +68,17 @@
 --   - Adds verification-only helper: _testIngestSnapshot(buf, opts) to deterministically validate
 --     full vs partial finalize behavior without requiring live MUD output.
 --
+-- Feb 2026 fix (v2026-02-23A):
+--   - Guard PARTIAL finalize for fallback-start snapshots:
+--       Fallback title detection is required for player rooms (title-only),
+--       but it can false-trigger on non-room command output (e.g. "Players" from WHO).
+--       We now require "room-like markers" before allowing PARTIAL ingest when startKind is fallback*.
+--       If not room-like, we abort (no ingest) to prevent wiping RoomEntities state.
+--
+-- Feb 2026 fix (v2026-02-23B):
+--   - BUGFIX: fallback-kind detection used string.find("^fallback", 1, true) which can never match
+--       because plain=true treats '^' literally. Replaced with prefix check (sub()) so guard executes.
+--
 -- Public API  :
 --   - getVersion() -> string
 --   - isInstalled() -> boolean
@@ -81,6 +92,7 @@
 -- Verification/Test API (safe; no MUD sends):
 --   - _testIngestSnapshot(bufLinesRaw, opts?) -> boolean ok, string|nil err
 --       opts.hasExits=true|false (default false)
+--       opts.startKind="fallback|strong|..." (optional; default "strong")
 --
 -- Events Emitted   : None (delegates to services)
 -- Events Consumed  : MUD output via tempRegexTrigger line hook
@@ -93,7 +105,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-16A"
+M.VERSION = "v2026-02-23B"
 
 local function _nowTs()
     return os.time()
@@ -541,6 +553,46 @@ local function _addToUnknown(buckets, name)
     return true
 end
 
+-- #########################################################################
+-- Room-like marker guard (v2026-02-23A)
+-- Used to prevent fallback-start partial snapshots (e.g. "Players" from WHO)
+-- from overwriting RoomEntities with empty state.
+-- #########################################################################
+
+local function _looksRoomLikeFromBuf(buf)
+    if type(buf) ~= "table" then return false end
+
+    for i = 2, #buf do
+        local raw = tostring(buf[i] or "")
+        if raw ~= "" then
+            local clean = _cleanLine(raw)
+            local ln = tostring(clean or "")
+
+            -- Typical room descriptions are indented (player/imm output).
+            -- Example: "   As you stand in the Temple of Asgaard, ..."
+            if ln:match("^%s%s%s%S") then
+                return true
+            end
+
+            local lower = _trim(ln):lower()
+            if lower ~= "" then
+                -- Entity markers (items/mobs/people lines)
+                if lower:find(" is here", 1, true) then return true end
+                if lower:find(" are here", 1, true) then return true end
+                if lower:find(" stands here", 1, true) then return true end
+                if lower:find(" lies here", 1, true) then return true end
+                if lower:find(" has been placed here", 1, true) then return true end
+                if lower:find(" is mounted", 1, true) and lower:find(" here", 1, true) then return true end
+
+                -- Room exit section marker (even if snapHasExits didn't latch due to edge cases)
+                if lower:match("^%s*obvious exits:%s*$") then return true end
+            end
+        end
+    end
+
+    return false
+end
+
 local ROOT = {
     installed = false,
     installTs = nil,
@@ -551,6 +603,7 @@ local ROOT = {
     snapStartTs = nil,
     snapStartLineRaw = nil,
     snapStartLineClean = nil,
+    snapStartKind = nil, -- "strong*" or "fallback*" (v2026-02-23A)
     snapHasExits = false,
     snapSeenLines = 0,
 
@@ -565,6 +618,7 @@ local ROOT = {
     lastHeaderSeenKind = nil,
     lastSnapStartTs = nil,
     lastSnapStartClean = nil,
+    lastSnapStartKind = nil,
 
     -- line receipt diagnostics (no prints)
     seenLineCount = 0,
@@ -580,22 +634,25 @@ local function _resetSnap()
     ROOT.snapStartTs = nil
     ROOT.snapStartLineRaw = nil
     ROOT.snapStartLineClean = nil
+    ROOT.snapStartKind = nil
     ROOT.snapHasExits = false
     ROOT.snapSeenLines = 0
 end
 
-local function _beginSnap(lnRaw, lnCleanEffective)
+local function _beginSnap(lnRaw, lnCleanEffective, startKind)
     _resetSnap()
     ROOT.snapCapturing = true
     ROOT.snapStartTs = _nowTs()
     ROOT.snapStartLineRaw = tostring(lnRaw or "")
     ROOT.snapStartLineClean = tostring(lnCleanEffective or "")
+    ROOT.snapStartKind = tostring(startKind or "unknown")
     ROOT.snapBuf[#ROOT.snapBuf + 1] = tostring(lnRaw or "")
     ROOT.snapSeenLines = 1
 
     -- silent diagnostics
     ROOT.lastSnapStartTs = ROOT.snapStartTs
     ROOT.lastSnapStartClean = ROOT.snapStartLineClean
+    ROOT.lastSnapStartKind = ROOT.snapStartKind
 end
 
 local function _abortSnap(reason)
@@ -638,7 +695,20 @@ local function _finalizeSnap()
 
     if hasExits ~= true then
         -- v2026-02-09B: Partial finalize instead of abort.
+        -- v2026-02-23A: Guard fallback-start partials to prevent false-positive wipes.
         local reason = "partial:prompt_before_exits"
+
+        local startKind = tostring(ROOT.snapStartKind or "")
+        -- BUGFIX v2026-02-23B: do NOT use find("^fallback",...,true) (plain=true makes '^' literal)
+        local isFallback = (startKind:sub(1, 8) == "fallback")
+
+        if isFallback then
+            local roomLike = _looksRoomLikeFromBuf(buf)
+            if roomLike ~= true then
+                _abortSnap("abort:partial_fallback_not_roomlike")
+                return
+            end
+        end
 
         _ingestSnapshot(buf, ts, {
             source = "roomfeed_capture_partial",
@@ -713,6 +783,7 @@ end
 -- SAFE: no timers, no sends, no triggers. Intended for dwverify suites.
 -- opts:
 --   - hasExits=true|false (default false)
+--   - startKind="fallback|strong|..." (optional; default "strong")
 function M._testIngestSnapshot(bufLinesRaw, opts)
     opts = (type(opts) == "table") and opts or {}
     if type(bufLinesRaw) ~= "table" then
@@ -720,6 +791,7 @@ function M._testIngestSnapshot(bufLinesRaw, opts)
     end
 
     local hasExits = (opts.hasExits == true)
+    local startKind = tostring(opts.startKind or "strong")
 
     -- Pretend we are mid-capture.
     ROOT.snapCapturing = true
@@ -729,6 +801,7 @@ function M._testIngestSnapshot(bufLinesRaw, opts)
     end
     ROOT.snapSeenLines = #ROOT.snapBuf
     ROOT.snapHasExits = hasExits
+    ROOT.snapStartKind = startKind
 
     -- Finalize as if prompt arrived.
     _finalizeSnap()
@@ -770,7 +843,7 @@ function M.install(opts)
                 ROOT.lastHeaderSeenEffectiveClean = _trim(eff)
                 ROOT.lastHeaderSeenKind = tostring(kind or "unknown")
 
-                _beginSnap(lnRaw, eff)
+                _beginSnap(lnRaw, eff, kind)
                 return
             end
             return
@@ -794,7 +867,7 @@ function M.install(opts)
             local isStrong = (k:find("^strong", 1, true) == 1)
             if isStrong and tostring(eff or "") ~= tostring(ROOT.snapStartLineClean or "") then
                 _abortSnap("abort:restart_header_seen")
-                _beginSnap(lnRaw, eff)
+                _beginSnap(lnRaw, eff, kind)
                 return
             end
         end
@@ -848,6 +921,7 @@ function M.status(opts)
         installTs = ROOT.installTs,
         lineTriggerId = ROOT.lineTriggerId,
         snapCapturing = (ROOT.snapCapturing == true),
+        snapStartKind = ROOT.snapStartKind,
         snapHasExits = (ROOT.snapHasExits == true),
         snapBufLen = (type(ROOT.snapBuf) == "table") and #ROOT.snapBuf or 0,
         lastOkTs = ROOT.lastOkTs,
@@ -860,6 +934,7 @@ function M.status(opts)
         lastHeaderSeenKind = ROOT.lastHeaderSeenKind,
         lastSnapStartTs = ROOT.lastSnapStartTs,
         lastSnapStartClean = ROOT.lastSnapStartClean,
+        lastSnapStartKind = ROOT.lastSnapStartKind,
 
         seenLineCount = ROOT.seenLineCount,
         lastLineSeenTs = ROOT.lastLineSeenTs,
@@ -869,10 +944,10 @@ function M.status(opts)
     if opts.quiet ~= true then
         _out("status (roomfeed capture)")
         for _, k in ipairs({
-            "installed", "lineTriggerId", "snapCapturing", "snapHasExits", "snapBufLen",
+            "installed", "lineTriggerId", "snapCapturing", "snapStartKind", "snapHasExits", "snapBufLen",
             "lastOkTs", "lastAbortReason", "lastDegradedReason",
             "lastHeaderSeenTs", "lastHeaderSeenClean", "lastHeaderSeenEffectiveClean", "lastHeaderSeenKind",
-            "lastSnapStartTs", "lastSnapStartClean",
+            "lastSnapStartTs", "lastSnapStartClean", "lastSnapStartKind",
             "seenLineCount", "lastLineSeenTs", "lastLineSeenClean",
         }) do
             _out(string.format("  %s=%s", k, tostring(s[k])))

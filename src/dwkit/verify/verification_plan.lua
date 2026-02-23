@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-23K
+-- Version     : v2026-02-23M
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-23K"
+M.VERSION = "v2026-02-23M"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -63,16 +63,35 @@ local SUITES = {
     roomfeed_partial_snapshot_finalize = {
         title = "roomfeed_partial_snapshot_finalize",
         description =
-        "RoomFeed v2026-02-09B: prompt before exits should ingest as PARTIAL snapshot (no abort), update lastSnapshotTs, and latch degradedReason=partial:prompt_before_exits. Uses capture._testIngestSnapshot (SAFE; no sends).",
+        "RoomFeed v2026-02-09B + v2026-02-23B: prompt before exits should ingest as PARTIAL snapshot (no abort), update lastSnapshotTs, and latch degradedReason=partial:prompt_before_exits. Uses capture._testIngestSnapshot (SAFE; no sends).",
         delay = 0.30,
         steps = {
             {
                 cmd =
-                'lua do local C=require("dwkit.capture.roomfeed_capture"); local S=require("dwkit.services.roomfeed_status_service"); if type(C)~="table" or type(C._testIngestSnapshot)~="function" then error("Expected roomfeed_capture._testIngestSnapshot (v2026-02-09B)") end; local pre=S.getState(); local preTs=tostring(pre.lastSnapshotTs or ""); local ok,err=C._testIngestSnapshot({"The Board Room (#1204) [ INDOORS IMMROOM ]","A plain room description line."},{hasExits=false}); if not ok then error("test ingest failed: "..tostring(err)) end; local post=S.getState(); if post.lastSnapshotTs==nil then error("Expected lastSnapshotTs non-nil after partial finalize") end; if tostring(post.lastSnapshotTs)==preTs then error("Expected lastSnapshotTs to change after partial finalize; before="..preTs.." after="..tostring(post.lastSnapshotTs)) end; if tostring(post.degradedReason or "")~="partial:prompt_before_exits" then error("Expected degradedReason partial:prompt_before_exits; got "..tostring(post.degradedReason)) end; local dbg=C.getDebugState(); if tostring(dbg.lastAbortReason or "")~="" then error("Expected lastAbortReason nil/empty after partial finalize; got "..tostring(dbg.lastAbortReason)) end; if tostring(dbg.lastDegradedReason or "")~="partial:prompt_before_exits" then error("Expected capture lastDegradedReason partial:prompt_before_exits; got "..tostring(dbg.lastDegradedReason)) end; print(string.format("[dwverify-roomfeed] PASS partial finalize snapshotTs=%s degraded=%s", tostring(post.lastSnapshotTs), tostring(post.degradedReason))) end',
+                'lua do local C=require("dwkit.capture.roomfeed_capture"); local S=require("dwkit.services.roomfeed_status_service"); if type(C)~="table" or type(C._testIngestSnapshot)~="function" then error("Expected roomfeed_capture._testIngestSnapshot") end; local pre=S.getState(); local preTs=tostring(pre.lastSnapshotTs or ""); local ok,err=C._testIngestSnapshot({"The Temple of Asgaard","   A plain room description line."},{hasExits=false,startKind="fallback"}); if not ok then error("test ingest failed: "..tostring(err)) end; local post=S.getState(); if post.lastSnapshotTs==nil then error("Expected lastSnapshotTs non-nil after partial finalize") end; if tostring(post.lastSnapshotTs)==preTs then error("Expected lastSnapshotTs to change after partial finalize; before="..preTs.." after="..tostring(post.lastSnapshotTs)) end; if tostring(post.degradedReason or "")~="partial:prompt_before_exits" then error("Expected degradedReason partial:prompt_before_exits; got "..tostring(post.degradedReason)) end; local dbg=C.getDebugState(); if tostring(dbg.lastAbortReason or "")~="" then error("Expected lastAbortReason nil/empty after partial finalize; got "..tostring(dbg.lastAbortReason)) end; if tostring(dbg.lastDegradedReason or "")~="partial:prompt_before_exits" then error("Expected capture lastDegradedReason partial:prompt_before_exits; got "..tostring(dbg.lastDegradedReason)) end; print(string.format("[dwverify-roomfeed] PASS partial finalize snapshotTs=%s degraded=%s", tostring(post.lastSnapshotTs), tostring(post.degradedReason))) end',
                 note =
                 "ASSERT: partial finalize updates snapshot freshness and latches degraded state; capture does not abort.",
             },
             { cmd = "dwroom watch status", note = "Human confirmation: RoomWatch should show health=DEGRADED with note partial:prompt_before_exits and a recent lastCaptureTs." },
+        },
+    },
+
+    roomfeed_partial_fallback_guard = {
+        title = "roomfeed_partial_fallback_guard",
+        description =
+        "RoomFeed v2026-02-23B: fallback-start snapshot that is NOT room-like (e.g. WHO header 'Players') must NOT ingest/overwrite RoomEntities; it must abort as abort:partial_fallback_not_roomlike. SAFE; no sends.",
+        delay = 0.30,
+        steps = {
+            {
+                cmd =
+                'lua do local R=require("dwkit.services.roomentities_service"); local ok,err=R.ingestFixture({unknown={"A large keg of Killians Irish Red"},source="dwverify:roomfeed_guard",forceEmit=true}); if ok==false then error("fixture ingest failed: "..tostring(err)) end; local st=R.getState(); if st==nil or type(st.unknown)~="table" or st.unknown["A large keg of Killians Irish Red"]~=true then error("Precondition failed: expected unknown fixture present") end; print("[dwverify-roomfeed] precondition OK fixture unknown present") end',
+                note = "Precondition: seed RoomEntities with a known unknown so we can detect accidental wipe.",
+            },
+            {
+                cmd =
+                'lua do local C=require("dwkit.capture.roomfeed_capture"); local ok,err=C._testIngestSnapshot({"Players","-------","[50 War] Nuku is putting on the foil!"},{hasExits=false,startKind="fallback"}); if ok==false then error("test ingest failed: "..tostring(err)) end; local dbg=C.getDebugState(); if tostring(dbg.lastAbortReason or "")~="abort:partial_fallback_not_roomlike" then error("Expected abort:partial_fallback_not_roomlike; got "..tostring(dbg.lastAbortReason)) end; local R=require("dwkit.services.roomentities_service"); local st=R.getState(); if st==nil or type(st.unknown)~="table" then error("Expected RoomEntities state table") end; if st.unknown["A large keg of Killians Irish Red"]~=true then error("FAIL: RoomEntities fixture was wiped/overwritten by fallback partial") end; print(string.format("[dwverify-roomfeed] PASS fallback guard abort=%s fixturePreserved=true", tostring(dbg.lastAbortReason))) end',
+                note = "ASSERT: fallback-start non-room-like partial aborts and does NOT wipe RoomEntities.",
+            },
         },
     },
 
