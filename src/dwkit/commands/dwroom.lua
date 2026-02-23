@@ -2,12 +2,13 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwroom
 -- Owner       : Commands
--- Version     : v2026-02-02A
+-- Version     : v2026-02-23C
 -- Purpose     :
 --   - Command handler for "dwroom" alias (SAFE manual surface).
 --   - Implements RoomEntities SAFE inspection + helpers:
 --       * dwroom                -> status
 --       * dwroom status         -> status
+--       * dwroom dump           -> bounded debug snapshot (raws + classification reasons)
 --       * dwroom ui on|off|toggle|status
 --       * dwroom watch on|off|status
 --       * dwroom clear          -> clear snapshot (service-defined)
@@ -26,7 +27,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-02A"
+M.VERSION = "v2026-02-23C"
 
 local function _mkOut(ctx)
     if type(ctx) == "table" and type(ctx.out) == "function" then
@@ -78,6 +79,7 @@ local function _usage(out)
     out("[DWKit Room] Usage:")
     out("  dwroom")
     out("  dwroom status")
+    out("  dwroom dump")
     out("  dwroom ui on|off|toggle")
     out("  dwroom ui status")
     out("  dwroom watch on|off|status")
@@ -88,6 +90,7 @@ local function _usage(out)
     out("")
     out("Notes:")
     out("  - SAFE only: does NOT send any gameplay commands.")
+    out("  - dump: bounded debug snapshot (raw lines + classification reasons; SAFE).")
     out("  - watch: passive capture only (triggers), no polling, no timers, no sends.")
     out("  - refresh best-effort: reclassify/emitUpdated or eventBus.emit if available.")
 end
@@ -154,6 +157,99 @@ local function _printStatus(ctx, svc)
     out("  mobs=" .. tostring(c.mobs))
     out("  items=" .. tostring(c.items))
     out("  unknown=" .. tostring(c.unknown))
+end
+
+local function _doDump(ctx, svc)
+    local out = _mkOut(ctx)
+    local err = _mkErr(ctx)
+
+    if type(svc) ~= "table" then
+        err("RoomEntitiesService not available.")
+        return
+    end
+
+    if type(svc.getDebugSnapshot) ~= "function" then
+        err("RoomEntitiesService.getDebugSnapshot not available (requires v2026-02-23C+).")
+        return
+    end
+
+    local opts = {
+        maxEntities = 25,
+        maxRawsPerEntity = 3,
+        usePresence = true,
+        useWhoStore = true,
+    }
+
+    local ok, snap, _, _, callErr = _call(ctx, svc, "getDebugSnapshot", opts)
+    if not ok or type(snap) ~= "table" then
+        err("dump failed: " .. tostring(callErr or "getDebugSnapshot returned non-table"))
+        return
+    end
+
+    out("[DWKit Room] dump (dwroom)")
+    out("  svcVersion=" .. tostring(snap.version or "unknown"))
+    if type(snap.state) == "table" then
+        out("  lastTs=" .. tostring(snap.state.lastTs or "nil") .. " updates=" .. tostring(snap.state.updates or "0") .. " emits=" .. tostring(snap.state.emits or "0"))
+        if type(snap.state.counts) == "table" then
+            out("  counts players=" .. tostring(snap.state.counts.players or "0") ..
+                " mobs=" .. tostring(snap.state.counts.mobs or "0") ..
+                " items=" .. tostring(snap.state.counts.items or "0") ..
+                " unknown=" .. tostring(snap.state.counts.unknown or "0"))
+        end
+    end
+
+    if type(snap.who) == "table" then
+        out("  who.subscribed=" .. tostring(snap.who.subscribed) ..
+            " hasToken=" .. tostring(snap.who.hasToken) ..
+            " eventName=" .. tostring(snap.who.eventName or "nil") ..
+            " lastErr=" .. tostring(snap.who.lastErr or "nil"))
+    end
+
+    local buckets = (type(snap.bucketsV2) == "table") and snap.bucketsV2 or {}
+    local order = { "players", "mobs", "items", "unknown" }
+
+    local function printBucket(b)
+        local B = buckets[b]
+        if type(B) ~= "table" then return end
+
+        out("")
+        out(string.format("[DWKit Room] bucket=%s count=%s truncated=%s", tostring(B.name or b), tostring(B.count or 0), tostring(B.truncated == true)))
+
+        local items = (type(B.items) == "table") and B.items or {}
+        for i = 1, #items do
+            local e = items[i]
+            if type(e) == "table" then
+                out(string.format("  - key=%s count=%s", tostring(e.key or ""), tostring(e.count or 1)))
+                out("    label=" .. tostring(e.label or ""))
+
+                if type(e.diag) == "table" then
+                    local cand = e.diag.candidateName
+                    out("    candidateName=" .. tostring(cand or "nil"))
+
+                    local who = e.diag.who
+                    if type(who) == "table" then
+                        out("    who.labelConfidence=" .. tostring(who.labelConfidence or "none") .. " labelExact=" .. tostring(who.labelExact == true))
+                        out("    who.candidateConfidence=" .. tostring(who.candidateConfidence or "none") .. " candidateExact=" .. tostring(who.candidateExact == true))
+                        if who.canonByCandidate ~= nil then
+                            out("    who.canonByCandidate=" .. tostring(who.canonByCandidate))
+                        end
+                    end
+                end
+
+                local raws = (type(e.raws) == "table") and e.raws or {}
+                if #raws > 0 then
+                    out("    raws:")
+                    for r = 1, #raws do
+                        out("      * " .. tostring(raws[r] or ""))
+                    end
+                end
+            end
+        end
+    end
+
+    for _, b in ipairs(order) do
+        printBucket(b)
+    end
 end
 
 local function _doClear(ctx, svc)
@@ -485,8 +581,8 @@ local function _uiCommand(ctx, arg)
 
     local function _apply()
         if type(ui)=="table" and type(ui.apply)=="function" then
-            local ok, err = ui.apply()
-            if ok == false then out("[DWKit Room UI] apply failed: " .. tostring(err)) end
+            local ok, err2 = ui.apply()
+            if ok == false then out("[DWKit Room UI] apply failed: " .. tostring(err2)) end
         end
     end
 
@@ -649,6 +745,11 @@ local function _dispatchCore(ctx, svc, sub, arg)
         return
     end
 
+    if sub == "dump" then
+        _doDump(ctx, svc)
+        return
+    end
+
     if sub == "ui" then
         _uiCommand(ctx, arg)
         return
@@ -688,7 +789,33 @@ function M.dispatch(ctx, a, b, c)
         local kit = a
         local tokens = b
 
-        local svc = _resolveSvcFromKitOrCtx(ctx, kit)
+        local svc = (function()
+            local function _looksLikeSvc(s)
+                return type(s) == "table" and (
+                    type(s.getState) == "function" or
+                    type(s.ingestLookText) == "function" or
+                    type(s.reclassifyFromWhoStore) == "function" or
+                    s.VERSION ~= nil
+                )
+            end
+
+            if type(ctx) == "table" and type(ctx.getService) == "function" then
+                local s = ctx.getService("roomEntitiesService")
+                if _looksLikeSvc(s) then return s end
+            end
+
+            if type(kit) == "table" and type(kit.services) == "table" and type(kit.services.roomEntitiesService) == "table" then
+                if _looksLikeSvc(kit.services.roomEntitiesService) then
+                    return kit.services.roomEntitiesService
+                end
+            end
+
+            local ok, mod = _safeRequire("dwkit.services.roomentities_service")
+            if ok and _looksLikeSvc(mod) then return mod end
+
+            return nil
+        end)()
+
         if type(svc) ~= "table" then
             local err = _mkErr(ctx)
             err("RoomEntitiesService not available. Run loader.init() first.")
