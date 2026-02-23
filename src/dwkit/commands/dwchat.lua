@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwchat
 -- Owner       : Commands
--- Version     : v2026-02-23A
+-- Version     : v2026-02-23B
 -- Purpose     :
 --   - Command handler for "dwchat" (SAFE)
 --   - Phase 1 objective: provide a deterministic command surface to control chat_ui:
@@ -15,6 +15,7 @@
 --       * clear (clears chat log)
 --       * send on|off (controls chat_ui sendToMud flag; still manual-on-enter only)
 --       * input on|off (best-effort input enable; may require chat_ui already created)
+--       * diag (NEW v2026-02-23B) (prints a SAFE diagnostic snapshot)
 --
 -- Design notes:
 --   - Direct-control UI: chat_ui is applied via dwkit.ui.ui_manager.applyOne("chat_ui")
@@ -38,7 +39,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-23A"
+M.VERSION = "v2026-02-23B"
 
 local function _out(ctx, line)
     if type(ctx) == "table" and type(ctx.out) == "function" then
@@ -285,6 +286,7 @@ local function _usage(ctx)
     _out(ctx, "  dwchat hide|close")
     _out(ctx, "  dwchat toggle")
     _out(ctx, "  dwchat status")
+    _out(ctx, "  dwchat diag")
     _out(ctx, "  dwchat enable")
     _out(ctx, "  dwchat disable")
     _out(ctx, "  dwchat tabs")
@@ -403,6 +405,182 @@ local function _setInputEnabled(ctx, on)
     return false, tostring(errOrNil or "chat_ui.setInputEnabled failed")
 end
 
+-- -------------------------------------------------------------------------
+-- NEW (v2026-02-23B): SAFE diagnostic snapshot
+-- -------------------------------------------------------------------------
+
+local function _getNowTs()
+    if type(os) == "table" and type(os.time) == "function" then
+        return os.time()
+    end
+    return 0
+end
+
+local function _getEnabledBestEffort(gs)
+    if type(gs) == "table" and type(gs.isEnabled) == "function" then
+        local ok, v = pcall(gs.isEnabled, "chat_ui", false)
+        if ok then return (v == true) end
+    end
+    return false
+end
+
+local function _getCfgVisibleSessionBestEffort(gs)
+    local v = _getCfgVisibleBestEffort(gs)
+    if v == nil then return false end
+    return (v == true)
+end
+
+local function _getChatUiStateBestEffort(ctx)
+    local okUI, UI = _safeRequire(ctx, "dwkit.ui.chat_ui")
+    if not okUI or type(UI) ~= "table" or type(UI.getState) ~= "function" then
+        return nil, nil
+    end
+    local okS, s = pcall(UI.getState)
+    if not okS or type(s) ~= "table" then
+        return nil, nil
+    end
+    local unread = s.unread or {}
+    return {
+        visible = (s.visible == true),
+        activeTab = tostring(s.activeTab or "?"),
+        enableInput = (s.enableInput == true),
+        sendToMud = (s.sendToMud == true),
+        unread = {
+            SAY = tonumber(unread.SAY or 0) or 0,
+            PRIVATE = tonumber(unread.PRIVATE or 0) or 0,
+            PUBLIC = tonumber(unread.PUBLIC or 0) or 0,
+            GRATS = tonumber(unread.GRATS or 0) or 0,
+            Other = tonumber(unread.Other or 0) or 0,
+        },
+    }, nil
+end
+
+local function _getLogMetaBestEffort(ctx)
+    local okL, LogOrErr = pcall(require, "dwkit.services.chat_log_service")
+    if not okL or type(LogOrErr) ~= "table" then
+        return nil, "chat_log_service not available: " .. tostring(LogOrErr)
+    end
+    local Log = LogOrErr
+
+    local meta = { count = 0, latestId = 0, profileTag = "?" }
+
+    if type(Log.getState) == "function" then
+        local okS, st = pcall(Log.getState, {})
+        if okS and type(st) == "table" then
+            meta.count = tonumber(st.count or 0) or 0
+            meta.latestId = tonumber(st.latestId or 0) or 0
+            meta.profileTag = tostring(st.profileTag or meta.profileTag)
+            return meta, nil
+        end
+    end
+
+    if type(Log.getItems) == "function" then
+        local okI, _, m = pcall(Log.getItems, nil, {})
+        if okI and type(m) == "table" then
+            meta.latestId = tonumber(m.latestId or 0) or 0
+            meta.count = tonumber(m.count or 0) or 0
+            meta.profileTag = tostring(m.profileTag or meta.profileTag)
+            return meta, nil
+        end
+    end
+
+    return meta, nil
+end
+
+local function _getRouterVersionBestEffort(ctx)
+    local okR, R = _safeRequire(ctx, "dwkit.services.chat_router_service")
+    if not okR or type(R) ~= "table" then return nil end
+    if type(R.getVersion) == "function" then
+        local ok, v = pcall(R.getVersion)
+        if ok and type(v) == "string" then return v end
+    end
+    return (type(R.VERSION) == "string" and R.VERSION) or nil
+end
+
+local function _getCaptureDebugBestEffort(ctx)
+    local okC, C = _safeRequire(ctx, "dwkit.capture.chat_capture")
+    if not okC or type(C) ~= "table" then return nil end
+
+    local dbg = nil
+    if type(C.getDebugState) == "function" then
+        local ok, v = pcall(C.getDebugState)
+        if ok and type(v) == "table" then dbg = v end
+    end
+
+    local installed = nil
+    if type(C.isInstalled) == "function" then
+        local ok, v = pcall(C.isInstalled)
+        if ok then installed = (v == true) end
+    elseif type(dbg) == "table" and dbg.installed ~= nil then
+        installed = (dbg.installed == true)
+    end
+
+    return {
+        installed = (installed == true),
+        debug = dbg,
+    }
+end
+
+local function _printDiag(ctx, gs)
+    local now = _getNowTs()
+
+    local enabled = _getEnabledBestEffort(gs)
+    local cfgVisible = _getCfgVisibleSessionBestEffort(gs)
+
+    local uiState, uiErr = _getChatUiStateBestEffort(ctx)
+    local rtVisible = _getRuntimeVisibleFallback()
+
+    local logMeta, logErr = _getLogMetaBestEffort(ctx)
+    local routerVer = _getRouterVersionBestEffort(ctx)
+    local cap = _getCaptureDebugBestEffort(ctx)
+
+    _out(ctx, "============================================================")
+    _out(ctx, "[DWKit Chat] diag (SAFE)")
+    _out(ctx, string.format("[diag] ts=%s", tostring(now)))
+    _out(ctx, string.format("[diag] dwchat.version=%s", tostring(M.VERSION)))
+    _out(ctx, string.format("[diag] enabled=%s cfgVisible(session)=%s rtVisible=%s",
+        tostring(enabled), tostring(cfgVisible), tostring(rtVisible)))
+
+    if type(uiState) == "table" then
+        local u = uiState.unread or {}
+        _out(ctx, string.format("[diag] chat_ui visible=%s activeTab=%s input=%s sendToMud=%s",
+            tostring(uiState.visible), tostring(uiState.activeTab), tostring(uiState.enableInput),
+            tostring(uiState.sendToMud)))
+        _out(ctx, string.format("[diag] unread SAY=%s PRIVATE=%s PUBLIC=%s GRATS=%s Other=%s",
+            tostring(u.SAY or 0), tostring(u.PRIVATE or 0), tostring(u.PUBLIC or 0), tostring(u.GRATS or 0),
+            tostring(u.Other or 0)))
+    else
+        _out(ctx, string.format("[diag] chat_ui state unavailable (%s)", tostring(uiErr or "no getState")))
+    end
+
+    if type(logMeta) == "table" then
+        _out(ctx, string.format("[diag] chat_log meta.count=%s meta.latestId=%s meta.profileTag=%s",
+            tostring(logMeta.count), tostring(logMeta.latestId), tostring(logMeta.profileTag)))
+    else
+        _out(ctx, string.format("[diag] chat_log unavailable (%s)", tostring(logErr or "unknown")))
+    end
+
+    _out(ctx, string.format("[diag] chat_router version=%s", tostring(routerVer or "?")))
+
+    if type(cap) == "table" then
+        _out(ctx, string.format("[diag] chat_capture installed=%s", tostring(cap.installed)))
+        local d = cap.debug or {}
+        if type(d) == "table" then
+            _out(ctx,
+                string.format(
+                    "[diag] chat_capture seen=%s forwarded=%s ignoredPrompt=%s ignoredEmpty=%s lastOkTs=%s lastErr=%s",
+                    tostring(d.seenCount), tostring(d.forwardedCount), tostring(d.ignoredPromptCount),
+                    tostring(d.ignoredEmptyCount),
+                    tostring(d.lastOkTs), tostring(d.lastErr)))
+        end
+    else
+        _out(ctx, "[diag] chat_capture not available")
+    end
+
+    _out(ctx, "============================================================")
+    return true, nil
+end
+
 function M.dispatch(...)
     local a1, a2 = ...
     local ctx = nil
@@ -441,6 +619,15 @@ function M.dispatch(...)
 
     if sub == "status" then
         _printStatus(ctx, gs)
+        return true, nil
+    end
+
+    if sub == "diag" then
+        local ok, err = _printDiag(ctx, gs)
+        if not ok then
+            _err(ctx, tostring(err))
+            return false, err
+        end
         return true, nil
     end
 
