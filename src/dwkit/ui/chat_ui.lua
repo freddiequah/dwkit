@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.chat_ui
 -- Owner       : UI
--- Version     : v2026-02-23B
+-- Version     : v2026-02-23C
 -- Purpose     :
 --   - SAFE Chat UI (consumer-only) displaying ChatLogService buffer.
 --   - Renders a DWKit-themed container with a tab row:
@@ -24,6 +24,10 @@
 --       * timestamp_prefix (default OFF)
 --       * debug_overlay (default OFF)  -> ALSO affects layout (no extra gap when OFF)
 --   - Adds renderDebug instrumentation for deterministic dwverify assertions.
+--
+-- Phase 2.1 (v2026-02-23C):
+--   - Profile font follow: chat console + input best-effort adopt Mudlet profile font + size
+--     via getFont()/getFontSize() (no hardcoded 9pt).
 --
 -- Public API:
 --   - getVersion() -> string
@@ -53,7 +57,7 @@
 
 local M                         = {}
 
-M.VERSION                       = "v2026-02-23B"
+M.VERSION                       = "v2026-02-23C"
 
 local PREFIX                    = (DWKit and DWKit.getEventPrefix and DWKit.getEventPrefix()) or "DWKit:"
 local LogSvc                    = require("dwkit.services.chat_log_service")
@@ -110,6 +114,13 @@ local st                        = {
             timestamp_prefix = false,
             debug_overlay = false,
         },
+    },
+
+    -- Profile font cache (best-effort, avoids spam re-apply)
+    profileFont = {
+        lastName = nil,
+        lastSize = nil,
+        lastAppliedAt = nil,
     },
 
     -- Render instrumentation for deterministic dwverify
@@ -568,6 +579,77 @@ local function _moveResizeBestEffort(obj, x, y, w, h)
     return okAny
 end
 
+-- -------------------------------------------------------------------------
+-- Profile font follow (best-effort)
+-- -------------------------------------------------------------------------
+
+local function _getProfileFontBestEffort()
+    local fontName, fontSize
+
+    if type(_G.getFont) == "function" then
+        local ok, v = pcall(_G.getFont)
+        if ok and type(v) == "string" and v ~= "" then
+            fontName = v
+        end
+    end
+
+    if type(_G.getFontSize) == "function" then
+        local ok, v = pcall(_G.getFontSize)
+        if ok then
+            v = tonumber(v)
+            if v and v > 0 then
+                fontSize = v
+            end
+        end
+    end
+
+    return fontName, fontSize
+end
+
+local function _applyFontToWidgetBestEffort(w, fontName, fontSize)
+    if type(w) ~= "table" then return false end
+    local okAny = false
+
+    if type(fontName) == "string" and fontName ~= "" then
+        for _, fn in ipairs({ "setFont", "setFontName", "setFontFamily" }) do
+            if type(w[fn]) == "function" then
+                local ok = pcall(function() w[fn](w, fontName) end)
+                okAny = okAny or (ok == true)
+            end
+        end
+    end
+
+    if type(fontSize) == "number" and fontSize > 0 then
+        for _, fn in ipairs({ "setFontSize", "setFontPointSize", "setTextSize" }) do
+            if type(w[fn]) == "function" then
+                local ok = pcall(function() w[fn](w, fontSize) end)
+                okAny = okAny or (ok == true)
+            end
+        end
+    end
+
+    return okAny
+end
+
+local function _applyProfileFontBestEffort()
+    local fontName, fontSize = _getProfileFontBestEffort()
+    if not fontName and not fontSize then return false end
+
+    if st.profileFont.lastName == fontName and st.profileFont.lastSize == fontSize then
+        -- Still allow re-apply if widgets were recreated; but keep it light.
+    end
+
+    local okAny = false
+    okAny = _applyFontToWidgetBestEffort(st.console, fontName, fontSize) or okAny
+    okAny = _applyFontToWidgetBestEffort(st.input, fontName, fontSize) or okAny
+
+    st.profileFont.lastName = fontName
+    st.profileFont.lastSize = fontSize
+    st.profileFont.lastAppliedAt = (type(os) == "table" and type(os.time) == "function") and os.time() or nil
+
+    return okAny
+end
+
 local function _computeYConsoleBestEffort()
     local feats = (st.featureCfg and st.featureCfg.features) or {}
     local debugOn = (feats.debug_overlay == true)
@@ -658,6 +740,9 @@ local function _reflowLayoutBestEffort()
     st.layout.measured.bodyW = bodyW
     st.layout.measured.bodyH = bodyH
     st.layout.measured.consoleH = consoleH
+
+    -- Best-effort: some widgets reset font on resize; re-apply profile font.
+    pcall(_applyProfileFontBestEffort)
 
     return ok
 end
@@ -1083,10 +1168,6 @@ local function _ensureUi(opts)
         height = "100%",
     }, st.consoleHost)
 
-    pcall(function()
-        if type(st.console.setFontSize) == "function" then st.console:setFontSize(9) end
-    end)
-
     st.inputHost = nil
     st.input = nil
 
@@ -1131,10 +1212,6 @@ local function _ensureUi(opts)
             local inputName = tostring(st.input.name or "")
             _applyCommandLineStyleBestEffort(inputName)
 
-            pcall(function()
-                if type(st.input.setFontSize) == "function" then st.input:setFontSize(9) end
-            end)
-
             local function _onSubmit()
                 if st.visible ~= true then return end
                 if st.enableInput ~= true then return end
@@ -1162,6 +1239,9 @@ local function _ensureUi(opts)
     _applyBundleContentNoInsetBestEffort()
     _applyBodyFillStyleBestEffort()
     _applyConsoleTransparentBestEffort()
+
+    -- Profile font follow (console + input)
+    pcall(_applyProfileFontBestEffort)
 
     _renderTabButtons()
     _applyDebugLabelBestEffort()
@@ -1594,6 +1674,12 @@ function M.dispose()
 
     st.enableInput = true
     st.sendToMud = false
+
+    st.profileFont = {
+        lastName = nil,
+        lastSize = nil,
+        lastAppliedAt = nil,
+    }
 
     st.visible = false
     pcall(U.setUiStateVisibleBestEffort, UI_ID, false)

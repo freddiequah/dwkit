@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.chat_manager_ui
 -- Owner       : UI
--- Version     : v2026-02-23G
+-- Version     : v2026-02-23H
 -- Purpose     :
 --   - DWKit-native Chat Manager UI (consumer-only).
 --   - Provides a visible control surface for chat feature toggles (Phase 2).
@@ -36,11 +36,14 @@
 --   - NEW v2026-02-23G:
 --       * Deterministic readback: getLayoutDebug() includes per-row last rendered texts
 --         (toggleText/valueText) so dwverify can assert live readback without Geyser introspection.
+--   - NEW v2026-02-23H:
+--       * Bool toggle button text now uses ACTION label semantics (UI Manager style):
+--         shows "Enable" when currently OFF, and "Disable" when currently ON.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-23G"
+M.VERSION = "v2026-02-23H"
 
 local UIW = require("dwkit.ui.ui_window")
 local U = require("dwkit.ui.ui_base")
@@ -135,7 +138,10 @@ local function _wireClickBestEffort(labelObj, fn)
     return wired
 end
 
-local function _fmtBool(v) return (v == true) and "ON" or "OFF" end
+-- ACTION label semantics (UI Manager style): show what clicking will do.
+local function _fmtToggleAction(curEnabled)
+    return (curEnabled == true) and "Disable" or "Enable"
+end
 
 local function _safeEcho(label, txt)
     if type(label) ~= "table" then return false end
@@ -317,7 +323,7 @@ local function _renderHelp()
     lines[#lines + 1] = "Defaults: all features OFF (toggle-first)"
     lines[#lines + 1] = ""
     lines[#lines + 1] = "Controls:"
-    lines[#lines + 1] = "- Bool: click ON/OFF (or click the feature text)"
+    lines[#lines + 1] = "- Bool: click Enable/Disable (or click the feature text)"
     lines[#lines + 1] = "- Number: use - / + (or click the feature text to +step)"
     lines[#lines + 1] = "- Apply: best-effort redraw chat_ui"
     lines[#lines + 1] = "- Defaults: reset to OFF (limit N=500) + apply"
@@ -337,8 +343,9 @@ local function _toggleBoolFeature(key)
     key = tostring(key or "")
     if key == "" then return false end
     local cur = (ChatMgr.getFeature(key) == true)
-    ChatMgr.setFeature(key, (not cur), { source = "chat_manager_ui:toggle:" .. key, apply = true })
-    _setStatus("Toggled " .. key .. " => " .. _fmtBool((not cur) == true))
+    local after = (not cur) == true
+    ChatMgr.setFeature(key, after, { source = "chat_manager_ui:toggle:" .. key, apply = true })
+    _setStatus("Set " .. key .. " => " .. (after and "ENABLED" or "DISABLED"))
     M.refresh({ source = "toggle", force = false })
     return true
 end
@@ -368,7 +375,7 @@ local function _syncRowValuesBestEffort()
                 if kind == "bool" then
                     if type(r.btnToggle) == "table" then
                         local cur = (ChatMgr.getFeature(key) == true)
-                        _echoRemember(r, "_lastToggleText", r.btnToggle, _fmtBool(cur))
+                        _echoRemember(r, "_lastToggleText", r.btnToggle, _fmtToggleAction(cur))
                     end
                 elseif kind == "number" then
                     if type(r.valueLabel) == "table" then
@@ -470,14 +477,15 @@ local function _renderFeatureRows(force)
         _safeEcho(row.descLabel, desc)
 
         if kind == "bool" then
+            local curEnabled = (val == true)
             row.btnToggle = _mkBtn(
                 row.container,
                 tostring(st.bundle.meta.nameContent or "__DWKit_chatmgr") .. "__btn__" .. key,
                 "-180px", 10, "80px", 24,
-                _fmtBool(val == true),
+                _fmtToggleAction(curEnabled),
                 true
             )
-            row._lastToggleText = _fmtBool(val == true)
+            row._lastToggleText = _fmtToggleAction(curEnabled)
 
             local function _onToggle()
                 _toggleBoolFeature(key)
@@ -787,7 +795,7 @@ function M.getLayoutDebug()
                     hasPlus = (type(r) == "table" and type(r.btnPlus) == "table") or false,
                     hasValueLabel = (type(r) == "table" and type(r.valueLabel) == "table") or false,
 
-                    -- NEW deterministic readback fields:
+                    -- Deterministic readback fields:
                     toggleText = tostring((type(r) == "table" and r._lastToggleText) or ""),
                     valueText = tostring((type(r) == "table" and r._lastValueText) or ""),
                 }
