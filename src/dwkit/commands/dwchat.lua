@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwchat
 -- Owner       : Commands
--- Version     : v2026-02-23B
+-- Version     : v2026-02-23C
 -- Purpose     :
 --   - Command handler for "dwchat" (SAFE)
 --   - Phase 1 objective: provide a deterministic command surface to control chat_ui:
@@ -15,7 +15,13 @@
 --       * clear (clears chat log)
 --       * send on|off (controls chat_ui sendToMud flag; still manual-on-enter only)
 --       * input on|off (best-effort input enable; may require chat_ui already created)
---       * diag (NEW v2026-02-23B) (prints a SAFE diagnostic snapshot)
+--       * diag (prints a SAFE diagnostic snapshot)
+--
+--   - Phase 2 (NEW v2026-02-23C): Chat Manager feature toggles (SAFE):
+--       * manager open|show|hide|toggle|status
+--       * features (prints feature list + current values)
+--       * feature <key> <on|off|value>
+--       * defaults (reset manager defaults)
 --
 -- Design notes:
 --   - Direct-control UI: chat_ui is applied via dwkit.ui.ui_manager.applyOne("chat_ui")
@@ -23,11 +29,11 @@
 --   - Visible is session-only by default (noSave=true).
 --   - SAFE: no gameplay commands, no timers, no hidden automation.
 --
--- Status semantics (FIX v2026-02-22B):
+-- Status semantics:
 --   - "enabled" must be sourced from gui_settings (authoritative), not chat_ui.getState().
 --   - "visible" prefers chat_ui.getState().visible; fallback to ui_base runtime store state.visible.
 --
--- Sync semantics (FIX v2026-02-23A):
+-- Sync semantics:
 --   - hide/close/disable/toggle must go through ui_manager.applyOne("chat_ui")
 --     so LaunchPad + runtime-visible stay in sync (applyOne triggers launchpad refresh).
 --   - ui_manager_ui row refresh is best-effort (only if module is present/open).
@@ -39,7 +45,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-23B"
+M.VERSION = "v2026-02-23C"
 
 local function _out(ctx, line)
     if type(ctx) == "table" and type(ctx.out) == "function" then
@@ -116,7 +122,7 @@ local function _setEnabled(gs, on)
     if type(gs) ~= "table" or type(gs.setEnabled) ~= "function" then
         return false, "guiSettings.setEnabled not available"
     end
-    local ok, err = gs.setEnabled("chat_ui", (on == true), nil) -- persisted enable/disable
+    local ok, err = gs.setEnabled("chat_ui", (on == true), nil)
     if ok ~= true then
         return false, tostring(err or "setEnabled failed")
     end
@@ -152,13 +158,11 @@ local function _refreshUiManagerUiBestEffort()
     local ok, UI = pcall(require, "dwkit.ui.ui_manager_ui")
     if not ok or type(UI) ~= "table" then return false end
 
-    -- Prefer refresh() (does not enforce ui_manager_ui visible flag)
     if type(UI.refresh) == "function" then
         pcall(UI.refresh, { source = "dwchat:sync", quiet = true })
         return true
     end
 
-    -- Fallback: apply() (may hide itself if cfg visible off)
     if type(UI.apply) == "function" then
         pcall(UI.apply, { source = "dwchat:sync", quiet = true })
         return true
@@ -178,7 +182,6 @@ local function _applyChatViaUiManager(ctx, source)
         return false, tostring(errOrNil or "ui_manager.applyOne(chat_ui) failed")
     end
 
-    -- fallback: direct chat_ui control (still SAFE; but may not sync launchpad)
     local okUI, UI = _safeRequire(ctx, "dwkit.ui.chat_ui")
     if okUI and type(UI.show) == "function" then
         local okCall, errOrNil = pcall(UI.show, { source = source or "dwchat", fixed = false, noClose = false })
@@ -192,7 +195,6 @@ local function _applyChatViaUiManager(ctx, source)
     return false, "ui_manager/chat_ui not available"
 end
 
--- IMPORTANT: hide must go through ui_manager.applyOne so LaunchPad refresh occurs.
 local function _hideChatViaUiManagerBestEffort(ctx, source)
     local okUM, UM = _safeRequire(ctx, "dwkit.ui.ui_manager")
     if okUM and type(UM.applyOne) == "function" then
@@ -201,7 +203,6 @@ local function _hideChatViaUiManagerBestEffort(ctx, source)
         return true
     end
 
-    -- fallback: direct hide (may not refresh launchpad)
     local okUI, UI = _safeRequire(ctx, "dwkit.ui.chat_ui")
     if okUI and type(UI.hide) == "function" then
         pcall(UI.hide, { source = source or "dwchat:hide" })
@@ -212,7 +213,6 @@ local function _hideChatViaUiManagerBestEffort(ctx, source)
     return true
 end
 
--- Toggle MUST flip cfg visible then applyOne (direct chat_ui.toggle bypasses manager surfaces).
 local function _toggleViaUiManagerBestEffort(ctx, gs, source)
     local cur = _getCfgVisibleBestEffort(gs)
     if cur == nil then cur = false end
@@ -223,7 +223,6 @@ local function _toggleViaUiManagerBestEffort(ctx, gs, source)
     return _applyChatViaUiManager(ctx, source or "dwchat:toggle")
 end
 
--- FIX: enabled MUST be read from gui_settings; visible from chat_ui state or ui_base runtime fallback.
 local function _getRuntimeVisibleFallback()
     local okB, U = pcall(require, "dwkit.ui.ui_base")
     if not okB or type(U) ~= "table" or type(U.getUiStoreEntry) ~= "function" then
@@ -294,6 +293,11 @@ local function _usage(ctx)
     _out(ctx, "  dwchat clear")
     _out(ctx, "  dwchat send on|off")
     _out(ctx, "  dwchat input on|off")
+    _out(ctx, "")
+    _out(ctx, "  dwchat manager open|show|hide|toggle|status")
+    _out(ctx, "  dwchat features")
+    _out(ctx, "  dwchat feature <key> <on|off|value>")
+    _out(ctx, "  dwchat defaults")
 end
 
 local function _parseOnOff(s)
@@ -406,7 +410,7 @@ local function _setInputEnabled(ctx, on)
 end
 
 -- -------------------------------------------------------------------------
--- NEW (v2026-02-23B): SAFE diagnostic snapshot
+-- SAFE diagnostic snapshot (existing)
 -- -------------------------------------------------------------------------
 
 local function _getNowTs()
@@ -451,6 +455,7 @@ local function _getChatUiStateBestEffort(ctx)
             PUBLIC = tonumber(unread.PUBLIC or 0) or 0,
             GRATS = tonumber(unread.GRATS or 0) or 0,
             Other = tonumber(unread.Other or 0) or 0,
+            All = tonumber(unread.All or 0) or 0,
         },
     }, nil
 end
@@ -521,6 +526,17 @@ local function _getCaptureDebugBestEffort(ctx)
     }
 end
 
+local function _getManagerCfgBestEffort()
+    local ok, Mgr = pcall(require, "dwkit.services.chat_manager")
+    if not ok or type(Mgr) ~= "table" then return nil end
+    if type(Mgr.getConfig) ~= "function" then return nil end
+    local ok2, cfg = pcall(Mgr.getConfig)
+    if ok2 and type(cfg) == "table" then
+        return cfg
+    end
+    return nil
+end
+
 local function _printDiag(ctx, gs)
     local now = _getNowTs()
 
@@ -533,6 +549,7 @@ local function _printDiag(ctx, gs)
     local logMeta, logErr = _getLogMetaBestEffort(ctx)
     local routerVer = _getRouterVersionBestEffort(ctx)
     local cap = _getCaptureDebugBestEffort(ctx)
+    local mgrCfg = _getManagerCfgBestEffort()
 
     _out(ctx, "============================================================")
     _out(ctx, "[DWKit Chat] diag (SAFE)")
@@ -546,9 +563,9 @@ local function _printDiag(ctx, gs)
         _out(ctx, string.format("[diag] chat_ui visible=%s activeTab=%s input=%s sendToMud=%s",
             tostring(uiState.visible), tostring(uiState.activeTab), tostring(uiState.enableInput),
             tostring(uiState.sendToMud)))
-        _out(ctx, string.format("[diag] unread SAY=%s PRIVATE=%s PUBLIC=%s GRATS=%s Other=%s",
+        _out(ctx, string.format("[diag] unread SAY=%s PRIVATE=%s PUBLIC=%s GRATS=%s Other=%s All=%s",
             tostring(u.SAY or 0), tostring(u.PRIVATE or 0), tostring(u.PUBLIC or 0), tostring(u.GRATS or 0),
-            tostring(u.Other or 0)))
+            tostring(u.Other or 0), tostring(u.All or 0)))
     else
         _out(ctx, string.format("[diag] chat_ui state unavailable (%s)", tostring(uiErr or "no getState")))
     end
@@ -577,9 +594,130 @@ local function _printDiag(ctx, gs)
         _out(ctx, "[diag] chat_capture not available")
     end
 
+    if type(mgrCfg) == "table" and type(mgrCfg.features) == "table" then
+        local f = mgrCfg.features
+        _out(ctx,
+            string.format(
+                "[diag] chat_manager all_unread_badge=%s auto_scroll_follow=%s per_tab_line_limit=%s per_tab_line_limit_n=%s timestamp_prefix=%s debug_overlay=%s",
+                tostring(f.all_unread_badge), tostring(f.auto_scroll_follow), tostring(f.per_tab_line_limit),
+                tostring(f.per_tab_line_limit_n), tostring(f.timestamp_prefix), tostring(f.debug_overlay)))
+    else
+        _out(ctx, "[diag] chat_manager unavailable")
+    end
+
     _out(ctx, "============================================================")
     return true, nil
 end
+
+-- -------------------------------------------------------------------------
+-- Phase 2 manager helpers
+-- -------------------------------------------------------------------------
+
+local function _mgr()
+    local ok, Mgr = pcall(require, "dwkit.services.chat_manager")
+    if ok and type(Mgr) == "table" then return Mgr end
+    return nil
+end
+
+local function _mgrUi()
+    local ok, UI = pcall(require, "dwkit.ui.chat_manager_ui")
+    if ok and type(UI) == "table" then return UI end
+    return nil
+end
+
+local function _printFeatures(ctx)
+    local Mgr = _mgr()
+    if not Mgr then
+        return false, "chat_manager not available"
+    end
+    local cfg = Mgr.getConfig()
+    local feats = cfg.features or {}
+    _out(ctx, "[DWKit Chat] features:")
+    local list = Mgr.listFeatures()
+    for _, f in ipairs(list) do
+        local key = tostring(f.key)
+        local val = feats[key]
+        _out(ctx, string.format("  - %s = %s", key, tostring(val)))
+    end
+    return true, nil
+end
+
+local function _setFeature(ctx, key, value)
+    local Mgr = _mgr()
+    if not Mgr then
+        return false, "chat_manager not available"
+    end
+    key = tostring(key or "")
+    if key == "" then return false, "feature key required" end
+    local ok, err = Mgr.setFeature(key, value, { source = "dwchat:feature", apply = true })
+    if not ok then
+        return false, err
+    end
+    _out(ctx, "[DWKit Chat] feature set: " .. tostring(key) .. "=" .. tostring(Mgr.getFeature(key)))
+    return true, nil
+end
+
+local function _mgrDefaults(ctx)
+    local Mgr = _mgr()
+    if not Mgr then
+        return false, "chat_manager not available"
+    end
+    local ok, err = Mgr.resetDefaults({ source = "dwchat:defaults", apply = true })
+    if not ok then return false, err end
+    _out(ctx, "[DWKit Chat] chat_manager defaults restored")
+    return true, nil
+end
+
+local function _mgrStatus(ctx)
+    local Mgr = _mgr()
+    if not Mgr then
+        _out(ctx, "[DWKit Chat] manager status: unavailable")
+        return true, nil
+    end
+    local cfg = Mgr.getConfig()
+    local f = cfg.features or {}
+    _out(ctx,
+        string.format(
+            "[DWKit Chat] manager status all_unread_badge=%s auto_scroll_follow=%s per_tab_line_limit=%s per_tab_line_limit_n=%s timestamp_prefix=%s debug_overlay=%s",
+            tostring(f.all_unread_badge), tostring(f.auto_scroll_follow), tostring(f.per_tab_line_limit),
+            tostring(f.per_tab_line_limit_n), tostring(f.timestamp_prefix), tostring(f.debug_overlay)))
+    return true, nil
+end
+
+local function _mgrOpen(ctx)
+    local UI = _mgrUi()
+    if not UI then
+        return false, "chat_manager_ui not available"
+    end
+    local ok, err = UI.show({ source = "dwchat:manager" })
+    if not ok then return false, err end
+    _out(ctx, "[DWKit Chat] manager shown")
+    return true, nil
+end
+
+local function _mgrHide(ctx)
+    local UI = _mgrUi()
+    if not UI then
+        return false, "chat_manager_ui not available"
+    end
+    UI.hide({ source = "dwchat:manager" })
+    _out(ctx, "[DWKit Chat] manager hidden")
+    return true, nil
+end
+
+local function _mgrToggle(ctx)
+    local UI = _mgrUi()
+    if not UI then
+        return false, "chat_manager_ui not available"
+    end
+    UI.toggle({ source = "dwchat:manager" })
+    _out(ctx, "[DWKit Chat] manager toggled")
+    return true, nil
+end
+
+-- -------------------------------------------------------------------------
+-- Dispatch
+-- -------------------------------------------------------------------------
 
 function M.dispatch(...)
     local a1, a2 = ...
@@ -615,6 +753,94 @@ function M.dispatch(...)
         if okUM and type(UM.seedRegisteredDefaults) == "function" then
             pcall(UM.seedRegisteredDefaults, { save = false })
         end
+    end
+
+    -- Phase 2 manager namespace (dwchat manager ...)
+    if sub == "manager" then
+        local action = tostring(arg2 or "")
+        if action == "" or action == "open" or action == "show" then
+            local ok, err = _mgrOpen(ctx)
+            if not ok then
+                _err(ctx, tostring(err))
+                return false, err
+            end
+            return true, nil
+        end
+        if action == "hide" or action == "close" then
+            local ok, err = _mgrHide(ctx)
+            if not ok then
+                _err(ctx, tostring(err))
+                return false, err
+            end
+            return true, nil
+        end
+        if action == "toggle" then
+            local ok, err = _mgrToggle(ctx)
+            if not ok then
+                _err(ctx, tostring(err))
+                return false, err
+            end
+            return true, nil
+        end
+        if action == "status" then
+            _mgrStatus(ctx)
+            return true, nil
+        end
+
+        _usage(ctx)
+        return true, nil
+    end
+
+    if sub == "features" then
+        local ok, err = _printFeatures(ctx)
+        if not ok then
+            _err(ctx, tostring(err))
+            return false, err
+        end
+        return true, nil
+    end
+
+    if sub == "feature" then
+        local key = tostring(arg2 or "")
+        local val = arg3
+
+        if key == "" then
+            _usage(ctx)
+            return true, nil
+        end
+
+        local parsed = _parseOnOff(val)
+        if parsed ~= nil then
+            local ok, err = _setFeature(ctx, key, parsed)
+            if not ok then
+                _err(ctx, tostring(err))
+                return false, err
+            end
+            return true, nil
+        end
+
+        -- allow numeric value (e.g., per_tab_line_limit_n 800)
+        local n = tonumber(val)
+        if n ~= nil then
+            local ok, err = _setFeature(ctx, key, n)
+            if not ok then
+                _err(ctx, tostring(err))
+                return false, err
+            end
+            return true, nil
+        end
+
+        _usage(ctx)
+        return true, nil
+    end
+
+    if sub == "defaults" then
+        local ok, err = _mgrDefaults(ctx)
+        if not ok then
+            _err(ctx, tostring(err))
+            return false, err
+        end
+        return true, nil
     end
 
     if sub == "status" then
@@ -716,7 +942,6 @@ function M.dispatch(...)
         _ensureVisiblePersistenceSession(gs)
         pcall(_setVisibleSession, gs, false)
 
-        -- IMPORTANT: route through applyOne so LaunchPad sync occurs.
         pcall(_applyChatViaUiManager, ctx, "dwchat:disable")
 
         _out(ctx, "[DWKit Chat] enabled=OFF (chat_ui)")
@@ -730,7 +955,6 @@ function M.dispatch(...)
             _err(ctx, "setVisible OFF failed: " .. tostring(errV))
         end
 
-        -- IMPORTANT: use applyOne (not disposeOne) so LaunchPad refresh occurs.
         _hideChatViaUiManagerBestEffort(ctx, "dwchat:hide")
 
         _out(ctx, "[DWKit Chat] hidden (chat_ui)")
