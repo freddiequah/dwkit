@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_manager
 -- Owner       : UI
--- Version     : v2026-02-15B
+-- Version     : v2026-02-23C
 -- Purpose     :
 --   - SAFE dispatcher for applying UI modules registered in gui_settings.
 --   - Provides manual-only "apply all" and "apply one" capability.
@@ -20,11 +20,18 @@
 --     - FIX: direct-control UIs (chat_ui) must still claim providers when enabled.
 --       Ensure dependency claims occur BEFORE direct-control show/hide handling.
 --     - Add provider deps mapping for chat_ui -> { "chat_watch" }.
+--
+--   v2026-02-23C:
+--     - FIX: gui_settings visible-default ordering.
+--       ui_manager must NOT accidentally treat "unset visible" as true.
+--       Prefer default=false queries first when probing isVisible/getVisible signatures.
+--       This prevents chat_ui (direct-control) or any UI from auto-showing due to
+--       probe order when visible persistence is OFF or signatures vary.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-15B"
+M.VERSION = "v2026-02-23C"
 
 local function _rawOut(line)
     line = tostring(line or "")
@@ -153,6 +160,8 @@ end
 
 -- HARDEN: tolerate different gui_settings signatures.
 -- Must return true/false when possible; otherwise nil.
+-- IMPORTANT (v2026-02-23C):
+-- Prefer default=false first so "unset visible" never accidentally becomes true due to probe order.
 local function _isVisibleBestEffort(gs, uiId)
     if type(gs) ~= "table" then return nil end
 
@@ -164,26 +173,27 @@ local function _isVisibleBestEffort(gs, uiId)
         return _boolish(v)
     end
 
-    local v = _try("isVisible", uiId, true)
-    if v ~= nil then return v end
-    v = _try("isVisible", uiId, false)
-    if v ~= nil then return v end
-    v = _try("isVisible", uiId, { default = true })
+    -- Prefer default=false probes first
+    local v = _try("isVisible", uiId, false)
     if v ~= nil then return v end
     v = _try("isVisible", uiId, { default = false })
     if v ~= nil then return v end
     v = _try("isVisible", uiId)
     if v ~= nil then return v end
+    v = _try("isVisible", uiId, true)
+    if v ~= nil then return v end
+    v = _try("isVisible", uiId, { default = true })
+    if v ~= nil then return v end
 
-    v = _try("getVisible", uiId, true)
-    if v ~= nil then return v end
     v = _try("getVisible", uiId, false)
-    if v ~= nil then return v end
-    v = _try("getVisible", uiId, { default = true })
     if v ~= nil then return v end
     v = _try("getVisible", uiId, { default = false })
     if v ~= nil then return v end
     v = _try("getVisible", uiId)
+    if v ~= nil then return v end
+    v = _try("getVisible", uiId, true)
+    if v ~= nil then return v end
+    v = _try("getVisible", uiId, { default = true })
     if v ~= nil then return v end
 
     return nil
@@ -286,10 +296,15 @@ local function _applyDirectUiBestEffort(uiId, cfgVisible, opts)
     if DIRECT_UI[uiId] ~= true then return false end
 
     local bVisible = _boolish(cfgVisible)
+    if bVisible == nil then
+        -- Safety default: if cfg visible cannot be determined, treat as OFF.
+        bVisible = false
+    end
 
     if uiId == "chat_ui" then
         local okUI, UI = pcall(require, "dwkit.ui.chat_ui")
         if not okUI or type(UI) ~= "table" then
+            _setRuntimeVisibleBestEffort(uiId, (bVisible == true), "ui_manager:direct:chat:runtime_only")
             return true
         end
 
@@ -305,18 +320,17 @@ local function _applyDirectUiBestEffort(uiId, cfgVisible, opts)
             end
             _setRuntimeVisibleBestEffort(uiId, true, "ui_manager:direct:chat:show")
             return true
-        elseif bVisible == false then
-            if type(UI.hide) == "function" then
-                local okCall, errCall = pcall(UI.hide, { source = src })
-                if not okCall then _err("direct chat_ui.hide failed: " .. tostring(errCall), opts) end
-            elseif type(UI.toggle) == "function" then
-                local okCall, errCall = pcall(UI.toggle, { source = src })
-                if not okCall then _err("direct chat_ui.toggle failed: " .. tostring(errCall), opts) end
-            end
-            _setRuntimeVisibleBestEffort(uiId, false, "ui_manager:direct:chat:hide")
-            return true
         end
 
+        -- bVisible == false
+        if type(UI.hide) == "function" then
+            local okCall, errCall = pcall(UI.hide, { source = src })
+            if not okCall then _err("direct chat_ui.hide failed: " .. tostring(errCall), opts) end
+        elseif type(UI.toggle) == "function" then
+            local okCall, errCall = pcall(UI.toggle, { source = src })
+            if not okCall then _err("direct chat_ui.toggle failed: " .. tostring(errCall), opts) end
+        end
+        _setRuntimeVisibleBestEffort(uiId, false, "ui_manager:direct:chat:hide")
         return true
     end
 
@@ -330,8 +344,7 @@ end
 local UI_PROVIDER_DEPS = {
     roomentities_ui = { "roomfeed_watch" },
 
-    -- NEW: chat UI depends on chat_watch provider (ChatCapture).
-    -- This must still apply even though chat_ui is a direct-control UI.
+    -- chat UI depends on chat_watch provider (ChatCapture).
     chat_ui = { "chat_watch" },
 }
 
@@ -497,7 +510,7 @@ function M.applyOne(uiId, opts)
         return true, nil
     end
 
-    -- NEW: Ensure deps even for direct-control UIs (chat_ui).
+    -- Ensure deps even for direct-control UIs (chat_ui).
     local okDepPre, errDepPre = _ensureDepsIfAny(uiId, nil,
         { source = opts.source or "ui_manager:applyOne", quiet = true })
     if not okDepPre then
@@ -505,7 +518,7 @@ function M.applyOne(uiId, opts)
     end
 
     -- Direct-control UI path (e.g. chat_ui)
-    if DIRECT_UI[uiId] == true and cfgVisible ~= nil then
+    if DIRECT_UI[uiId] == true then
         _applyDirectUiBestEffort(uiId, cfgVisible, opts)
         _refreshLaunchpadBestEffort(uiId, opts)
         return true, nil

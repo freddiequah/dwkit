@@ -2,19 +2,28 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.chat_ui
 -- Owner       : UI
--- Version     : v2026-02-22B
+-- Version     : v2026-02-23A
 -- Purpose     :
 --   - SAFE Chat UI (consumer-only) displaying ChatLogService buffer.
 --   - Renders a DWKit-themed container with a tab row:
 --       All | SAY | PRIVATE | PUBLIC | GRATS | Other
 --   - Event-driven refresh on DWKit:Service:ChatLog:Updated while visible.
---   - Unread counts on non-All tabs; clears when user views that tab.
+--   - Unread counts on non-All tabs by default; clears when user views that tab.
 --   - Bottom input line (EMCO-like typing area):
 --       * DEFAULT ON (still SAFE: local-only unless sendToMud=true).
 --       * When enabled, submitting text is an explicit user action (Enter).
 --       * By default, submission is LOCAL-ONLY: appends to ChatLogService (no send()).
 --       * Optional sendToMud=true will call send(text) ONLY on user submit (still manual).
 --   - No timers, no GMCP.
+--
+-- Phase 2 (v2026-02-23A):
+--   - Adds best-effort feature config surface consumed from chat_manager:
+--       * all_unread_badge (default OFF)
+--       * auto_scroll_follow (default OFF)
+--       * per_tab_line_limit (default OFF) + per_tab_line_limit_n (default 500)
+--       * timestamp_prefix (default OFF)
+--       * debug_overlay (default OFF)
+--   - Defaults preserve v1 behavior unchanged.
 --
 -- Public API:
 --   - getVersion() -> string
@@ -24,12 +33,16 @@
 --   - dispose() -> boolean ok
 --   - getLayoutDebug() -> table (sizes, best-effort)
 --
--- Phase 1 Control Surface (NEW v2026-02-22B):
+-- Phase 1 Control Surface:
 --   - getTabs() -> string[] (TAB_ORDER copy)
 --   - setActiveTab(tab, opts?) -> boolean ok, string|nil err
 --   - clear(opts?) -> boolean ok, string|nil err      (clears ChatLogService)
 --   - setSendToMud(on, opts?) -> boolean ok
 --   - setInputEnabled(on, opts?) -> boolean ok, string|nil err (best-effort)
+--
+-- Phase 2 Control Surface (NEW):
+--   - setFeatureConfig(cfg, opts?) -> boolean ok (best-effort)
+--   - getFeatureConfig() -> table { features = {...} } (best-effort)
 --
 -- Notes:
 --   - Tab definitions are LOCKED by agreement v2026-02-10C.
@@ -40,7 +53,7 @@
 
 local M                         = {}
 
-M.VERSION                       = "v2026-02-22B"
+M.VERSION                       = "v2026-02-23A"
 
 local PREFIX                    = (DWKit and DWKit.getEventPrefix and DWKit.getEventPrefix()) or "DWKit:"
 local LogSvc                    = require("dwkit.services.chat_log_service")
@@ -83,6 +96,21 @@ local st                        = {
     input = nil,
     enableInput = true,
     sendToMud = false,
+
+    -- NEW: optional debug label
+    debugLabel = nil,
+
+    -- NEW: feature config (defaults preserve v1)
+    featureCfg = {
+        features = {
+            all_unread_badge = false,
+            auto_scroll_follow = false,
+            per_tab_line_limit = false,
+            per_tab_line_limit_n = 500,
+            timestamp_prefix = false,
+            debug_overlay = false,
+        },
+    },
 
     layout = {
         tabH = 24,
@@ -158,22 +186,42 @@ local function _passesTab(item, tab)
     return false
 end
 
-local function _mkLine(item)
-    local speaker = _isNonEmptyString(item.speaker) and item.speaker or nil
-    local target  = _isNonEmptyString(item.target) and item.target or nil
+local function _fmtHMS(ts)
+    ts = tonumber(ts)
+    if not ts or ts <= 0 then return nil end
+    if type(os) ~= "table" or type(os.date) ~= "function" then return nil end
+    local ok, s = pcall(os.date, "%H:%M:%S", ts)
+    if ok and type(s) == "string" then return s end
+    return nil
+end
 
-    local chRaw   = _isNonEmptyString(item.channel) and item.channel or ""
-    local chan    = (chRaw ~= "" and ("[" .. chRaw .. "] ") or "")
+local function _mkLine(item)
+    local feats    = (st.featureCfg and st.featureCfg.features) or {}
+    local wantTs   = (feats.timestamp_prefix == true)
+
+    local speaker  = _isNonEmptyString(item.speaker) and item.speaker or nil
+    local target   = _isNonEmptyString(item.target) and item.target or nil
+
+    local chRaw    = _isNonEmptyString(item.channel) and item.channel or ""
+    local chan     = (chRaw ~= "" and ("[" .. chRaw .. "] ") or "")
+
+    local tsPrefix = ""
+    if wantTs then
+        local t = _fmtHMS(item and item.ts)
+        if t then
+            tsPrefix = "[" .. t .. "] "
+        end
+    end
 
     if speaker and target then
-        return string.format("%s%s -> %s: %s", chan, speaker, target, tostring(item.text))
+        return string.format("%s%s%s -> %s: %s", tsPrefix, chan, speaker, target, tostring(item.text))
     end
 
     if speaker then
-        return string.format("%s%s: %s", chan, speaker, tostring(item.text))
+        return string.format("%s%s%s: %s", tsPrefix, chan, speaker, tostring(item.text))
     end
 
-    return string.format("%s%s", chan, tostring(item.text))
+    return string.format("%s%s%s", tsPrefix, chan, tostring(item.text))
 end
 
 local function _clearConsole()
@@ -192,10 +240,84 @@ local function _appendConsoleLine(line)
     end
 end
 
+local function _scrollToBottomBestEffort()
+    local feats = (st.featureCfg and st.featureCfg.features) or {}
+    if feats.auto_scroll_follow ~= true then return end
+    if type(st.console) ~= "table" then return end
+
+    -- Best-effort: call whichever exists.
+    for _, fn in ipairs({ "scrollToEnd", "scrollToBottom", "scrollToBottomLine", "scrollEnd" }) do
+        if type(st.console[fn]) == "function" then
+            pcall(function() st.console[fn](st.console) end)
+            return
+        end
+    end
+end
+
+local function _debugLine()
+    local feats = (st.featureCfg and st.featureCfg.features) or {}
+    if feats.debug_overlay ~= true then
+        return ""
+    end
+
+    local u = st.unread or {}
+    local function n(k) return tostring(tonumber(u[k] or 0) or 0) end
+    return string.format(
+        "debug: active=%s lastRenderedId=%s unread(SAY=%s PRIVATE=%s PUBLIC=%s GRATS=%s Other=%s)",
+        tostring(st.activeTab),
+        tostring(st.lastRenderedId),
+        n("SAY"), n("PRIVATE"), n("PUBLIC"), n("GRATS"), n("Other")
+    )
+end
+
+local function _applyDebugLabelBestEffort()
+    if type(st.debugLabel) ~= "table" then return end
+    local txt = _debugLine()
+    if type(st.debugLabel.echo) == "function" then
+        pcall(function()
+            st.debugLabel:echo(txt == "" and "" or (" " .. txt .. " "))
+        end)
+    end
+    if type(st.debugLabel.setStyleSheet) == "function" then
+        local feats = (st.featureCfg and st.featureCfg.features) or {}
+        if feats.debug_overlay == true then
+            pcall(function()
+                st.debugLabel:setStyleSheet([[
+                    background-color: rgba(0,0,0,0);
+                    border: 0px;
+                    color: #8b93a6;
+                    font-size: 8pt;
+                    qproperty-alignment: 'AlignVCenter | AlignLeft';
+                ]])
+            end)
+        else
+            pcall(function()
+                st.debugLabel:setStyleSheet([[
+                    background-color: rgba(0,0,0,0);
+                    border: 0px;
+                    color: rgba(0,0,0,0);
+                    font-size: 1pt;
+                ]])
+            end)
+        end
+    end
+end
+
 local function _tabLabelText(tab)
     tab = tostring(tab or "")
+    local feats = (st.featureCfg and st.featureCfg.features) or {}
+    local showAllUnread = (feats.all_unread_badge == true)
+
     local n = tonumber(st.unread[tab] or 0) or 0
-    if tab ~= "All" and n > 0 and tab ~= st.activeTab then
+
+    if tab == "All" then
+        if showAllUnread and n > 0 and tab ~= st.activeTab then
+            return string.format("%s (%d)", tab, n)
+        end
+        return tab
+    end
+
+    if n > 0 and tab ~= st.activeTab then
         return string.format("%s (%d)", tab, n)
     end
     return tab
@@ -224,7 +346,16 @@ local function _applyTabStyleBestEffort(tab)
     if type(btn) ~= "table" then return end
     local active = (tab == st.activeTab)
     local unread = tonumber(st.unread[tab] or 0) or 0
-    local hasUnread = (tab ~= "All" and unread > 0 and (not active))
+    local feats = (st.featureCfg and st.featureCfg.features) or {}
+    local showAllUnread = (feats.all_unread_badge == true)
+
+    local hasUnread = false
+    if tab == "All" then
+        hasUnread = (showAllUnread and unread > 0 and (not active))
+    else
+        hasUnread = (unread > 0 and (not active))
+    end
+
     if type(btn.setStyleSheet) == "function" then
         pcall(function() btn:setStyleSheet(_tabStyle(active, hasUnread)) end)
     end
@@ -253,6 +384,7 @@ local function _renderTabButtons()
         end
         _applyTabStyleBestEffort(tab)
     end
+    _applyDebugLabelBestEffort()
 end
 
 local function _switchTab(tab)
@@ -867,7 +999,19 @@ local function _ensureUi(opts)
         xPct = xPct + btnW
     end
 
+    -- NEW: debug label slot (below tab row; only visible when debug_overlay ON)
+    st.debugLabel = G.Label:new({
+        name = tostring(st.bundle.meta.nameContent or "__DWKit_chat") .. "__debugLabel",
+        x = 0,
+        y = yContent,
+        width = "100%",
+        height = 16,
+    }, st.bodyFill)
+
     local yConsole = yContent
+    -- If debug overlay enabled, console starts below debugLabel; else the label is transparent
+    yConsole = yContent + 16
+
     st.layout.yConsole = yConsole
 
     st.consoleHost = G.Container:new({
@@ -967,6 +1111,7 @@ local function _ensureUi(opts)
     _applyConsoleTransparentBestEffort()
 
     _renderTabButtons()
+    _applyDebugLabelBestEffort()
 
     pcall(_reflowLayoutBestEffort)
 
@@ -1068,11 +1213,42 @@ function M.getLayoutDebug()
         enableInput = (st.enableInput == true),
         sendToMud = (st.sendToMud == true),
         layout = st.layout,
+        featureCfg = st.featureCfg,
     }
 end
 
 -- -------------------------------------------------------------------------
--- Phase 1 Control Surface (NEW)
+-- Phase 2 feature config surface (best-effort)
+-- -------------------------------------------------------------------------
+
+function M.setFeatureConfig(cfg, opts)
+    opts = (type(opts) == "table") and opts or {}
+    if type(cfg) ~= "table" then return false end
+    if type(cfg.features) ~= "table" then return false end
+
+    st.featureCfg = st.featureCfg or { features = {} }
+    st.featureCfg.features = st.featureCfg.features or {}
+
+    for k, v in pairs(cfg.features) do
+        st.featureCfg.features[k] = v
+    end
+
+    _renderTabButtons()
+    _applyDebugLabelBestEffort()
+
+    if st.visible == true and opts.apply ~= false then
+        M.refresh({ source = opts.source or "chat_ui:setFeatureConfig", force = true })
+    end
+
+    return true
+end
+
+function M.getFeatureConfig()
+    return st.featureCfg
+end
+
+-- -------------------------------------------------------------------------
+-- Phase 1 Control Surface
 -- -------------------------------------------------------------------------
 
 function M.getTabs()
@@ -1099,7 +1275,6 @@ function M.clear(opts)
         return false, "chat_log_service.clear failed"
     end
 
-    -- reset UI-side counters and rerender if visible
     st.unread = {}
     st.lastSeenId = {}
     st.lastRenderedId = 0
@@ -1124,7 +1299,6 @@ function M.setInputEnabled(on, opts)
     opts = (type(opts) == "table") and opts or {}
     local want = (on == true)
 
-    -- best-effort: if input was never created (rare; default build has it), refuse safely
     if want == true and type(st.inputHost) ~= "table" then
         return false, "inputHost not available (chat_ui was created with enableInput=false)"
     end
@@ -1221,6 +1395,7 @@ function M.refresh(opts)
         return true
     end
 
+    -- Unread accounting (unchanged v1 semantics)
     for _, it in ipairs(items) do
         local id = tonumber(it.id or 0) or 0
         local tab = _tabForChannel(it.channel)
@@ -1237,18 +1412,54 @@ function M.refresh(opts)
         else
             st.lastSeenId[tab] = math.max(tonumber(st.lastSeenId[tab] or 0) or 0, id)
         end
+
+        -- Optional: All unread badge uses st.unread["All"] as an aggregate.
+        -- Default OFF; only computed when feature enabled to preserve baseline.
+        local feats = (st.featureCfg and st.featureCfg.features) or {}
+        if feats.all_unread_badge == true then
+            if "All" ~= st.activeTab then
+                local seenA = tonumber(st.lastSeenId["AllUnread"] or 0) or 0
+                if id > seenA then
+                    st.unread["All"] = (tonumber(st.unread["All"] or 0) or 0) + 1
+                    st.lastSeenId["AllUnread"] = id
+                end
+            else
+                st.lastSeenId["AllUnread"] = math.max(tonumber(st.lastSeenId["AllUnread"] or 0) or 0, id)
+            end
+        end
     end
 
     _renderTabButtons()
 
+    -- Render list (optionally limit the rendered slice)
+    local feats = (st.featureCfg and st.featureCfg.features) or {}
+    local renderItems = items
+
+    if feats.per_tab_line_limit == true then
+        local n = tonumber(feats.per_tab_line_limit_n or 500) or 500
+        if n < 50 then n = 50 end
+        if n > 3000 then n = 3000 end
+        if #items > n then
+            local start = (#items - n) + 1
+            local sliced = {}
+            for i = start, #items do
+                table.insert(sliced, items[i])
+            end
+            renderItems = sliced
+        end
+    end
+
     _clearConsole()
-    for _, it in ipairs(items) do
+    for _, it in ipairs(renderItems) do
         if _passesTab(it, st.activeTab) then
             _appendConsoleLine(_mkLine(it))
         end
     end
 
     st.lastRenderedId = latestId
+    _applyDebugLabelBestEffort()
+    _scrollToBottomBestEffort()
+
     return true
 end
 
@@ -1269,6 +1480,7 @@ function M.dispose()
     st.console = nil
     st.inputHost = nil
     st.input = nil
+    st.debugLabel = nil
 
     st.enableInput = true
     st.sendToMud = false

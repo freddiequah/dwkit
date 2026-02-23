@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-10D
+-- Version     : v2026-02-23B
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-23A"
+M.VERSION = "v2026-02-23B"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -365,7 +365,7 @@ local SUITES = {
     chat_smoke = {
         title = "chat_smoke",
         description =
-        "Phase 1 dwchat surface: enable/disable/visible semantics, tabs/tab, clear, send/input toggles. SAFE only; no gameplay sends required.",
+        "Phase 1 dwchat surface: enable/disable/visible semantics, tabs/tab, clear, send/input toggles, diag snapshot. SAFE only; no gameplay sends required.",
         delay = 0.30,
         steps = {
             { cmd = "dwcommands safe",  note = "Confirm dwchat appears in SAFE list (registry wiring + alias wiring)." },
@@ -375,6 +375,8 @@ local SUITES = {
 
             { cmd = "dwchat",           note = "Default open/show. Should persist enabled=ON and set visible=ON (session)." },
             { cmd = "dwchat status",    note = "Expect enabled=true visible=true." },
+
+            { cmd = "dwchat diag",      note = "SAFE snapshot: enabled/cfgVisible/rtVisible/chat_ui state/log meta/router/capture." },
 
             { cmd = "dwchat tabs",      note = "Expect: All, SAY, PRIVATE, PUBLIC, GRATS, Other." },
             { cmd = "dwchat tab SAY",   note = "Switch active tab to SAY." },
@@ -449,9 +451,6 @@ local SUITES = {
             { cmd = 'lua do print("[dwverify-chat] PASS chat_phase2_full") end',                                                                                                                                                                                                                                      note = "Final PASS marker for easy copy/paste." },
         },
     },
-
-    -- (rest of your suites unchanged)
-    -- NOTE: Keeping everything else exactly as provided to avoid collateral breakage.
 
     -- NEW: UI dependency lifecycle suite (Model A) for roomfeed_watch
     ui_dependency_roomfeed_watch_claim_release = {
