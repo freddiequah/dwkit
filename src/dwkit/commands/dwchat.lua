@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwchat
 -- Owner       : Commands
--- Version     : v2026-02-23C
+-- Version     : v2026-02-23D
 -- Purpose     :
 --   - Command handler for "dwchat" (SAFE)
 --   - Phase 1 objective: provide a deterministic command surface to control chat_ui:
@@ -19,6 +19,7 @@
 --
 --   - Phase 2 (NEW v2026-02-23C): Chat Manager feature toggles (SAFE):
 --       * manager open|show|hide|toggle|status
+--       * manager nudge|resetpos   (NEW v2026-02-23D): force position into safe on-screen geometry
 --       * features (prints feature list + current values)
 --       * feature <key> <on|off|value>
 --       * defaults (reset manager defaults)
@@ -45,7 +46,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-23C"
+M.VERSION = "v2026-02-23D"
 
 local function _out(ctx, line)
     if type(ctx) == "table" and type(ctx.out) == "function" then
@@ -295,6 +296,7 @@ local function _usage(ctx)
     _out(ctx, "  dwchat input on|off")
     _out(ctx, "")
     _out(ctx, "  dwchat manager open|show|hide|toggle|status")
+    _out(ctx, "  dwchat manager nudge|resetpos")
     _out(ctx, "  dwchat features")
     _out(ctx, "  dwchat feature <key> <on|off|value>")
     _out(ctx, "  dwchat defaults")
@@ -625,6 +627,18 @@ local function _mgrUi()
     return nil
 end
 
+local function _mgrUiVisibleBestEffort()
+    local UI = _mgrUi()
+    if not UI then return nil end
+    if type(UI.getState) ~= "function" then return nil end
+    local ok, s = pcall(UI.getState)
+    if ok and type(s) == "table" then
+        if s.visible == true then return true end
+        if s.visible == false then return false end
+    end
+    return nil
+end
+
 local function _printFeatures(ctx)
     local Mgr = _mgr()
     if not Mgr then
@@ -676,9 +690,12 @@ local function _mgrStatus(ctx)
     end
     local cfg = Mgr.getConfig()
     local f = cfg.features or {}
+    local uiVis = _mgrUiVisibleBestEffort()
+
     _out(ctx,
         string.format(
-            "[DWKit Chat] manager status all_unread_badge=%s auto_scroll_follow=%s per_tab_line_limit=%s per_tab_line_limit_n=%s timestamp_prefix=%s debug_overlay=%s",
+            "[DWKit Chat] manager status uiVisible=%s all_unread_badge=%s auto_scroll_follow=%s per_tab_line_limit=%s per_tab_line_limit_n=%s timestamp_prefix=%s debug_overlay=%s",
+            tostring(uiVis),
             tostring(f.all_unread_badge), tostring(f.auto_scroll_follow), tostring(f.per_tab_line_limit),
             tostring(f.per_tab_line_limit_n), tostring(f.timestamp_prefix), tostring(f.debug_overlay)))
     return true, nil
@@ -689,7 +706,7 @@ local function _mgrOpen(ctx)
     if not UI then
         return false, "chat_manager_ui not available"
     end
-    local ok, err = UI.show({ source = "dwchat:manager" })
+    local ok, err = UI.show({ source = "dwchat:manager", bringToFront = true })
     if not ok then return false, err end
     _out(ctx, "[DWKit Chat] manager shown")
     return true, nil
@@ -710,8 +727,29 @@ local function _mgrToggle(ctx)
     if not UI then
         return false, "chat_manager_ui not available"
     end
-    UI.toggle({ source = "dwchat:manager" })
+    UI.toggle({ source = "dwchat:manager", bringToFront = true })
     _out(ctx, "[DWKit Chat] manager toggled")
+    return true, nil
+end
+
+local function _mgrNudge(ctx)
+    local UI = _mgrUi()
+    if not UI then
+        return false, "chat_manager_ui not available"
+    end
+
+    local ok, err = UI.show({
+        source = "dwchat:manager:nudge",
+        forcePosition = true,
+        bringToFront = true,
+        x = 40,
+        y = 40,
+        width = 560,
+        height = 420,
+    })
+    if not ok then return false, err end
+
+    _out(ctx, "[DWKit Chat] manager nudged (forcePosition)")
     return true, nil
 end
 
@@ -776,6 +814,14 @@ function M.dispatch(...)
         end
         if action == "toggle" then
             local ok, err = _mgrToggle(ctx)
+            if not ok then
+                _err(ctx, tostring(err))
+                return false, err
+            end
+            return true, nil
+        end
+        if action == "nudge" or action == "resetpos" then
+            local ok, err = _mgrNudge(ctx)
             if not ok then
                 _err(ctx, tostring(err))
                 return false, err

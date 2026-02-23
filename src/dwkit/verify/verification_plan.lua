@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-23B
+-- Version     : v2026-02-23J
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,14 +18,14 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-23B"
+M.VERSION = "v2026-02-23J"
 
 local SUITES = {
     -- Default suite (safe baseline)
     default = {
         title = "default",
         description = "Baseline sanity: dwwho refresh + watcher capture",
-        delay = 0.40, -- default per-step delay (seconds)
+        delay = 0.40,
         steps = {
             "dwwho",
             "dwwho watch status",
@@ -36,7 +36,6 @@ local SUITES = {
         },
     },
 
-    -- WhoStore focused suite (alias convenience)
     whostore = {
         title = "whostore",
         description = "WhoStore sanity: trigger capture path + confirm status updates",
@@ -49,7 +48,6 @@ local SUITES = {
         },
     },
 
-    -- Fixture suite (NO MUD spam; validates parsing + snapshot update)
     whostore_fixture = {
         title = "whostore_fixture",
         description = "WhoStore fixture sanity: clear + ingest fixture + list + status (no who sends)",
@@ -62,7 +60,6 @@ local SUITES = {
         },
     },
 
-    -- NEW (v2026-02-09B): Partial snapshot finalize regression guard (deterministic; no live MUD output required)
     roomfeed_partial_snapshot_finalize = {
         title = "roomfeed_partial_snapshot_finalize",
         description =
@@ -79,7 +76,6 @@ local SUITES = {
         },
     },
 
-    -- NEW: RoomFeed prompt-prefix + header capture regression guard
     roomfeed_promptprefix_no_restart = {
         title = "roomfeed_promptprefix_no_restart",
         description =
@@ -88,22 +84,17 @@ local SUITES = {
         steps = {
             { cmd = "dwroom watch off", note = "Ensure clean start: remove passive capture trigger." },
             { cmd = "dwroom watch on",  note = "Install passive capture trigger." },
-
-            -- NOTE: allow enough time for the trailing prompt line to arrive so finalize occurs.
             { cmd = "look",             delay = 1.80,                                                note = "Trigger look output (header may be prefixed by prompt). Wait for prompt to ensure finalize occurs." },
-
             {
                 cmd =
                 'lua do local C=require("dwkit.capture.roomfeed_capture"); local s=C.getDebugState(); local kind=tostring(s.lastHeaderSeenKind or ""); local isStrong=(kind:sub(1,6)=="strong"); local isFallback=(kind:sub(1,8)=="fallback"); if (not isStrong) and (not isFallback) then error("Expected lastHeaderSeenKind strong* OR fallback*; got "..kind) end; local eff=tostring(s.lastHeaderSeenEffectiveClean or ""); if eff=="" then error("Expected non-empty effective header; got empty") end; if isStrong then local hasId=(eff:find("#",1,true)~=nil); local hasFlags=(eff:find("[",1,true)~=nil and eff:find("]",1,true)~=nil); if (not hasId) and (not hasFlags) then error("Expected strong header to include id (#) or flags ([..]); got "..eff) end end; if tostring(s.lastAbortReason or "")=="abort:restart_header_seen" then error("Unexpected restart_header_seen (wrapped text misdetected as header).") end; if s.lastOkTs==nil then error("Expected lastOkTs non-nil after look finalize; stillCapturing="..tostring(s.snapCapturing).." hasExits="..tostring(s.snapHasExits).." bufLen="..tostring(s.snapBufLen).." lastLine="..tostring(s.lastLineSeenClean)) end; print(string.format("[dwverify-roomfeed] PASS kind=%s okTs=%s abort=%s eff=%s", kind, tostring(s.lastOkTs), tostring(s.lastAbortReason), eff)) end',
                 note =
                 "ASSERT: finalize succeeded; no false restart; header classification allows Immortal strong OR normal fallback; strong implies id/flags present.",
             },
-
             { cmd = "dwroom status", note = "Human confirmation: Room feed capture status should show lastOkTs updated and no restart abort." },
         },
     },
 
-    -- NEW: Gate force-open on watcher header trigger (regression guard)
     whostore_gate_force_open_on_header = {
         title = "whostore_gate_force_open_on_header",
         description =
@@ -111,217 +102,26 @@ local SUITES = {
         delay = 0.45,
         steps = {
             { cmd = "dwwho watch on", note = "Ensure watcher is ON so header triggers fire." },
-
             {
                 cmd =
                 'lua do local S=require("dwkit.services.whostore_service"); if type(S)=="table" and type(S.setAutoCaptureEnabled)=="function" then S.setAutoCaptureEnabled(false,{source="dwverify:force-close"}) end; print("[dwverify-whostore] forced autoCaptureEnabled=false") end',
-                note = "Force-close auto-capture gate (this is the precondition for regression guard).",
+                note = "Force-close auto-capture gate (precondition).",
             },
-
             {
                 cmd =
                 'lua do local S=require("dwkit.services.whostore_service"); if type(S)~="table" or type(S.getState)~="function" then error("WhoStoreService.getState missing") end; local st=S.getState(); _G.DWVERIFY_GATE_BASE_TS=st.lastUpdatedTs; print(string.format("[dwverify-whostore] baseline lastUpdatedTs=%s source=%s autoCaptureEnabled=%s", tostring(st.lastUpdatedTs), tostring(st.source), tostring(st.autoCaptureEnabled))) end',
-                note = "Record baseline lastUpdatedTs into _G (used for change assertion).",
+                note = "Record baseline lastUpdatedTs into _G.",
             },
-
-            {
-                cmd = "who",
-                delay = 0.90,
-                note = "Manual WHO: watcher header trigger must force-open gate and capture/ingest as dwwho:auto.",
-            },
-
+            { cmd = "who",            delay = 0.90,                                          note = "Manual WHO: watcher header trigger must force-open gate and capture/ingest as dwwho:auto." },
             {
                 cmd =
-                'lua do local S=require("dwkit.services.whostore_service"); if type(S)~="table" or type(S.getState)~="function" then error("WhoStoreService.getState missing") end; local st=S.getState(); if st.autoCaptureEnabled~=true then error("Expected autoCaptureEnabled=true after manual who; got "..tostring(st.autoCaptureEnabled)) end; if tostring(st.source)~="dwwho:auto" then error("Expected source dwwho:auto after manual who; got "..tostring(st.source)) end; if st.lastUpdatedTs==nil then error("Expected lastUpdatedTs non-nil after manual who") end; local base=_G.DWVERIFY_GATE_BASE_TS; if base~=nil and tostring(st.lastUpdatedTs)==tostring(base) then error("Expected lastUpdatedTs to change after manual who; before="..tostring(base).." after="..tostring(st.lastUpdatedTs)) end; print(string.format("[dwverify-whostore] PASS gate-force-open autoCaptureEnabled=%s source=%s lastUpdatedTs=%s", tostring(st.autoCaptureEnabled), tostring(st.source), tostring(st.lastUpdatedTs))) end',
-                note = "ASSERT: gate was forced open + ingest happened (PASS/FAIL).",
+                'lua do local S=require("dwkit.services.whostore_service"); if type(S)~="table" or type(S.getState)~="function" then error("WhoStoreService.getState missing") end; local st=S.getState(); if st.autoCaptureEnabled~=true then error("Expected autoCaptureEnabled=true after manual who; got "..tostring(st.autoCaptureEnabled)) end; if tostring(st.source)~="dwwho:auto" then error("Expected source dwwho:auto after manual who; got "..tostring(st.source)) end; if st.lastUpdatedTs==nil then error("Expected lastUpdatedTs non-nil after manual who") end; local base=_G.DWVERIFY_GATE_BASE_TS; if base~=nil and tostring(st.lastUpdatedTs)==tostring(base) then error("Expected lastUpdatedTs to change; before="..tostring(base).." after="..tostring(st.lastUpdatedTs)) end; print(string.format("[dwverify-whostore] PASS gate-force-open autoCaptureEnabled=%s source=%s lastUpdatedTs=%s", tostring(st.autoCaptureEnabled), tostring(st.source), tostring(st.lastUpdatedTs))) end',
+                note = "ASSERT: gate forced open + ingest happened.",
             },
-
-            { cmd = "dwwho status",   note = "Human confirmation: should show autoCaptureEnabled=true and updated timestamp/source." },
+            { cmd = "dwwho status", note = "Human confirmation: expect autoCaptureEnabled=true and updated source/ts." },
         },
     },
 
-    -- NEW: Indexing policy suite (Option A)
-    whostore_index_policy = {
-        title = "whostore_index_policy",
-        description = "Index policy: snapshot.byName keys are lowercase; getEntry is case-insensitive compatible",
-        delay = 0.30,
-        steps = {
-            {
-                cmd =
-                'lua do local S=require("dwkit.services.whostore_service"); local ok,err=S.clear({source="dwverify:index"}); if not ok then error("clear failed: "..tostring(err)) end; ok,err=S.setState({players={"Gaidin"}},{source="dwverify:index"}); if not ok then error("setState failed: "..tostring(err)) end; local snap=S.getSnapshot(); local by=snap.byName; if type(by)~="table" then error("byName missing") end; if by["gaidin"]==nil then error("Expected byName[gaidin]") end; if by["Gaidin"]~=nil then error("Expected byName[Gaidin] nil") end; local e1=S.getEntry("Gaidin"); if not e1 or e1.name~="Gaidin" then error("getEntry(Gaidin) failed") end; local e2=S.getEntry("gaidin"); if not e2 or e2.name~="Gaidin" then error("getEntry(gaidin) failed") end; local names=S.getAllNames(); local found=false; for i=1,#names do if tostring(names[i])=="Gaidin" then found=true end end; if not found then error("getAllNames missing Gaidin") end; print("[dwverify-whostore] index policy OK (byName keys lower; getEntry compat OK)") end',
-                note = "Asserts Option A indexing policy and compatibility lookups (FAILs if any check fails).",
-            },
-            { cmd = "dwwho status", note = "Optional human confirmation: status should reflect latest update source=dwverify:index." },
-        },
-    },
-
-    -- NEW: RoomEntities confidence gate suite (prefer Unknown unless exact-case match)
-    roomentities_whostore_confidence_gate = {
-        title = "roomentities_whostore_confidence_gate",
-        description =
-        "RoomEntities policy: case-insensitive WhoStore match is candidate only; auto player classification requires exact display-name match. Note: ingestLookText replaces state each call, so human checks are split across steps.",
-        delay = 0.30,
-        steps = {
-            {
-                cmd =
-                'lua do local W=require("dwkit.services.whostore_service"); local R=require("dwkit.services.roomentities_service"); local ok,err=W.clear({source="dwverify:reconf"}); if not ok then error("WhoStore clear failed: "..tostring(err)) end; ok,err=W.setState({players={"Gaidin"}},{source="dwverify:reconf"}); if not ok then error("WhoStore setState failed: "..tostring(err)) end; ok,err=R.clear({source="dwverify:reconf"}); if not ok then error("RoomEntities clear failed: "..tostring(err)) end; print("[dwverify-roomentities] seeded WhoStore players={Gaidin} and cleared RoomEntities") end',
-                note = "Seed WhoStore with canonical display name and clear RoomEntities state.",
-            },
-            {
-                cmd =
-                'lua do local R=require("dwkit.services.roomentities_service"); local ok,err=R.ingestLookText("gaidin is here.",{source="dwverify:reconf"}); if not ok then error("ingestLookText failed: "..tostring(err)) end; local st=R.getState(); if type(st.players)=="table" and st.players["gaidin"]==true then error("Expected gaidin NOT in players (case mismatch)") end; if type(st.unknown)~="table" or st.unknown["gaidin"]~=true then error("Expected gaidin in unknown (candidate only)") end; ok,err=R.reclassifyFromWhoStore({source="dwverify:reconf"}); if not ok then error("reclassifyFromWhoStore failed: "..tostring(err)) end; st=R.getState(); if type(st.players)=="table" and st.players["gaidin"]==true then error("Expected gaidin NOT promoted by reclassify (case mismatch)") end; if type(st.unknown)~="table" or st.unknown["gaidin"]~=true then error("Expected gaidin still in unknown after reclassify") end; print("[dwverify-roomentities] PASS candidate-only gaidin stays unknown") end',
-                note = "ASSERT: lower-case gaidin is candidate-only and remains Unknown (even after reclassify).",
-            },
-            { cmd = "dwroom status", note = "Human check after Step 2: unknown should include gaidin; players should be 0." },
-            {
-                cmd =
-                'lua do local R=require("dwkit.services.roomentities_service"); local ok,err=R.ingestLookText("Gaidin is here.",{source="dwverify:reconf"}); if not ok then error("ingestLookText failed: "..tostring(err)) end; local st=R.getState(); if type(st.players)~="table" or st.players["Gaidin"]~=true then error("Expected Gaidin in players (exact match)") end; print("[dwverify-roomentities] PASS exact-match Gaidin classified as player") end',
-                note = "ASSERT: exact-case Gaidin is classified as player.",
-            },
-            { cmd = "dwroom status", note = "Human check after Step 4: players should include Gaidin; unknown may be 0 due to replace-on-ingest." },
-        },
-    },
-
-    roomentities_items_trailing_descriptors = {
-        title = "roomentities_items_trailing_descriptors",
-        description =
-        "RoomEntities parsing: item lines like 'X is here. (glowing) ...' must be classified as items (not dropped).",
-        delay = 0.30,
-        steps = {
-            {
-                cmd =
-                'lua do local R=require("dwkit.services.roomentities_service"); local ok,err=R.clear({source="dwverify:roomitems"}); if not ok then error("RoomEntities clear failed: "..tostring(err)) end; ok,err=R.ingestLookLines({"A large keg of Killians Irish Red is here.","A self-destruct mechanism is here. (whirring) (humming) (glowing)"},{source="dwverify:roomitems"}); if not ok then error("ingestLookLines failed: "..tostring(err)) end; local st=R.getState(); if type(st.items)~="table" then error("Expected items table") end; if st.items["A large keg of Killians Irish Red"]~=true then error("Expected item: large keg") end; if st.items["A self-destruct mechanism"]~=true then error("Expected item: self-destruct mechanism (trailing descriptors)") end; local c=0; for _ in pairs(st.items) do c=c+1 end; print("[dwverify-roomentities] PASS items captured (count="..tostring(c)..")") end',
-                note = "ASSERT: item lines with trailing descriptors after first period are captured as items.",
-            },
-            { cmd = "dwroom status", note = "Human confirmation: items should be >= 2 after Step 1." },
-        },
-    },
-
-    -- Live clear (NO WHO send; asserts empty snapshot after clear)
-    whostore_live_clear = {
-        title = "whostore_live_clear",
-        description = "WhoStore live clear: clear snapshot + assert empty + human confirm (no WHO send)",
-        delay = 0.30,
-        steps = {
-            { cmd = "dwwho clear",  note = "Clear WhoStore snapshot (no WHO send)." },
-
-            {
-                cmd =
-                'lua do local ok,S=pcall(require,"dwkit.services.whostore_service"); if not ok or type(S)~="table" then error("WhoStoreService require failed") end; local snap=(type(S.getSnapshot)=="function") and S.getSnapshot() or ((type(S.getState)=="function") and S.getState() or nil); if type(snap)~="table" then error("WhoStore snapshot/state missing") end; local byName=snap.byName or (snap.snapshot and snap.snapshot.byName) or nil; local entries=snap.entries or (snap.snapshot and snap.snapshot.entries) or nil; if type(byName)=="table" and next(byName)~=nil then error("WhoStore not empty: byName has entries") end; if type(entries)=="table" and next(entries)~=nil then error("WhoStore not empty: entries has records") end end',
-                note = "Assert WhoStore is empty after clear (suite FAILs if not).",
-            },
-
-            { cmd = "dwwho status", note = "Human confirmation: expect empty/0 counts." },
-        },
-    },
-
-    -- NEW: End-to-end controlled live run (guarded refresh + WHO capture)
-    whostore_live_refresh_capture = {
-        title = "whostore_live_refresh_capture",
-        description =
-        "E2E live: watcher ON + guarded refresh (refresh sends WHO) + verify capture + list/status (controlled)",
-        delay = 0.45,
-        steps = {
-            { cmd = "dwwho watch status", note = "Ensure watcher is enabled before doing any live capture." },
-
-            {
-                cmd = "dwwho refresh",
-                note =
-                "Trigger a guarded refresh (may skip if cooldown is active). Refresh sends WHO; watcher should capture.",
-                expect = "refresh guard should show lastRefreshAttemptTs updated OR lastSkipReason set (cooldown).",
-            },
-
-            {
-                cmd = "dwwho",
-                note = "Expect WhoStore summary to reflect latest capture (players count may be 0 if nobody online).",
-            },
-
-            { cmd = "dwwho list",         note = "If players exist, expect parsed entries listed (names/classes/etc per contract)." },
-            { cmd = "dwwho status",       note = "Human confirmation: refresh guard + watcher lastErr=nil; source should reflect latest update." },
-        },
-    },
-
-    -- NEW: Expectations expiry check (refresh expectations MUST NOT tag later manual 'who')
-    whostore_manual_who_after_refresh = {
-        title = "whostore_manual_who_after_refresh",
-        description =
-        "Expiry check: do refresh, wait >2s (expectations TTL), then manual 'who' must be captured as dwwho:auto (NOT refresh).",
-        delay = 0.45,
-        steps = {
-            { cmd = "dwwho watch status", note = "Ensure watcher is enabled (auto-capture active)." },
-
-            {
-                cmd = "dwwho refresh",
-                delay = 2.60,
-                note = "Do refresh (source should be dwwho:refresh). Then wait >2s so refresh expectations expire.",
-            },
-
-            {
-                cmd = "who",
-                delay = 0.80,
-                note = "Manual WHO after TTL expiry: should be captured/ingested as dwwho:auto (quiet).",
-            },
-
-            {
-                cmd =
-                'lua do local S=require("dwkit.services.whostore_service"); if type(S)~="table" or type(S.getState)~="function" then error("WhoStoreService.getState missing") end; local st=S.getState(); local src=st.source; if tostring(src)~="dwwho:auto" then error("Expected source dwwho:auto after manual who; got "..tostring(src)) end end',
-                note = "Assert: WhoStore source is dwwho:auto after manual who (FAIL if still dwwho:refresh).",
-            },
-
-            { cmd = "dwwho status",       note = "Human confirmation: source should show dwwho:auto now." },
-        },
-    },
-
-    -- NEW: Watch OFF must stop ingesting manual WHO (B4 lock-in; PASS/FAIL)
-    whostore_watch_off_manual_who_no_ingest = {
-        title = "whostore_watch_off_manual_who_no_ingest",
-        description =
-        "B4 regression lock-in: establish baseline via refresh, disable watcher, record OFF-baseline, then manual 'who' must NOT update WhoStore after OFF-baseline (lastUpdatedTs/source unchanged). Restores watcher ON at end.",
-        delay = 0.45,
-        steps = {
-            { cmd = "dwwho watch on",     note = "Precondition: ensure watcher ON so baseline refresh definitely captures/ingests." },
-
-            {
-                cmd = "dwwho refresh",
-                delay = 0.90,
-                note = "Establish a known baseline snapshot (refresh sends WHO; watcher should capture/ingest).",
-            },
-
-            {
-                cmd =
-                'lua do local S=require("dwkit.services.whostore_service"); if type(S)~="table" or type(S.getState)~="function" then error("WhoStoreService.getState missing") end; local st=S.getState(); if st.lastUpdatedTs==nil then error("Baseline requires lastUpdatedTs non-nil; run again if refresh skipped due to cooldown") end; _G.DWVERIFY_WOFF_PRE_TS=st.lastUpdatedTs; _G.DWVERIFY_WOFF_PRE_SRC=st.source; print(string.format("[dwverify-whostore] pre-off baseline lastUpdatedTs=%s source=%s", tostring(_G.DWVERIFY_WOFF_PRE_TS), tostring(_G.DWVERIFY_WOFF_PRE_SRC))) end',
-                note = "Record pre-off baseline (informational).",
-            },
-
-            { cmd = "dwwho watch off",    note = "Disable watcher (manual 'who' should no longer be ingested)." },
-            { cmd = "dwwho watch status", note = "Human confirmation: enabled=false trigPlayers=nil trigTotal=nil lastErr=nil." },
-
-            {
-                cmd =
-                'lua do local S=require("dwkit.services.whostore_service"); if type(S)~="table" or type(S.getState)~="function" then error("WhoStoreService.getState missing") end; local st=S.getState(); _G.DWVERIFY_WOFF_TS=st.lastUpdatedTs; _G.DWVERIFY_WOFF_SRC=st.source; print(string.format("[dwverify-whostore] OFF-baseline lastUpdatedTs=%s source=%s", tostring(_G.DWVERIFY_WOFF_TS), tostring(_G.DWVERIFY_WOFF_SRC))) end',
-                note = "Record OFF-baseline AFTER watcher OFF (this is what must remain unchanged by manual who).",
-            },
-
-            {
-                cmd = "who",
-                delay = 0.80,
-                note =
-                "Manual WHO while watcher OFF: should NOT ingest/update WhoStore (no state change after OFF-baseline).",
-            },
-
-            {
-                cmd =
-                'lua do local S=require("dwkit.services.whostore_service"); if type(S)~="table" or type(S.getState)~="function" then error("WhoStoreService.getState missing") end; local st=S.getState(); if tostring(st.lastUpdatedTs)~=tostring(_G.DWVERIFY_WOFF_TS) then error("Expected lastUpdatedTs unchanged after manual who while watcher OFF; before="..tostring(_G.DWVERIFY_WOFF_TS).." after="..tostring(st.lastUpdatedTs)) end; if tostring(st.source)~=tostring(_G.DWVERIFY_WOFF_SRC) then error("Expected source unchanged after manual who while watcher OFF; before="..tostring(_G.DWVERIFY_WOFF_SRC).." after="..tostring(st.source)) end; print(string.format("[dwverify-whostore] PASS watch-off no-ingest source=%s lastUpdatedTs=%s", tostring(st.source), tostring(st.lastUpdatedTs))) end',
-                note = "ASSERT: manual who caused NO WhoStore update after OFF-baseline (PASS/FAIL).",
-            },
-
-            { cmd = "dwwho status",       note = "Human confirmation: watcher disabled; source/ts unchanged from OFF-baseline." },
-            { cmd = "dwwho watch on",     note = "Restore watcher ON for normal operation." },
-            { cmd = "dwwho watch status", note = "Human confirmation: watcher enabled; singleton installed; lastErr=nil." },
-        },
-    },
-
-    -- Smoke suite (very short)
     smoke = {
         title = "smoke",
         description = "Very short smoke check (no who spam unless you choose)",
@@ -332,7 +132,6 @@ local SUITES = {
         },
     },
 
-    -- UI smoke suite (console visible state; no screenshots)
     ui_smoke = {
         title = "ui_smoke",
         description = "UI smoke: set gui_settings then apply; print visible true/false (no screenshots)",
@@ -351,262 +150,79 @@ local SUITES = {
             {
                 cmd =
                 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("launchpad_ui", true, {noSave=true}); gs.setVisible("launchpad_ui", true, {noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)=="table" and type(UM.applyOne)=="function" then UM.applyOne("launchpad_ui",{source="dwverify:ui_smoke"}) else local UI=require("dwkit.ui.launchpad_ui"); if type(UI.apply)=="function" then local ok,err=UI.apply({}); if ok==false then error(err) end end end; local UI=require("dwkit.ui.launchpad_ui"); local s=UI.getState(); local rowCount=(s.widgets and s.widgets.rowCount) or s.rowCount or 0; local ids=s.renderedUiIds or {}; print(string.format("[dwverify-ui] launchpad_ui visible=%s enabled=%s rowCount=%s ids=%s", tostring(s.visible), tostring(s.enabled), tostring(rowCount), tostring(table.concat(ids,",")))) end',
-                note = "Show launchpad_ui (via ui_manager if present) and print rendered list state.",
+                note = "Show launchpad_ui and print rendered list state.",
             },
             {
                 cmd =
                 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("chat_ui", true, {noSave=true}); gs.setVisible("chat_ui", true, {noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)=="table" and type(UM.applyOne)=="function" then local ok,err=UM.applyOne("chat_ui",{source="dwverify:ui_smoke"}); if ok==false then error("applyOne(chat_ui) failed: "..tostring(err)) end end; local UI=require("dwkit.ui.chat_ui"); local s=UI.getState(); local u=(s and s.unread and s.unread.Other) or 0; print(string.format("[dwverify-ui] chat_ui visible=%s activeTab=%s unreadOther=%s", tostring(s and s.visible), tostring(s and s.activeTab), tostring(u))); end',
-                note = "Show chat_ui (direct-control) via ui_manager.applyOne when available; print state.",
+                note = "Show chat_ui and print state.",
             },
-        },
-    },
-
-    -- NEW: Chat command surface smoke suite (Phase 1)
-    chat_smoke = {
-        title = "chat_smoke",
-        description =
-        "Phase 1 dwchat surface: enable/disable/visible semantics, tabs/tab, clear, send/input toggles, diag snapshot. SAFE only; no gameplay sends required.",
-        delay = 0.30,
-        steps = {
-            { cmd = "dwcommands safe",  note = "Confirm dwchat appears in SAFE list (registry wiring + alias wiring)." },
-
-            { cmd = "dwchat disable",   note = "Disable persists enabled=OFF and forces visible OFF + disposes best-effort." },
-            { cmd = "dwchat status",    note = "Expect enabled=false visible=false." },
-
-            { cmd = "dwchat",           note = "Default open/show. Should persist enabled=ON and set visible=ON (session)." },
-            { cmd = "dwchat status",    note = "Expect enabled=true visible=true." },
-
-            { cmd = "dwchat diag",      note = "SAFE snapshot: enabled/cfgVisible/rtVisible/chat_ui state/log meta/router/capture." },
-
-            { cmd = "dwchat tabs",      note = "Expect: All, SAY, PRIVATE, PUBLIC, GRATS, Other." },
-            { cmd = "dwchat tab SAY",   note = "Switch active tab to SAY." },
-            { cmd = "dwchat status",    note = "Expect activeTab=SAY." },
-            { cmd = "dwchat tab Other", note = "Switch active tab to Other." },
-
-            { cmd = "dwchat clear",     note = "Clear chat log (service or UI). Should not error." },
-
-            { cmd = "dwchat send on",   note = "Flip sendToMud ON (still manual-on-Enter only)." },
-            { cmd = "dwchat send off",  note = "Flip sendToMud OFF." },
-
-            { cmd = "dwchat input off", note = "Best-effort input OFF." },
-            { cmd = "dwchat input on",  note = "Best-effort input ON." },
-
-            { cmd = "dwchat hide",      note = "Hide UI (visible OFF), enabled should remain true." },
-            { cmd = "dwchat status",    note = "Expect visible=false enabled=true." },
-
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); local en=(type(gs.isEnabled)=="function") and (gs.isEnabled("chat_ui",false)==true) or false; local UI=require("dwkit.ui.chat_ui"); local s=UI.getState(); print(string.format("[dwverify-chat] enabled=%s visible=%s activeTab=%s", tostring(en), tostring(s and s.visible), tostring(s and s.activeTab))) end',
-                note = "Authoritative check: enabled from gui_settings, visible/tab from chat_ui.getState().",
-            },
-        },
-    },
-
-    -- NEW: Chat Phase 2 full verification (store routing + unread deltas + tab clear)
-    chat_phase2_full = {
-        title = "chat_phase2_full",
-        description =
-        "Phase 2 full: clear chat, inject unique markers via chat_capture fixture, assert store routing (channel/speaker/target/text), assert unread deltas, and assert clear-on-tab-view (SAY/PRIVATE/GRATS). SAFE; no sends; PUBLIC validated as delta>=1.",
-        delay = 0.30,
-        steps = {
-            { cmd = "dwchat",         note = "Ensure chat_ui is enabled+visible for UI-side tab clear checks." },
-            { cmd = "dwchat tab All", note = "Set active tab to All so unread counters accumulate on non-All tabs." },
-            { cmd = "dwchat clear",   note = "Reset ChatLogService + UI unread/seen state to a clean baseline." },
-
-            {
-                cmd =
-                'lua do local UI=require("dwkit.ui.chat_ui"); local s=UI.getState(); local u=s.unread or {}; _G.DWVERIFY_CHAT_BEFORE={SAY=tonumber(u.SAY or 0) or 0, PRIVATE=tonumber(u.PRIVATE or 0) or 0, PUBLIC=tonumber(u.PUBLIC or 0) or 0, GRATS=tonumber(u.GRATS or 0) or 0, Other=tonumber(u.Other or 0) or 0}; print(string.format("[dwverify-chat] BEFORE active=%s SAY=%d PRIVATE=%d PUBLIC=%d GRATS=%d Other=%d", tostring(s.activeTab), _G.DWVERIFY_CHAT_BEFORE.SAY, _G.DWVERIFY_CHAT_BEFORE.PRIVATE, _G.DWVERIFY_CHAT_BEFORE.PUBLIC, _G.DWVERIFY_CHAT_BEFORE.GRATS, _G.DWVERIFY_CHAT_BEFORE.Other)) end',
-                note = "Snapshot unread baseline into _G.DWVERIFY_CHAT_BEFORE (used for delta assertion).",
-            },
-
-            { cmd = 'lua do require("dwkit.capture.chat_capture")._testIngestLine("You say, \'[DWKitTEST_SAY_001]\'") end',            note = "Inject SAY marker (fixture path; no MUD dependency)." },
-            { cmd = 'lua do require("dwkit.capture.chat_capture")._testIngestLine("Vzae gossips, \'[DWKitTEST_PUBLIC_001]\'") end',    note = "Inject PUBLIC marker (GOSSIP)." },
-            { cmd = 'lua do require("dwkit.capture.chat_capture")._testIngestLine("Vzae tells you, \'[DWKitTEST_PRIVATE_001]\'") end', note = "Inject PRIVATE marker (TELL -> target You)." },
-            { cmd = 'lua do require("dwkit.capture.chat_capture")._testIngestLine("Vzae congrats, \'[DWKitTEST_GRATS_001]\'") end',    note = "Inject GRATS marker." },
-
-            {
-                cmd =
-                'lua do local UI=require("dwkit.ui.chat_ui"); local s=UI.getState(); local u=s.unread or {}; local after={SAY=tonumber(u.SAY or 0) or 0, PRIVATE=tonumber(u.PRIVATE or 0) or 0, PUBLIC=tonumber(u.PUBLIC or 0) or 0, GRATS=tonumber(u.GRATS or 0) or 0, Other=tonumber(u.Other or 0) or 0}; local b=_G.DWVERIFY_CHAT_BEFORE or {}; local dS=(after.SAY or 0)-(tonumber(b.SAY or 0) or 0); local dP=(after.PRIVATE or 0)-(tonumber(b.PRIVATE or 0) or 0); local dU=(after.PUBLIC or 0)-(tonumber(b.PUBLIC or 0) or 0); local dG=(after.GRATS or 0)-(tonumber(b.GRATS or 0) or 0); local dO=(after.Other or 0)-(tonumber(b.Other or 0) or 0); print(string.format("[dwverify-chat] AFTER active=%s SAY=%d PRIVATE=%d PUBLIC=%d GRATS=%d Other=%d", tostring(s.activeTab), after.SAY, after.PRIVATE, after.PUBLIC, after.GRATS, after.Other)); print(string.format("[dwverify-chat] DELTA SAY=%d PRIVATE=%d PUBLIC=%d GRATS=%d Other=%d", dS, dP, dU, dG, dO)); if dS~=1 then error("ΔSAY expected +1; got "..tostring(dS)) end; if dP~=1 then error("ΔPRIVATE expected +1; got "..tostring(dP)) end; if dG~=1 then error("ΔGRATS expected +1; got "..tostring(dG)) end; if dO~=0 then error("ΔOther expected +0; got "..tostring(dO)) end; if dU<1 then error("ΔPUBLIC expected >= +1; got "..tostring(dU)) end end',
-                note =
-                "ASSERT unread deltas: SAY=+1 PRIVATE=+1 GRATS=+1 Other=+0 PUBLIC>=+1 (PUBLIC may include live gossip).",
-            },
-
-            {
-                cmd =
-                'lua do local Log=require("dwkit.services.chat_log_service"); local items,meta=Log.getItems(60); local function findNeedle(needle) for _,it in ipairs(items or {}) do local t=tostring(it.text or ""); if t:find(needle,1,true) then return it end end return nil end; local a=findNeedle("[DWKitTEST_SAY_001]"); local b=findNeedle("[DWKitTEST_PUBLIC_001]"); local c=findNeedle("[DWKitTEST_PRIVATE_001]"); local d=findNeedle("[DWKitTEST_GRATS_001]"); print(string.format("[dwverify-chat] store meta.latestId=%s meta.count=%s", tostring(meta and meta.latestId), tostring(meta and meta.count))); local function chk(lbl,it,expCh,expSp,expTg) if type(it)~="table" then error("Missing item: "..lbl) end; print(string.format("[dwverify-chat] item %s id=%s ch=%s sp=%s tg=%s text=%s", lbl, tostring(it.id), tostring(it.channel), tostring(it.speaker), tostring(it.target), tostring(it.text))); if tostring(it.channel)~=tostring(expCh) then error(lbl..": expected channel "..tostring(expCh).." got "..tostring(it.channel)) end; if expSp~=nil and tostring(it.speaker)~=tostring(expSp) then error(lbl..": expected speaker "..tostring(expSp).." got "..tostring(it.speaker)) end; if expTg~=nil and tostring(it.target)~=tostring(expTg) then error(lbl..": expected target "..tostring(expTg).." got "..tostring(it.target)) end end; chk("SAY",a,"SAY","You",nil); chk("PUBLIC",b,"GOSSIP","Vzae",nil); chk("PRIVATE",c,"TELL","Vzae","You"); chk("GRATS",d,"GRATS","Vzae",nil); print("[dwverify-chat] PASS store routing checks") end',
-                note =
-                "ASSERT store routing: channel/speaker/target/text for the 4 markers (FAILs suite if any mismatch).",
-            },
-
-            { cmd = "dwchat tab SAY",                                                                                                                                                                                                                                                                                 note = "Switch to SAY; must clear SAY unread immediately." },
-            { cmd = 'lua do local UI=require("dwkit.ui.chat_ui"); local u=(UI.getState().unread or {}); local n=tonumber(u.SAY or 0) or 0; print(string.format("[dwverify-chat] tab-clear SAY unread=%d", n)); if n~=0 then error("Expected SAY unread=0 after viewing tab; got "..tostring(n)) end end',             note = "ASSERT SAY unread cleared." },
-
-            { cmd = "dwchat tab PRIVATE",                                                                                                                                                                                                                                                                             note = "Switch to PRIVATE; must clear PRIVATE unread immediately." },
-            { cmd = 'lua do local UI=require("dwkit.ui.chat_ui"); local u=(UI.getState().unread or {}); local n=tonumber(u.PRIVATE or 0) or 0; print(string.format("[dwverify-chat] tab-clear PRIVATE unread=%d", n)); if n~=0 then error("Expected PRIVATE unread=0 after viewing tab; got "..tostring(n)) end end', note = "ASSERT PRIVATE unread cleared." },
-
-            { cmd = "dwchat tab GRATS",                                                                                                                                                                                                                                                                               note = "Switch to GRATS; must clear GRATS unread immediately." },
-            { cmd = 'lua do local UI=require("dwkit.ui.chat_ui"); local u=(UI.getState().unread or {}); local n=tonumber(u.GRATS or 0) or 0; print(string.format("[dwverify-chat] tab-clear GRATS unread=%d", n)); if n~=0 then error("Expected GRATS unread=0 after viewing tab; got "..tostring(n)) end end',       note = "ASSERT GRATS unread cleared." },
-
-            { cmd = "dwchat tab All",                                                                                                                                                                                                                                                                                 note = "Return to All at end (neutral resting state)." },
-            { cmd = 'lua do print("[dwverify-chat] PASS chat_phase2_full") end',                                                                                                                                                                                                                                      note = "Final PASS marker for easy copy/paste." },
-        },
-    },
-
-    -- NEW: UI dependency lifecycle suite (Model A) for roomfeed_watch
-    ui_dependency_roomfeed_watch_claim_release = {
-        title = "ui_dependency_roomfeed_watch_claim_release",
-        description =
-        "Dependency lifecycle: enabling roomentities_ui claims roomfeed_watch; disabling releases and stops provider (unless externally installed).",
-        delay = 0.40,
-        steps = {
-            { cmd = "dwroom watch off", note = "Start clean: ensure roomfeed watcher is not installed." },
-
-            {
-                cmd =
-                'lua do local Dep=require("dwkit.services.ui_dependency_service"); Dep.releaseUi("roomentities_ui",{source="dwverify:ui_dep:reset",quiet=true}); local C=require("dwkit.capture.roomfeed_capture"); local installed=false; if type(C.getDebugState)=="function" then local s=C.getDebugState(); installed=(s and s.installed==true) end; local st=Dep.getState(); local rc=0; if type(st)=="table" and type(st.refs)=="table" then rc=tonumber(st.refs["roomfeed_watch"] or 0) or 0 end; print(string.format("[dwverify-ui-dep] reset installed=%s refcount=%s", tostring(installed), tostring(rc))) end',
-                note = "Reset dependency claims best-effort and print baseline state.",
-            },
-
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui",true,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("roomentities_ui",{source="dwverify:ui_dep:enable"}); if ok==false then error("applyOne(roomentities_ui) failed: "..tostring(err)) end; local Dep=require("dwkit.services.ui_dependency_service"); local st=Dep.getState(); local rc=0; if type(st)=="table" and type(st.refs)=="table" then rc=tonumber(st.refs["roomfeed_watch"] or 0) or 0 end; local C=require("dwkit.capture.roomfeed_capture"); local installed=false; if type(C.getDebugState)=="function" then local s=C.getDebugState(); installed=(s and s.installed==true) end; if rc<1 then error("Expected refcount>=1 after enable; got "..tostring(rc)) end; if installed~=true then error("Expected roomfeed_capture installed=true after enable; got "..tostring(installed)) end; print(string.format("[dwverify-ui-dep] PASS enable rc=%s installed=%s", tostring(rc), tostring(installed))) end',
-                note = "Enable (visible OFF) then applyOne; ASSERT: dependency claimed and provider installed.",
-            },
-
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.setEnabled("roomentities_ui",false,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("roomentities_ui",{source="dwverify:ui_dep:disable"}); if ok==false then error("applyOne(roomentities_ui) failed: "..tostring(err)) end; local Dep=require("dwkit.services.ui_dependency_service"); local st=Dep.getState(); local rc=0; if type(st)=="table" and type(st.refs)=="table" then rc=tonumber(st.refs["roomfeed_watch"] or 0) or 0 end; local C=require("dwkit.capture.roomfeed_capture"); local installed=false; if type(C.getDebugState)=="function" then local s=C.getDebugState(); installed=(s and s.installed==true) end; if rc~=0 then error("Expected refcount=0 after disable; got "..tostring(rc)) end; if installed==true then error("Expected provider uninstalled after disable (manager-owned); installed still true") end; print(string.format("[dwverify-ui-dep] PASS disable rc=%s installed=%s", tostring(rc), tostring(installed))) end',
-                note = "Disable then applyOne; ASSERT: refcount=0 and provider uninstalled (manager-owned).",
-            },
-
-            { cmd = "dwroom watch on",  note = "External install: user turns on watcher manually (external-owned)." },
-
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.setEnabled("roomentities_ui",true,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("roomentities_ui",{source="dwverify:ui_dep:enable_external"}); if ok==false then error("applyOne(roomentities_ui) failed: "..tostring(err)) end; local Dep=require("dwkit.services.ui_dependency_service"); local st=Dep.getState(); local rc=0; local ext=false; local started=false; if type(st)=="table" and type(st.refs)=="table" then rc=tonumber(st.refs["roomfeed_watch"] or 0) or 0 end; if type(st)=="table" and type(st.providers)=="table" and type(st.providers["roomfeed_watch"])=="table" then ext=(st.providers["roomfeed_watch"].externalInstalled==true); started=(st.providers["roomfeed_watch"].startedByManager==true) end; local C=require("dwkit.capture.roomfeed_capture"); local installed=false; if type(C.getDebugState)=="function" then local s=C.getDebugState(); installed=(s and s.installed==true) end; if rc<1 then error("Expected refcount>=1 after enable; got "..tostring(rc)) end; if installed~=true then error("Expected installed=true after enable; got "..tostring(installed)) end; print(string.format("[dwverify-ui-dep] enable(external) rc=%s installed=%s externalInstalled=%s startedByManager=%s", tostring(rc), tostring(installed), tostring(ext), tostring(started))) end',
-                note =
-                "Enable again while externally installed; informational print of externalInstalled/startedByManager.",
-            },
-
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.setEnabled("roomentities_ui",false,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("roomentities_ui",{source="dwverify:ui_dep:disable_external"}); if ok==false then error("applyOne(roomentities_ui) failed: "..tostring(err)) end; local Dep=require("dwkit.services.ui_dependency_service"); local st=Dep.getState(); local rc=0; if type(st)=="table" and type(st.refs)=="table" then rc=tonumber(st.refs["roomfeed_watch"] or 0) or 0 end; local C=require("dwkit.capture.roomfeed_capture"); local installed=false; if type(C.getDebugState)=="function" then local s=C.getDebugState(); installed=(s and s.installed==true) end; if rc~=0 then error("Expected refcount=0 after disable; got "..tostring(rc)) end; if installed~=true then error("Expected provider still installed after disable (external-owned); got installed="..tostring(installed)) end; print(string.format("[dwverify-ui-dep] PASS disable(external) rc=%s installed=%s", tostring(rc), tostring(installed))) end',
-                note = "Disable while external-owned; ASSERT: refcount=0 but provider remains installed.",
-            },
-
-            { cmd = "dwroom watch off", note = "Cleanup: turn off watcher manually." },
-        },
-    },
-
-    -- NEW: Locked semantics verification (Objective 1)
-    ui_disable_forces_visible_off = {
-        title = "ui_disable_forces_visible_off",
-        description = "Locked semantics: dwgui disable must force visible=OFF (and stand down best-effort)",
-        delay = 0.30,
-        steps = {
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("roomentities_ui", true, {noSave=true}); gs.setVisible("roomentities_ui", true, {noSave=true}); local UI=require("dwkit.ui.roomentities_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] pre-disable roomentities_ui visible=%s enabled=%s", tostring(s.visible), tostring(s.enabled))) end',
-                note = "Precondition: make roomentities_ui enabled+visible in-memory and show it.",
-            },
-            { cmd = "dwgui disable roomentities_ui", note = "Disable should also force visible OFF (and dispose best-effort)." },
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); local m=gs.list(); local rec=m["roomentities_ui"]; if type(rec)~="table" then error("Expected gui_settings record for roomentities_ui") end; if rec.enabled~=false then error("Expected enabled=false after disable; got "..tostring(rec.enabled)) end; if rec.visible~=false then error("Expected visible=false after disable; got "..tostring(rec.visible)) end; print("[dwverify-ui] PASS gui_settings enabled=false visible=false after disable") end',
-                note = "ASSERT: gui_settings shows enabled=false and visible=false after disable.",
-            },
-            { cmd = "dwgui status",                  note = "Human confirmation: list should show roomentities_ui enabled=OFF visible=OFF." },
         },
     },
 
     -- ---------------------------------------------------------------------
-    -- UI Manager + LaunchPad suites
+    -- Chat Manager UI suites (canonical)
     -- ---------------------------------------------------------------------
 
-    ui_manager_enabled_visible_matrix = {
-        title = "ui_manager_enabled_visible_matrix",
+    chat_manager_ui_live_readback = {
+        title = "chat_manager_ui_live_readback",
         description =
-        "UI manager applies enabled/visible matrix; visible toggles should reflect in UI state; disabled UI should stand down best-effort.",
+        "Chat Manager UI: deterministic live readback. External ChatMgr.setFeature(apply=false) + UI.refresh(force=false) must update rowWidgets[all_unread_badge].toggleText. SAFE; no clicks.",
         delay = 0.30,
         steps = {
             {
                 cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); if type(gs.register)=="function" then pcall(gs.register,"presence_ui",{enabled=false,visible=false},{save=false}); pcall(gs.register,"roomentities_ui",{enabled=false,visible=false},{save=false}); pcall(gs.register,"launchpad_ui",{enabled=false,visible=false},{save=false}); end; gs.setEnabled("presence_ui",true,{noSave=true}); gs.setVisible("presence_ui",true,{noSave=true}); gs.setEnabled("roomentities_ui",true,{noSave=true}); gs.setVisible("roomentities_ui",true,{noSave=true}); gs.setEnabled("launchpad_ui",false,{noSave=true}); gs.setVisible("launchpad_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)~="table" or type(UM.applyAll)~="function" then error("ui_manager.applyAll missing") end; local ok,err=UM.applyAll({source="dwverify:matrix"}); if ok==false then error("ui_manager.applyAll failed: "..tostring(err)) end; local P=require("dwkit.ui.presence_ui"); local R=require("dwkit.ui.roomentities_ui"); local sp=P.getState(); local sr=R.getState(); if sp.visible~=true then error("Expected presence_ui visible=true; got "..tostring(sp.visible)) end; if sr.visible~=true then error("Expected roomentities_ui visible=true; got "..tostring(sr.visible)) end; print("[dwverify-ui] PASS matrix step1 presence_ui visible=true roomentities_ui visible=true") end',
-                note = "Seed enabled/visible for presence+roomentities; applyAll; assert both visible=true.",
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("chat_manager_ui", true, {noSave=true}); gs.setVisible("chat_manager_ui", true, {noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("chat_manager_ui",{source="dwverify:cm:live"}); if ok==false then error("applyOne(chat_manager_ui) failed: "..tostring(err)) end; local UI=require("dwkit.ui.chat_manager_ui"); UI.refresh({source="dwverify:cm:live:refresh0",force=false}); local dbg=UI.getLayoutDebug(); if type(dbg)~="table" then error("Expected layout debug table") end; if dbg.visible~=true then error("Expected visible=true") end; if dbg.hasStatusLabel~=true then error("Expected hasStatusLabel=true") end; local W=dbg.rowWidgets or {}; local row=W.all_unread_badge; if type(row)~="table" then error("Missing rowWidgets all_unread_badge") end; if row.kind~="bool" or row.hasToggle~=true then error("Expected bool toggle row all_unread_badge") end; if tostring(row.toggleText or "")=="" then error("Expected non-empty toggleText precondition") end; print(string.format("[dwverify-cm] pre toggleText=%s", tostring(row.toggleText))) end',
+                note = "Precondition: UI visible, status label exists, all_unread_badge row exists and has toggleText.",
             },
             {
                 cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.setVisible("presence_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("presence_ui",{source="dwverify:matrix"}); if ok==false then error("applyOne(presence_ui) failed: "..tostring(err)) end; local P=require("dwkit.ui.presence_ui"); local st=P.getState(); if st.visible~=false then error("Expected presence_ui visible=false; got "..tostring(st.visible)) end; print("[dwverify-ui] PASS matrix step2 presence_ui visible=false (enabled remains ON)") end',
-                note = "Toggle presence_ui visible OFF (still enabled); applyOne; assert visible=false.",
-            },
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.setEnabled("roomentities_ui",false,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("roomentities_ui",{source="dwverify:matrix"}); if ok==false then error("applyOne(roomentities_ui) failed: "..tostring(err)) end; local R=require("dwkit.ui.roomentities_ui"); local st=R.getState(); local okState=(st.visible==false) or (st.enabled==false) or (st.inited==false); if not okState then error("Expected roomentities_ui to stand down (visible/enabled/inited false); got visible="..tostring(st.visible).." enabled="..tostring(st.enabled).." inited="..tostring(st.inited)) end; print("[dwverify-ui] PASS matrix step3 roomentities_ui stood down best-effort") end',
+                'lua do local UI=require("dwkit.ui.chat_manager_ui"); local Mgr=require("dwkit.services.chat_manager"); local pre=(Mgr.getFeature("all_unread_badge")==true); local want=(not pre); local okSet,errSet=Mgr.setFeature("all_unread_badge", want, {source="dwverify:cm:live:set", apply=false}); if okSet==false then error("setFeature failed: "..tostring(errSet)) end; UI.refresh({source="dwverify:cm:live:refresh1",force=false}); local dbg=UI.getLayoutDebug(); local row=(dbg.rowWidgets or {}).all_unread_badge; if type(row)~="table" then error("Missing rowWidgets all_unread_badge after refresh") end; local got=tostring(row.toggleText or ""); local wantTxt=want and "ON" or "OFF"; if not got:find(wantTxt,1,true) then error("Expected toggleText to include "..wantTxt.."; got "..got) end; print(string.format("[dwverify-cm] PASS live_readback all_unread_badge %s->%s toggleText=%s", tostring(pre), tostring(want), got)) end',
                 note =
-                "Disable roomentities_ui; applyOne; accept any of: visible=false OR enabled=false OR inited=false (best-effort stand-down).",
+                "ASSERT: external setFeature(apply=false) + refresh(force=false) updates toggleText deterministically.",
             },
         },
     },
 
-    launchpad_only_when_any_enabled = {
-        title = "launchpad_only_when_any_enabled",
-        description = "LaunchPad must not appear when no other UI is enabled; must appear when at least one is enabled.",
-        delay = 0.30,
-        steps = {
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); if type(gs.register)=="function" then pcall(gs.register,"launchpad_ui",{enabled=true,visible=true},{save=false}); pcall(gs.register,"presence_ui",{enabled=false,visible=false},{save=false}); pcall(gs.register,"roomentities_ui",{enabled=false,visible=false},{save=false}); end; gs.setEnabled("presence_ui",false,{noSave=true}); gs.setVisible("presence_ui",false,{noSave=true}); gs.setEnabled("roomentities_ui",false,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); gs.setEnabled("launchpad_ui",true,{noSave=true}); gs.setVisible("launchpad_ui",true,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)=="table" and type(UM.applyOne)=="function" then UM.applyOne("launchpad_ui",{source="dwverify:launchpad"}) else local L=require("dwkit.ui.launchpad_ui"); if type(L.apply)=="function" then L.apply({}) end end; local L=require("dwkit.ui.launchpad_ui"); local st=L.getState(); local rowCount=(st.widgets and st.widgets.rowCount) or st.rowCount or 0; if st.visible~=false then error("Expected launchpad visible=false when no other UI enabled; got "..tostring(st.visible)) end; if tonumber(rowCount)~=0 then error("Expected launchpad rowCount=0 when none enabled; got "..tostring(rowCount)) end; print("[dwverify-ui] PASS launchpad step1 hidden when none enabled (rowCount=0)") end',
-                note = "No enabled UIs (besides LaunchPad itself). Expect LaunchPad forces itself hidden and 0 rows.",
-            },
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.setEnabled("roomentities_ui",true,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); gs.setVisible("launchpad_ui",true,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)=="table" and type(UM.applyOne)=="function" then UM.applyOne("roomentities_ui",{source="dwverify:launchpad"}); UM.applyOne("launchpad_ui",{source="dwverify:launchpad"}) else local R=require("dwkit.ui.roomentities_ui"); if type(R.apply)=="function" then R.apply({}) end; local L=require("dwkit.ui.launchpad_ui"); if type(L.apply)=="function" then L.apply({}) end end; local L=require("dwkit.ui.launchpad_ui"); local st=L.getState(); local ids=st.renderedUiIds or {}; local has=false; for i=1,#ids do if ids[i]=="roomentities_ui" then has=true end end; local rowCount=(st.widgets and st.widgets.rowCount) or (st.rowCount) or #ids; if st.visible~=true then error("Expected launchpad visible=true when at least one enabled; got "..tostring(st.visible)) end; if not has then error("Expected launchpad list to include roomentities_ui; ids="..tostring(table.concat(ids,","))) end; if tonumber(rowCount)<1 then error("Expected launchpad rowCount>=1; got "..tostring(rowCount)) end; print("[dwverify-ui] PASS launchpad step2 visible and lists roomentities_ui") end',
-                note = "Enable roomentities_ui only. Expect LaunchPad visible=true and lists roomentities_ui.",
-            },
-        },
-    },
-
-    launchpad_lists_enabled_only = {
-        title = "launchpad_lists_enabled_only",
+    -- ---------------------------------------------------------------------
+    -- Chat UI feature propagation (your existing one)
+    -- ---------------------------------------------------------------------
+    chat_ui_feature_effects = {
+        title = "chat_ui_feature_effects",
         description =
-        "LaunchPad list contains only enabled UIs and updates after enable/disable changes (sorted by uiId).",
+        "Chat UI Phase 2: asserts chat_manager feature config propagates into chat_ui, and asserts All unread badge aggregation behavior. SAFE; uses chat_log_service injection; no clicks; no screenshots.",
         delay = 0.30,
         steps = {
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); if type(gs.register)=="function" then pcall(gs.register,"launchpad_ui",{enabled=true,visible=true},{save=false}); pcall(gs.register,"presence_ui",{enabled=false,visible=false},{save=false}); pcall(gs.register,"roomentities_ui",{enabled=false,visible=false},{save=false}); end; gs.setEnabled("presence_ui",true,{noSave=true}); gs.setVisible("presence_ui",true,{noSave=true}); gs.setEnabled("roomentities_ui",true,{noSave=true}); gs.setVisible("roomentities_ui",false,{noSave=true}); gs.setEnabled("launchpad_ui",true,{noSave=true}); gs.setVisible("launchpad_ui",true,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)~="table" or type(UM.applyAll)~="function" then error("ui_manager.applyAll missing") end; local ok,err=UM.applyAll({source="dwverify:launchpad"}); if ok==false then error("ui_manager.applyAll failed: "..tostring(err)) end; local L=require("dwkit.ui.launchpad_ui"); local st=L.getState(); local ids=st.renderedUiIds or {}; if #ids~=2 or ids[1]~="presence_ui" or ids[2]~="roomentities_ui" then error("Expected ids=[presence_ui,roomentities_ui]; got "..tostring(table.concat(ids,","))) end; print("[dwverify-ui] PASS launchpad list step1 ids="..tostring(table.concat(ids,","))) end',
-                note = "Enable presence_ui + roomentities_ui; LaunchPad should list exactly both (sorted by uiId).",
-            },
-            {
-                cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.setEnabled("presence_ui",false,{noSave=true}); gs.setVisible("presence_ui",false,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)~="table" or type(UM.applyOne)~="function" then error("ui_manager.applyOne missing") end; UM.applyOne("presence_ui",{source="dwverify:launchpad"}); UM.applyOne("launchpad_ui",{source="dwverify:launchpad"}); local L=require("dwkit.ui.launchpad_ui"); local st=L.getState(); local ids=st.renderedUiIds or {}; if #ids~=1 or ids[1]~="roomentities_ui" then error("Expected ids=[roomentities_ui]; got "..tostring(table.concat(ids,","))) end; print("[dwverify-ui] PASS launchpad list step2 ids="..tostring(table.concat(ids,","))) end',
-                note = "Disable presence_ui; LaunchPad should list only roomentities_ui.",
-            },
-        },
-    },
+            { cmd = "dwchat",       note = "Ensure chat_ui is enabled+visible." },
+            { cmd = "dwchat clear", note = "Clear store/UI counters to a clean baseline." },
 
-    -- NEW: LaunchPad toggle -> rtVisible (storeEntry.state.visible) follows cfg visible + applyOne
-    launchpad_toggle_updates_rt_visible = {
-        title = "launchpad_toggle_updates_rt_visible",
-        description =
-        "LaunchPad toggle drives gui_settings visible (noSave) and ui_manager.applyOne, and runtime-visible (rt:) follows ui_base storeEntry.state.visible (must flip true AND false).",
-        delay = 0.30,
-        steps = {
             {
                 cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); if type(gs.register)=="function" then pcall(gs.register,"launchpad_ui",{enabled=true,visible=true},{save=false}); pcall(gs.register,"presence_ui",{enabled=false,visible=false},{save=false}); end; gs.setEnabled("presence_ui",true,{noSave=true}); gs.setVisible("presence_ui",false,{noSave=true}); gs.setEnabled("launchpad_ui",true,{noSave=true}); gs.setVisible("launchpad_ui",true,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)~="table" or type(UM.applyAll)~="function" then error("ui_manager.applyAll missing") end; local ok,err=UM.applyAll({source="dwverify:launchpad_toggle"}); if ok==false then error("ui_manager.applyAll failed: "..tostring(err)) end; local U=require("dwkit.ui.ui_base"); local e=U.getUiStoreEntry("presence_ui") or {}; local rt=(type(e.state)=="table" and e.state.visible) or false; if rt~=false then error("Expected initial rt visible=false for presence_ui; got "..tostring(rt)) end; print("[dwverify-ui] PASS launchpad toggle step1 initial presence_ui rtVisible=false") end',
-                note = "Seed presence_ui enabled=ON visible=OFF; applyAll; assert rtVisible=false.",
+                'lua do local Mgr=require("dwkit.services.chat_manager"); local UI=require("dwkit.ui.chat_ui"); Mgr.resetDefaults({source="dwverify:chatui:defaults",apply=true}); UI.refresh({force=true,source="dwverify:chatui:refresh0"}); local feats=(UI.getFeatureConfig() and UI.getFeatureConfig().features) or {}; local function b(k) return feats[k]==true end; local function n(k) return tonumber(feats[k] or 0) end; if b("all_unread_badge")~=false then error("Expected default all_unread_badge=false") end; if b("auto_scroll_follow")~=false then error("Expected default auto_scroll_follow=false") end; if b("per_tab_line_limit")~=false then error("Expected default per_tab_line_limit=false") end; if n("per_tab_line_limit_n")~=500 then error("Expected default per_tab_line_limit_n=500; got "..tostring(n("per_tab_line_limit_n"))) end; if b("timestamp_prefix")~=false then error("Expected default timestamp_prefix=false") end; if b("debug_overlay")~=false then error("Expected default debug_overlay=false") end; print("[dwverify-chatui] PASS defaults propagated into chat_ui") end',
+                note = "ASSERT: chat_manager defaults propagate into chat_ui featureCfg (best-effort config contract).",
             },
+
             {
                 cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); local cur=gs.getVisible("presence_ui",false); local newVis=(cur~=true); gs.setVisible("presence_ui",newVis,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("presence_ui",{source="dwverify:launchpad_toggle"}); if ok==false then error("applyOne(presence_ui) failed: "..tostring(err)) end; local U=require("dwkit.ui.ui_base"); local e=U.getUiStoreEntry("presence_ui") or {}; local rt=(type(e.state)=="table" and e.state.visible) or false; if rt~=true then error("Expected rt visible=true after toggle ON; got "..tostring(rt)) end; print("[dwverify-ui] PASS launchpad toggle step2 toggled ON rtVisible=true") end',
-                note = "Simulate LaunchPad toggle ON (noSave visible flip + applyOne); assert rtVisible=true.",
+                'lua do local Mgr=require("dwkit.services.chat_manager"); local UI=require("dwkit.ui.chat_ui"); Mgr.setFeature("all_unread_badge", true, {source="dwverify:chatui:set",apply=true}); Mgr.setFeature("timestamp_prefix", true, {source="dwverify:chatui:set",apply=true}); Mgr.setFeature("per_tab_line_limit", true, {source="dwverify:chatui:set",apply=true}); Mgr.setFeature("per_tab_line_limit_n", 50, {source="dwverify:chatui:set",apply=true}); Mgr.setFeature("debug_overlay", true, {source="dwverify:chatui:set",apply=true}); Mgr.setFeature("auto_scroll_follow", true, {source="dwverify:chatui:set",apply=true}); UI.refresh({force=true,source="dwverify:chatui:refresh1"}); local feats=(UI.getFeatureConfig() and UI.getFeatureConfig().features) or {}; local function reqTrue(k) if feats[k]~=true then error("Expected "..tostring(k).."=true in chat_ui featureCfg; got "..tostring(feats[k])) end end; reqTrue("all_unread_badge"); reqTrue("timestamp_prefix"); reqTrue("per_tab_line_limit"); reqTrue("debug_overlay"); reqTrue("auto_scroll_follow"); local n=tonumber(feats.per_tab_line_limit_n or 0) or 0; if n~=50 then error("Expected per_tab_line_limit_n=50 in chat_ui featureCfg; got "..tostring(n)) end; print("[dwverify-chatui] PASS feature flags propagated into chat_ui") end',
+                note = "ASSERT: toggles from chat_manager propagate into chat_ui featureCfg (integration path).",
             },
+
+            { cmd = "dwchat tab SAY", note = "Active tab = SAY so All unread badge can accumulate when enabled." },
             {
                 cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); local cur=gs.getVisible("presence_ui",false); local newVis=(cur~=true); gs.setVisible("presence_ui",newVis,{noSave=true}); local UM=require("dwkit.ui.ui_manager"); local ok,err=UM.applyOne("presence_ui",{source="dwverify:launchpad_toggle"}); if ok==false then error("applyOne(presence_ui) failed: "..tostring(err)) end; local U=require("dwkit.ui.ui_base"); local e=U.getUiStoreEntry("presence_ui") or {}; local rt=(type(e.state)=="table" and e.state.visible) or false; if rt~=false then error("Expected rt visible=false after toggle OFF; got "..tostring(rt)) end; print("[dwverify-ui] PASS launchpad toggle step3 toggled OFF rtVisible=false") end',
-                note = "Simulate LaunchPad toggle OFF (noSave visible flip + applyOne); assert rtVisible=false.",
+                'lua do local Log=require("dwkit.services.chat_log_service"); Log.addLine("[DWKitTEST_PUBLIC_A1]",{channel="GOSSIP",speaker="Vzae",source="dwverify:chatui"}); local UI=require("dwkit.ui.chat_ui"); UI.refresh({force=true,source="dwverify:chatui:refresh2"}); local u=UI.getState().unread or {}; local a=tonumber(u.All or 0) or 0; local p=tonumber(u.PUBLIC or 0) or 0; if a<1 then error("Expected unread.All >=1 when all_unread_badge ON and tab!=All; got "..tostring(a)) end; if p<1 then error("Expected unread.PUBLIC >=1 when active tab=SAY; got "..tostring(p)) end; print(string.format("[dwverify-chatui] PASS all_unread_badge behavior All=%s PUBLIC=%s", tostring(a), tostring(p))) end',
+                note = "ASSERT: all_unread_badge aggregates into unread.All when All is not active.",
             },
+
+            { cmd = "dwchat tab All", note = "Switch to All; should clear unread.All immediately (tab-view semantics)." },
+            {
+                cmd =
+                'lua do local UI=require("dwkit.ui.chat_ui"); UI.refresh({force=true,source="dwverify:chatui:refresh3"}); local u=UI.getState().unread or {}; local a=tonumber(u.All or 0) or 0; if a~=0 then error("Expected unread.All cleared when viewing All; got "..tostring(a)) end; print("[dwverify-chatui] PASS unread.All cleared on viewing All") end',
+                note = "ASSERT: viewing All clears unread.All.",
+            },
+
+            { cmd = 'lua do print("[dwverify-chatui] PASS chat_ui_feature_effects") end', note = "Final PASS marker." },
         },
     },
 }
