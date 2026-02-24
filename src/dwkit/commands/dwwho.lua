@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwwho
 -- Owner       : Commands
--- Version     : v2026-01-30E
+-- Version     : v2026-02-24D
 -- Purpose     :
 --   - Implements dwwho command handler (SAFE + GAME refresh capture).
 --   - Split out from dwkit.services.command_aliases (Phase 1 split).
@@ -52,10 +52,18 @@
 --     preventing post-OFF ingestion via lingering CAP session.
 --   - watcher header trigger callbacks now re-check WATCH.enabled to avoid race where callback
 --     fires after OFF and force-opens gate / starts capture.
+--
+-- NEW (v2026-02-24C):
+--   - Boot reliability: bounded retry autostart for watcher (no manual "dwwho watch on" needed
+--     after restart; manual "who" should ingest as dwwho:auto once Mudlet APIs are ready).
+--
+-- NEW (v2026-02-24D):
+--   - Status output includes WhoStore persistence diagnostics when available:
+--       persist.enabled/path/lastLoadErr/lastSaveErr
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-01-30E"
+M.VERSION = "v2026-02-24D"
 
 -- GLOBAL singleton key for watcher trigger IDs (survives reloads)
 local WATCH_SINGLETON_KEY = "DWKit_WHO_WATCH_SINGLETON"
@@ -340,6 +348,15 @@ local function _printStatusBestEffort(C, svc)
     C.out("  lastUpdatedTs=" .. tostring(st.lastUpdatedTs or "nil"))
     C.out("  source=" .. tostring(st.source or "nil"))
     C.out("  autoCaptureEnabled=" .. tostring(st.autoCaptureEnabled))
+
+    -- NEW: persistence diagnostics (if service provides them)
+    if type(st.persist) == "table" then
+        C.out("[DWKit Who] persist")
+        C.out("  enabled=" .. tostring(st.persist.enabled))
+        C.out("  path=" .. tostring(st.persist.path or "nil"))
+        C.out("  lastLoadErr=" .. tostring(st.persist.lastLoadErr or "nil"))
+        C.out("  lastSaveErr=" .. tostring(st.persist.lastSaveErr or "nil"))
+    end
 
     _printWatchStatus(C)
     _printRefreshGuardStatus(C)
@@ -754,12 +771,54 @@ local function _watchDisable()
     return true, nil
 end
 
+-- #########################################################################
+-- Boot reliability: bounded retry autostart (self-terminating)
+-- #########################################################################
+local _AUTOBOOT = {
+    attempts = 0,
+    maxAttempts = 6,
+    delaySec = 0.40,
+    timerId = nil,
+}
+
 local function _autoEnableWatcherBestEffort()
-    if WATCH.enabled == true then return end
-    if type(tempRegexTrigger) ~= "function" or type(tempTimer) ~= "function" then
+    if WATCH.enabled == true then
+        if _AUTOBOOT.timerId and type(killTimer) == "function" then
+            pcall(killTimer, _AUTOBOOT.timerId)
+        end
+        _AUTOBOOT.timerId = nil
         return
     end
-    _watchEnable()
+
+    -- If APIs are ready now, enable immediately.
+    if type(tempRegexTrigger) == "function"
+        and type(killTrigger) == "function"
+        and type(tempTimer) == "function"
+        and type(killTimer) == "function" then
+        _watchEnable()
+        if WATCH.enabled == true then
+            if _AUTOBOOT.timerId and type(killTimer) == "function" then
+                pcall(killTimer, _AUTOBOOT.timerId)
+            end
+            _AUTOBOOT.timerId = nil
+        end
+        return
+    end
+
+    -- Otherwise retry a few times (boot ordering), then give up quietly.
+    if type(tempTimer) ~= "function" then
+        return
+    end
+
+    if _AUTOBOOT.attempts >= _AUTOBOOT.maxAttempts then
+        return
+    end
+
+    _AUTOBOOT.attempts = _AUTOBOOT.attempts + 1
+
+    _AUTOBOOT.timerId = tempTimer(tonumber(_AUTOBOOT.delaySec) or 0.4, function()
+        _autoEnableWatcherBestEffort()
+    end)
 end
 
 local function _startCapture(C, svc, opts)
@@ -1073,7 +1132,7 @@ local function _dispatchCore(ctx, svc, sub, arg)
     end
 
     if verb == "watch" then
-        local v2, r2 = _parseVerb(rest)
+        local v2, _ = _parseVerb(rest)
         if v2 == "" or v2 == "status" then
             _printWatchStatus(C)
             return
