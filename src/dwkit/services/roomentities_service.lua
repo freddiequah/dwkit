@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.roomentities_service
 -- Owner       : Services
--- Version     : v2026-02-09D
+-- Version     : v2026-02-24A
 -- Purpose     :
 --   - SAFE, profile-portable RoomEntitiesService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
@@ -38,6 +38,7 @@
 --   - ingestLookLines(lines, opts?) -> boolean ok, string|nil err
 --   - ingestLookText(text, opts?) -> boolean ok, string|nil err
 --   - reclassifyFromWhoStore(opts?) -> boolean ok, string|nil err
+--   - getDebugSnapshot(opts?) -> table (SAFE diagnostics; bounded)
 --
 -- Events Emitted:
 --   - DWKit:Service:RoomEntities:Updated
@@ -47,7 +48,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-09D"
+M.VERSION = "v2026-02-24A"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -781,6 +782,191 @@ local function _shouldIgnoreByCallerRules(trimmed, opts)
 end
 
 -- ############################################################
+-- Diagnostics helpers (SAFE)
+-- ############################################################
+
+local function _extractCandidateName(labelOrKey)
+    if type(labelOrKey) ~= "string" then return nil end
+    local s = _trim(labelOrKey)
+    if s == "" then return nil end
+
+    -- Use the same cleanup logic as keys (remove trailing tags), then take first token.
+    s = _asKey(s) or s
+    s = _trim(s)
+    if s == "" then return nil end
+
+    local n = s:match("^([A-Za-z][A-Za-z0-9']*)")
+    if type(n) ~= "string" or n == "" then return nil end
+    return n
+end
+
+local function _boundedCopyRaws(raws, maxN)
+    local out = {}
+    if type(raws) ~= "table" then return out end
+    maxN = tonumber(maxN) or 0
+    if maxN <= 0 then maxN = 3 end
+    for i = 1, math.min(#raws, maxN) do
+        out[i] = tostring(raws[i] or "")
+    end
+    return out
+end
+
+-- Public: bounded debug snapshot for dwroom dump (SAFE; no emits)
+function M.getDebugSnapshot(opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    local includeBuckets = opts.includeBuckets
+    if type(includeBuckets) ~= "table" then
+        includeBuckets = { players = true, mobs = true, items = true, unknown = true }
+    end
+
+    local maxEntities = tonumber(opts.maxEntities) or 0
+    if maxEntities <= 0 then maxEntities = 25 end
+
+    local maxRawsPerEntity = tonumber(opts.maxRawsPerEntity) or 0
+    if maxRawsPerEntity <= 0 then maxRawsPerEntity = 3 end
+
+    local knownIdx = _getKnownPlayersIndexCombined({
+        usePresence = (opts.usePresence ~= false),
+        useWhoStore = (opts.useWhoStore ~= false),
+    })
+
+    local st = _ensureBucketsPresent(STATE.state)
+    local v2 = _ensureEntitiesV2Present(STATE.entitiesV2)
+    local stats = M.getStats()
+
+    local function cntKeys(t)
+        if type(t) ~= "table" then return 0 end
+        local n = 0
+        for _ in pairs(t) do n = n + 1 end
+        return n
+    end
+
+    local function pushSortedKeys(t, maxN)
+        local keys = {}
+        if type(t) ~= "table" then return keys end
+        for k in pairs(t) do
+            keys[#keys + 1] = tostring(k)
+        end
+        table.sort(keys, function(a, b) return a < b end)
+        if maxN and maxN > 0 and #keys > maxN then
+            local out = {}
+            for i = 1, maxN do out[i] = keys[i] end
+            return out
+        end
+        return keys
+    end
+
+    local function mapBucketV2(bucketName, bucketMap)
+        local out = {
+            name = bucketName,
+            count = cntKeys(bucketMap),
+            items = {},
+            truncated = false,
+        }
+
+        local keys = pushSortedKeys(bucketMap, maxEntities)
+        if cntKeys(bucketMap) > #keys then
+            out.truncated = true
+        end
+
+        for i = 1, #keys do
+            local k = keys[i]
+            local e = bucketMap[k]
+            if type(e) == "table" then
+                local label = tostring(e.label or k)
+                local key = tostring(e.key or k)
+
+                local confLabel = _confidenceForName(label, knownIdx)
+                local candidate = _extractCandidateName(label)
+                local confCandidate = (candidate and _confidenceForName(candidate, knownIdx)) or "none"
+
+                local whoCanon = nil
+                if candidate then
+                    local lower = _normName(candidate)
+                    if lower ~= "" then
+                        whoCanon = knownIdx.canonByLower[lower]
+                    end
+                end
+
+                out.items[#out.items + 1] = {
+                    key = key,
+                    label = label,
+                    count = tonumber(e.count) or 1,
+                    raws = _boundedCopyRaws(e.raws, maxRawsPerEntity),
+
+                    diag = {
+                        candidateName = candidate,
+                        who = {
+                            labelConfidence = confLabel,
+                            labelExact = (confLabel == "exact"),
+                            candidateConfidence = confCandidate,
+                            candidateExact = (confCandidate == "exact"),
+                            canonByCandidate = whoCanon,
+                        },
+                    },
+                }
+            else
+                -- fallback for unexpected map value
+                out.items[#out.items + 1] = {
+                    key = tostring(k),
+                    label = tostring(k),
+                    count = 1,
+                    raws = {},
+                    diag = {
+                        candidateName = _extractCandidateName(tostring(k)),
+                        who = {
+                            labelConfidence = _confidenceForName(tostring(k), knownIdx),
+                            labelExact = (_confidenceForName(tostring(k), knownIdx) == "exact"),
+                            candidateConfidence = "none",
+                            candidateExact = false,
+                            canonByCandidate = nil,
+                        },
+                    },
+                }
+            end
+        end
+
+        return out
+    end
+
+    local bucketsV2 = {}
+    local order = { "players", "mobs", "items", "unknown" }
+    for _, b in ipairs(order) do
+        if includeBuckets[b] == true then
+            bucketsV2[b] = mapBucketV2(b, v2[b] or {})
+        end
+    end
+
+    return {
+        version = M.VERSION,
+        ts = os.time(),
+        state = {
+            lastTs = STATE.lastTs,
+            updates = STATE.updates,
+            emits = STATE.emits,
+            suppressedEmits = STATE.suppressedEmits,
+            counts = {
+                players = cntKeys(st.players),
+                mobs = cntKeys(st.mobs),
+                items = cntKeys(st.items),
+                unknown = cntKeys(st.unknown),
+            },
+        },
+        who = (type(stats.who) == "table") and _copyOneLevel(stats.who) or {},
+        debug = {
+            limits = {
+                maxEntities = maxEntities,
+                maxRawsPerEntity = maxRawsPerEntity,
+                usePresence = (opts.usePresence ~= false),
+                useWhoStore = (opts.useWhoStore ~= false),
+            },
+        },
+        bucketsV2 = bucketsV2,
+    }
+end
+
+-- ############################################################
 -- WhoStore "superpower" wiring (SAFE)
 -- Still allowed: auto promote to players when WhoStore becomes confident.
 -- But per agreement: ONLY players can be auto-typed; everything else remains unknown.
@@ -819,15 +1005,28 @@ local function _reclassifyUnknownToPlayersOnly(current, knownIdx)
     next.mobs = _copyOneLevel(current.mobs)
     next.items = _copyOneLevel(current.items)
 
-    local function placeNameFromUnknown(name)
-        if type(name) ~= "string" or name == "" then return end
-        local conf = _confidenceForName(name, knownIdx)
-        if conf == "exact" then
-            next.players[name] = true
+    local function placeNameFromUnknown(label)
+        if type(label) ~= "string" or label == "" then return end
+
+        local confLabel = _confidenceForName(label, knownIdx)
+        if confLabel == "exact" then
+            next.players[label] = true
             moved = moved + 1
-        else
-            next.unknown[name] = true
+            return
         end
+
+        -- NEW: candidate-name gate for titled room labels (keep label as display key)
+        local cand = _extractCandidateName(label)
+        if cand then
+            local confCand = _confidenceForName(cand, knownIdx)
+            if confCand == "exact" then
+                next.players[label] = true
+                moved = moved + 1
+                return
+            end
+        end
+
+        next.unknown[label] = true
     end
 
     for k, v in pairs(current.players) do
@@ -1245,13 +1444,24 @@ function M.ingestLookLines(lines, opts)
                 if phrase ~= nil then
                     local label = _asKey(phrase) or phrase
                     if label ~= "" then
-                        local conf = _confidenceForName(label, knownPlayersIdx)
-                        if conf == "exact" then
+                        local confLabel = _confidenceForName(label, knownPlayersIdx)
+
+                        if confLabel == "exact" then
                             _addBucket(buckets.players, label)
                             addV2(v2.players, label, label, trimmed)
                         else
-                            _addBucket(buckets.unknown, label)
-                            addV2(v2.unknown, label, label, trimmed)
+                            -- NEW: candidate-name gate (WhoStore exact match) for titled labels
+                            local cand = _extractCandidateName(label)
+                            local confCand = (cand and _confidenceForName(cand, knownPlayersIdx)) or "none"
+
+                            if confCand == "exact" then
+                                -- Keep label as the display key so UI retains title text.
+                                _addBucket(buckets.players, label)
+                                addV2(v2.players, label, label, trimmed)
+                            else
+                                _addBucket(buckets.unknown, label)
+                                addV2(v2.unknown, label, label, trimmed)
+                            end
                         end
                     end
                 end

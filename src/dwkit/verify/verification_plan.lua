@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-23M
+-- Version     : v2026-02-24B
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-23M"
+M.VERSION = "v2026-02-24B"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -57,6 +57,40 @@ local SUITES = {
             "dwwho fixture basic",
             "dwwho list",
             "dwwho status",
+        },
+    },
+
+    -- ---------------------------------------------------------------------
+    -- RoomEntities dump diagnostics (new)
+    -- ---------------------------------------------------------------------
+
+    room_dump = {
+        title = "room_dump",
+        description = "RoomEntities dump: seed WhoStore names + seed titled entity + SAFE refresh promotion + run dwroom dump (SAFE; no gameplay sends)",
+        delay = 0.30,
+        steps = {
+            { cmd = "dwwho clear", note = "Clear WhoStore to a known baseline (SAFE)." },
+            { cmd = "dwwho set Snorrin", note = "Seed WhoStore with a canonical name (SAFE; no gameplay sends)." },
+
+            { cmd = "dwroom clear", note = "Clear RoomEntities snapshot (SAFE)." },
+
+            {
+                cmd =
+                'lua do local R=require("dwkit.services.roomentities_service"); local ok,err=R.ingestFixture({unknown={"Snorrin ZZZZZVo tezzzz of Snert Industries (AFK)"},source="dwverify:room_dump",forceEmit=true}); if ok==false then error("ingestFixture failed: "..tostring(err)) end; print("[dwverify-room] seeded RoomEntities unknown with titled Snorrin") end',
+                note =
+                "Seed RoomEntities with a titled display string that should NOT exact-match WhoStore, but should candidate-match (promotion happens on refresh).",
+            },
+
+            { cmd = "dwroom refresh", note = "SAFE refresh: triggers WhoStore-based reclassify (candidate-name gate) and emits Updated." },
+
+            { cmd = "dwroom status", note = "Expect players=1 unknown=0 (or unknown excludes Snorrin if other fixtures exist)." },
+
+            {
+                cmd = "dwroom dump",
+                note = "Inspect dump output: expect Snorrin promoted to players; labelExact=false and candidateExact=true.",
+                expect =
+                "For the Snorrin entry (under bucket=players): candidateName=Snorrin, who.labelExact=false, who.candidateExact=true, who.canonByCandidate=Snorrin",
+            },
         },
     },
 
