@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.roomentities_service
 -- Owner       : Services
--- Version     : v2026-02-24A
+-- Version     : v2026-02-24B
 -- Purpose     :
 --   - SAFE, profile-portable RoomEntitiesService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
@@ -48,7 +48,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-24A"
+M.VERSION = "v2026-02-24B"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -718,7 +718,7 @@ local function _extractEntityPhrase(lineClean)
         if phrase ~= "" then return phrase end
     end
 
-    -- NEW: capture lines like:
+    -- capture lines like:
     --   "A large bulletin board is mounted on a wall here."
     do
         local phrase = trimmed:match("^(.-)%s+is%s+mounted%s+.-%s+here[%s,%.]")
@@ -731,11 +731,9 @@ local function _extractEntityPhrase(lineClean)
         phrase = _trim(phrase or "")
         posture = tostring(posture or ""):lower()
         if phrase ~= "" and posture ~= "" then
-            -- allow any word, but this is primarily posture support
             if POSTURES[posture] == true then
                 return phrase
             end
-            -- still accept as candidate (agreement: allowlist is simple, stable; errs go to unknown)
             return phrase
         end
     end
@@ -907,7 +905,6 @@ function M.getDebugSnapshot(opts)
                     },
                 }
             else
-                -- fallback for unexpected map value
                 out.items[#out.items + 1] = {
                     key = tostring(k),
                     label = tostring(k),
@@ -1015,7 +1012,7 @@ local function _reclassifyUnknownToPlayersOnly(current, knownIdx)
             return
         end
 
-        -- NEW: candidate-name gate for titled room labels (keep label as display key)
+        -- candidate-name gate for titled room labels (keep label as display key)
         local cand = _extractCandidateName(label)
         if cand then
             local confCand = _confidenceForName(cand, knownIdx)
@@ -1043,6 +1040,42 @@ local function _reclassifyUnknownToPlayersOnly(current, knownIdx)
     return next, moved
 end
 
+-- NEW: keep entitiesV2 consistent with legacy reclassify promotions.
+local function _syncEntitiesV2AfterReclassify(beforeLegacy, afterLegacy)
+    beforeLegacy = _ensureBucketsPresent((type(beforeLegacy) == "table") and beforeLegacy or {})
+    afterLegacy = _ensureBucketsPresent((type(afterLegacy) == "table") and afterLegacy or {})
+
+    STATE.entitiesV2 = _ensureEntitiesV2Present(STATE.entitiesV2)
+    local v2 = STATE.entitiesV2
+
+    local promoted = {}
+    for label, v in pairs(afterLegacy.players) do
+        if v == true and type(label) == "string" and label ~= "" then
+            if beforeLegacy.players[label] ~= true and beforeLegacy.unknown[label] == true then
+                promoted[#promoted + 1] = label
+            end
+        end
+    end
+
+    if #promoted == 0 then
+        return 0
+    end
+
+    local moved = 0
+    for i = 1, #promoted do
+        local label = promoted[i]
+        local e = (type(v2.unknown) == "table") and v2.unknown[label] or nil
+        if type(e) == "table" then
+            v2.unknown[label] = nil
+            if type(v2.players) ~= "table" then v2.players = {} end
+            v2.players[label] = e
+            moved = moved + 1
+        end
+    end
+
+    return moved
+end
+
 local function _applyReclassifyNow(opts)
     opts = (type(opts) == "table") and opts or {}
 
@@ -1063,12 +1096,15 @@ local function _applyReclassifyNow(opts)
         return true, nil
     end
 
+    -- Update legacy first, then sync V2 promotions to keep dump/UI diagnostics truthful.
     STATE.state = _copyOneLevel(_ensureBucketsPresent(next))
+    local movedV2 = _syncEntitiesV2AfterReclassify(before, STATE.state)
+
     STATE.lastTs = os.time()
     STATE.updates = STATE.updates + 1
 
     local src = tostring(opts.source or "reclassify:whostore")
-    local delta = { reclassifiedPlayers = moved }
+    local delta = { reclassifiedPlayers = moved, reclassifiedV2 = movedV2 }
 
     local okEmit, errEmit = _emit(_copyOneLevel(STATE.state), delta, src)
     if not okEmit then
@@ -1450,7 +1486,7 @@ function M.ingestLookLines(lines, opts)
                             _addBucket(buckets.players, label)
                             addV2(v2.players, label, label, trimmed)
                         else
-                            -- NEW: candidate-name gate (WhoStore exact match) for titled labels
+                            -- candidate-name gate (WhoStore exact match) for titled labels
                             local cand = _extractCandidateName(label)
                             local confCand = (cand and _confidenceForName(cand, knownPlayersIdx)) or "none"
 

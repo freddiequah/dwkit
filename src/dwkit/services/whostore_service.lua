@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.whostore_service
 -- Owner       : Services
--- Version     : v2026-01-30E
+-- Version     : v2026-02-24C
 -- Purpose     :
 --   - SAFE WhoStore service (manual-only) to cache an authoritative WHO snapshot
 --     derived from parsing WHO output (No-GMCP compatible).
@@ -70,11 +70,15 @@
 -- FIX (v2026-01-30E):
 --   - Gate now blocks any source that begins with "dwwho:auto" (future-proof),
 --     while leaving refresh ("dwwho:refresh") unaffected.
+--
+-- NEW (v2026-02-24C):
+--   - Persistence: save/load WhoStore snapshot to profile-local file.
+--   - On successful load, emits Updated once (source=persist:load).
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-01-30E"
+M.VERSION = "v2026-02-24C"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -596,6 +600,245 @@ local function _emitUpdated(payload)
     return false
 end
 
+-- #########################################################################
+-- Persistence (SAFE; best-effort)
+-- #########################################################################
+
+local _persist = {
+    enabled = true,
+    fileName = "dwkit_whostore_snapshot.lua",
+    lastLoadErr = nil,
+    lastSaveErr = nil,
+}
+
+local function _safeString(s)
+    s = tostring(s or "")
+    s = s:gsub("\r", "")
+    return s
+end
+
+local function _quoteLuaString(s)
+    s = _safeString(s)
+    s = s:gsub("\\", "\\\\")
+    s = s:gsub("\n", "\\n")
+    s = s:gsub("\"", "\\\"")
+    return "\"" .. s .. "\""
+end
+
+local function _getProfileDirBestEffort()
+    -- Mudlet provides getProfilePath() in most builds.
+    if type(getProfilePath) == "function" then
+        local ok, v = pcall(getProfilePath)
+        if ok and type(v) == "string" and v ~= "" then
+            return v
+        end
+    end
+    -- Fallback: Mudlet home dir (not perfect, but better than nothing)
+    if type(getMudletHomeDir) == "function" then
+        local ok, v = pcall(getMudletHomeDir)
+        if ok and type(v) == "string" and v ~= "" then
+            return v
+        end
+    end
+    return nil
+end
+
+local function _joinPath(dir, name)
+    dir = tostring(dir or "")
+    name = tostring(name or "")
+    if dir == "" then return name end
+    local sep = "/"
+    if dir:find("\\", 1, true) then sep = "\\" end
+    if dir:sub(-1) == "/" or dir:sub(-1) == "\\" then
+        return dir .. name
+    end
+    return dir .. sep .. name
+end
+
+local function _persistPathBestEffort()
+    local dir = _getProfileDirBestEffort()
+    if not dir then return nil end
+    return _joinPath(dir, _persist.fileName)
+end
+
+local function _persistSerialize(snapshot, autoCaptureEnabled)
+    snapshot = (type(snapshot) == "table") and snapshot or {}
+    local by = (type(snapshot.byName) == "table") and snapshot.byName or {}
+
+    local keys = _sortedKeys(by)
+
+    local lines = {}
+    lines[#lines + 1] = "return {"
+    lines[#lines + 1] = "  version=" .. _quoteLuaString(M.VERSION) .. ","
+    lines[#lines + 1] = "  savedAt=" .. tostring(os.time()) .. ","
+    lines[#lines + 1] = "  autoCaptureEnabled=" .. tostring(autoCaptureEnabled == true) .. ","
+    lines[#lines + 1] = "  snapshot={"
+    lines[#lines + 1] = "    ts=" .. tostring(tonumber(snapshot.ts) or os.time()) .. ","
+    lines[#lines + 1] = "    source=" .. _quoteLuaString(tostring(snapshot.source or "persist")) .. ","
+    lines[#lines + 1] = "    byName={"
+
+    -- Persist only byName entries (authoritative set). This is enough for RoomEntities gating.
+    for i = 1, #keys do
+        local k = tostring(keys[i])
+        local e = by[k]
+        if type(e) == "table" then
+            local name = tostring(e.name or "")
+            if name ~= "" then
+                lines[#lines + 1] = "      [" .. _quoteLuaString(k) .. "]={"
+                lines[#lines + 1] = "        name=" .. _quoteLuaString(name) .. ","
+                lines[#lines + 1] = "        rankTag=" .. _quoteLuaString(tostring(e.rankTag or "")) .. ","
+                lines[#lines + 1] = "        level=" .. tostring(tonumber(e.level) or "nil") .. ","
+                lines[#lines + 1] = "        class=" ..
+                    (e.class ~= nil and _quoteLuaString(tostring(e.class)) or "nil") .. ","
+                -- flags array
+                if type(e.flags) == "table" then
+                    local f = {}
+                    for fi = 1, #e.flags do
+                        f[#f + 1] = _quoteLuaString(tostring(e.flags[fi] or ""))
+                    end
+                    lines[#lines + 1] = "        flags={" .. table.concat(f, ",") .. "},"
+                else
+                    lines[#lines + 1] = "        flags={},"
+                end
+                lines[#lines + 1] = "        extraText=" .. _quoteLuaString(tostring(e.extraText or "")) .. ","
+                lines[#lines + 1] = "        titleText=" ..
+                    (e.titleText ~= nil and _quoteLuaString(tostring(e.titleText)) or "nil") .. ","
+                lines[#lines + 1] = "        rawLine=" .. _quoteLuaString(tostring(e.rawLine or "")) .. ","
+                lines[#lines + 1] = "      },"
+            end
+        end
+    end
+
+    lines[#lines + 1] = "    },"
+    lines[#lines + 1] = "  },"
+    lines[#lines + 1] = "}"
+    lines[#lines + 1] = "}"
+
+    return table.concat(lines, "\n")
+end
+
+local function _persistSaveBestEffort()
+    if _persist.enabled ~= true then return true end
+    local path = _persistPathBestEffort()
+    if not path or path == "" then
+        _persist.lastSaveErr = "persist path not available"
+        return false
+    end
+
+    local ok1, content = pcall(_persistSerialize, _state.snapshot, _state.autoCaptureEnabled == true)
+    if not ok1 or type(content) ~= "string" or content == "" then
+        _persist.lastSaveErr = "serialize failed"
+        return false
+    end
+
+    local f, err = io.open(path, "w")
+    if not f then
+        _persist.lastSaveErr = tostring(err or "io.open failed")
+        return false
+    end
+
+    f:write(content)
+    f:close()
+
+    _persist.lastSaveErr = nil
+    return true
+end
+
+local function _persistLoadBestEffort()
+    if _persist.enabled ~= true then return false end
+    local path = _persistPathBestEffort()
+    if not path or path == "" then
+        _persist.lastLoadErr = "persist path not available"
+        return false
+    end
+
+    local f = io.open(path, "r")
+    if not f then
+        return false
+    end
+    f:close()
+
+    local ok, data = pcall(dofile, path)
+    if not ok or type(data) ~= "table" then
+        _persist.lastLoadErr = "dofile failed"
+        return false
+    end
+
+    local snap = (type(data.snapshot) == "table") and data.snapshot or nil
+    if type(snap) ~= "table" or type(snap.byName) ~= "table" then
+        _persist.lastLoadErr = "persist file missing snapshot.byName"
+        return false
+    end
+
+    -- Restore autoCaptureEnabled (default true if missing)
+    if data.autoCaptureEnabled ~= nil then
+        _state.autoCaptureEnabled = (data.autoCaptureEnabled == true)
+    end
+
+    -- Build canonical snapshot
+    local ts = tonumber(snap.ts) or os.time()
+    local src = tostring(snap.source or "persist:load")
+    local byName = {}
+
+    for k, e in pairs(snap.byName) do
+        if type(k) == "string" and type(e) == "table" and type(e.name) == "string" and e.name ~= "" then
+            local ck = _canonKey(k) or _canonKey(e.name)
+            if ck then
+                byName[ck] = {
+                    name = tostring(e.name),
+                    rankTag = tostring(e.rankTag or ""),
+                    level = tonumber(e.level) or nil,
+                    class = (e.class ~= nil) and tostring(e.class) or nil,
+                    flags = (type(e.flags) == "table") and _copyArray(e.flags) or {},
+                    extraText = tostring(e.extraText or ""),
+                    titleText = (e.titleText ~= nil) and tostring(e.titleText) or nil,
+                    rawLine = tostring(e.rawLine or ""),
+                }
+            end
+        end
+    end
+
+    local entries = _rebuildEntriesArrayFromByName(byName)
+    local restored = _buildSnapshotFromEntries(ts, src, {}, entries, byName)
+
+    _persist.lastLoadErr = nil
+
+    -- Apply and emit once so consumers can reclassify.
+    local delta = { added = _countMap(byName), removed = 0, changed = 0, total = _countMap(byName), mode = "persist:load" }
+    local function _applyNewSnapshot(newSnap, opts, d)
+        opts = (type(opts) == "table") and opts or {}
+        newSnap = (type(newSnap) == "table") and newSnap or
+            _buildSnapshotFromEntries(os.time(), "applyNewSnapshot", {}, {}, {})
+
+        _state.snapshot = newSnap
+        _state.players = _rebuildLegacyPlayersFromSnapshot(newSnap)
+
+        _state.lastUpdatedTs = os.time()
+        _state.source = tostring(opts.source or newSnap.source or "snapshot")
+        _state.rawCount = tonumber(opts.rawCount or _state.rawCount or 0) or 0
+        _state.stats.updates = _state.stats.updates + 1
+
+        local payload = {
+            ts = newSnap.ts or _state.lastUpdatedTs,
+            source = _state.source,
+            snapshot = _copySnapshot(newSnap),
+        }
+
+        if type(d) == "table" then
+            payload.delta = _copyTable(d)
+        end
+
+        payload.state = M.getState()
+
+        _emitUpdated(payload)
+
+        return true, nil
+    end
+
+    _applyNewSnapshot(restored, { source = "persist:load", rawCount = _countMap(byName) }, delta)
+    return true
+end
+
 function M.getVersion()
     return M.VERSION
 end
@@ -630,6 +873,7 @@ end
 function M.setAutoCaptureEnabled(flag, opts)
     opts = (type(opts) == "table") and opts or {}
     _state.autoCaptureEnabled = (flag == true)
+    _persistSaveBestEffort()
     return true, nil
 end
 
@@ -678,6 +922,12 @@ function M.getState()
         rawCount = _state.rawCount,
         stats = _copyTable(_state.stats),
         snapshot = _copySnapshot(_state.snapshot),
+        persist = {
+            enabled = (_persist.enabled == true),
+            path = _persistPathBestEffort(),
+            lastLoadErr = _persist.lastLoadErr,
+            lastSaveErr = _persist.lastSaveErr,
+        },
     }
 end
 
@@ -719,6 +969,8 @@ local function _applyNewSnapshot(newSnap, opts, delta)
     payload.state = M.getState()
 
     _emitUpdated(payload)
+
+    _persistSaveBestEffort()
 
     return true, nil
 end
@@ -825,6 +1077,8 @@ function M.update(delta, opts)
     _state.source = src
     _state.stats.updates = _state.stats.updates + 1
 
+    _persistSaveBestEffort()
+
     return true, nil
 end
 
@@ -849,6 +1103,9 @@ function M.clear(opts)
     _state.lastUpdatedTs = os.time()
     _state.source = src
     _state.stats.updates = _state.stats.updates + 1
+
+    _persistSaveBestEffort()
+
     return true, nil
 end
 
@@ -933,6 +1190,8 @@ function M.ingestWhoLines(lines, opts)
     _state.source = src
     _state.stats.updates = _state.stats.updates + 1
 
+    _persistSaveBestEffort()
+
     return true, nil
 end
 
@@ -951,5 +1210,8 @@ function M.ingestWhoText(text, opts)
 
     return M.ingestWhoLines(lines, opts)
 end
+
+-- Load persisted snapshot (best-effort) at module load.
+pcall(_persistLoadBestEffort)
 
 return M
