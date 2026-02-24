@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_manager
 -- Owner       : UI
--- Version     : v2026-02-23D
+-- Version     : v2026-02-24A
 -- Purpose     :
 --   - SAFE dispatcher for applying UI modules registered in gui_settings.
 --   - Provides manual-only "apply all" and "apply one" capability.
@@ -31,11 +31,15 @@
 --   v2026-02-23D:
 --     - NEW: seed chat_manager_ui into gui_settings defaults so it appears in UI Manager
 --       list on new profiles (default enabled=false, visible=false).
+--
+--   v2026-02-24A:
+--     - NEW: presence_ui claims roomfeed_watch provider so Presence can populate even if
+--       roomentities_ui is disabled (Presence depends on RoomEntities snapshot data for this profile).
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-23D"
+M.VERSION = "v2026-02-24A"
 
 local function _rawOut(line)
     line = tostring(line or "")
@@ -347,6 +351,9 @@ end
 
 local UI_PROVIDER_DEPS = {
     roomentities_ui = { "roomfeed_watch" },
+
+    -- Presence depends on RoomEntities snapshot (produced by roomfeed_watch passive capture).
+    presence_ui = { "roomfeed_watch" },
 
     -- chat UI depends on chat_watch provider (ChatCapture).
     chat_ui = { "chat_watch" },

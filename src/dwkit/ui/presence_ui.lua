@@ -1,10 +1,11 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.presence_ui
 -- Owner       : UI
--- Version     : v2026-02-07A
+-- Version     : v2026-02-24E
 -- Purpose     :
 --   - SAFE Presence UI scaffold with live render from PresenceService (data only).
---   - Creates a small window frame via ui_window + content panel + label.
+--   - Renders "My profiles" vs "Other players" split from PresenceService state.
+--   - Creates a small window frame via ui_window + content panel + label-like surface.
 --   - Demonstrates gui_settings self-seeding (register) + apply()/dispose() lifecycle.
 --   - Subscribes to PresenceService "updated" event to auto-refresh when state changes.
 --   - No timers, no send(), no automation.
@@ -15,6 +16,20 @@
 --        Instead, set storeEntry.state.visible to boolean and clear widget handles safely.
 --        This prevents UI Manager UI runtime visibility (rt:) from becoming nil.
 --     2) Safe UI Manager refresh: use ui_manager_ui.refresh() (rows-only) instead of apply().
+--
+--   v2026-02-24B:
+--     - Render PresenceService split fields:
+--         * myProfilesInRoom (array of "Name (ProfileLabel)")
+--         * otherPlayersInRoom (array of "Name")
+--       And show stale status + reason.
+--
+--   v2026-02-24C:
+--     - Attempted label HTML multiline fixes.
+--
+--   v2026-02-24E:
+--     - FIX: Some Mudlet/Qt builds still clip/single-line Geyser.Label text regardless of <br/>/wrap.
+--       Use a MiniConsole as the label surface for deterministic multi-line rendering.
+--       Also: remove any stylesheet overrides that made the UI look grey/ugly; keep ListKit styling.
 --
 -- Public API  :
 --   - getModuleVersion() -> string
@@ -27,7 +42,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-07A"
+M.VERSION = "v2026-02-24E"
 M.UI_ID = "presence_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -66,27 +81,68 @@ local function _asOneLine(x)
     return tostring(x)
 end
 
+local function _pushLinesFromList(lines, title, arr, emptyMsg)
+    lines[#lines + 1] = tostring(title or "")
+    if type(arr) ~= "table" or #arr == 0 then
+        lines[#lines + 1] = "  - " .. tostring(emptyMsg or "(empty)")
+        return
+    end
+    for i = 1, #arr do
+        local v = tostring(arr[i] or "")
+        if v ~= "" then
+            lines[#lines + 1] = "  - " .. v
+        end
+    end
+end
+
 local function _formatPresenceState(state)
     state = (type(state) == "table") and state or {}
     local keys = _sortedKeys(state)
 
+    local stale = (state.stale == true)
+    local reason = tostring(state.staleReason or "")
+    if reason == "" then reason = "none" end
+
+    local status = stale and "STALE" or "OK"
+
     local lines = {}
-    lines[#lines + 1] = "DWKit presence_ui"
-    lines[#lines + 1] = "keys=" .. tostring(#keys)
+    lines[#lines + 1] = "DWKit Presence status=" .. status .. " reason=" .. reason
 
-    if type(state.selfName) == "string" and state.selfName ~= "" then
-        lines[#lines + 1] = "self=" .. tostring(state.selfName)
+    if type(state.roomPlayerCount) == "number" then
+        lines[#lines + 1] = "roomPlayerCount=" .. tostring(state.roomPlayerCount)
     end
 
-    if type(state.nearbyPlayers) == "table" then
-        local cnt = #state.nearbyPlayers
-        lines[#lines + 1] = "nearbyPlayers=" .. tostring(cnt)
+    if state.roomTs ~= nil then
+        lines[#lines + 1] = "roomTs=" .. tostring(state.roomTs)
     end
+
+    local my = state.myProfilesInRoom
+    local other = state.otherPlayersInRoom
+
+    lines[#lines + 1] = ""
+    _pushLinesFromList(lines, "My profiles:", my, "(none in room)")
+    lines[#lines + 1] = ""
+    _pushLinesFromList(lines, "Other players:", other, "(none)")
+
+    if type(state.mapping) == "table" then
+        local mc = tonumber(state.mapping.count) or 0
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = "mapping.count=" .. tostring(mc)
+        if state.mapping.missing == true and type(state.mapping.hint) == "string" and state.mapping.hint ~= "" then
+            lines[#lines + 1] = "hint=" .. tostring(state.mapping.hint)
+        end
+    end
+
+    -- tiny debug tail (bounded)
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "debug(keys=" .. tostring(#keys) .. ")"
 
     local shown = 0
     for _, k in ipairs(keys) do
         if shown >= 4 then break end
-        if k ~= "selfName" and k ~= "nearbyPlayers" then
+        if k ~= "myProfilesInRoom" and k ~= "otherPlayersInRoom" and k ~= "mapping"
+            and k ~= "stale" and k ~= "staleReason"
+        then
             lines[#lines + 1] = tostring(k) .. "=" .. _asOneLine(state[k])
             shown = shown + 1
         end
@@ -106,7 +162,7 @@ local _state = {
 
     widgets = {
         container = nil,
-        label = nil,
+        label = nil, -- NOTE: this is a MiniConsole surface in v2026-02-24E
         content = nil,
         panel = nil,
     },
@@ -114,9 +170,7 @@ local _state = {
 
 local function _out(line, opts)
     opts = (type(opts) == "table") and opts or {}
-    if opts.quiet == true then
-        return
-    end
+    if opts.quiet == true then return end
     U.out(line)
 end
 
@@ -143,13 +197,10 @@ local function _markRuntimeVisible(visible)
     if type(U.setUiStateVisibleBestEffort) == "function" then
         pcall(U.setUiStateVisibleBestEffort, M.UI_ID, (visible == true))
     else
-        -- fallback: store via setUiRuntime state merge
         pcall(U.setUiRuntime, M.UI_ID, { state = { visible = (visible == true) } })
     end
 end
 
--- Deep best-effort patching for gui_settings implementations that store ui records
--- in internal tables which setVisible() does not touch (or signature mismatch).
 local function _forceVisibleFalseDeep(gs)
     if type(gs) ~= "table" then return false end
     local uiId = M.UI_ID
@@ -192,7 +243,6 @@ local function _forceVisibleFalseDeep(gs)
     return changed
 end
 
--- Robustly set gui_settings.visible=false WITHOUT assuming the setVisible signature.
 local function _setVisibleOffSessionBestEffort()
     local okGS, gs = pcall(require, "dwkit.config.gui_settings")
     if not okGS or type(gs) ~= "table" then
@@ -255,8 +305,6 @@ local function _ensureWidgets()
             height = 260,
             padding = 6,
             onClose = function(b)
-                -- ui_window X already does: cfg visible OFF (session) + refresh ui_manager_ui (rows-only)
-                -- Keep compatibility net but ensure we do NOT call ui_manager_ui.apply() here.
                 _setVisibleOffSessionBestEffort()
                 _applyViaUiManagerBestEffort("presence_ui:onClose")
                 _refreshUiManagerUiRowsBestEffort("presence_ui:onClose")
@@ -285,7 +333,8 @@ local function _ensureWidgets()
 
         ListKit.applyPanelStyle(panel)
 
-        local label = G.Label:new({
+        -- Use MiniConsole for deterministic multi-line rendering (Label can be clipped/single-line on some builds).
+        local label = G.MiniConsole:new({
             name = "__DWKit_presence_ui_label",
             x = 0,
             y = 0,
@@ -293,12 +342,28 @@ local function _ensureWidgets()
             height = "100%",
         }, panel)
 
-        ListKit.applyTextLabelStyle(label)
+        -- Best-effort: keep DWKit look. Some ListKit helpers are label-oriented; pcall to avoid breakage.
+        pcall(function()
+            if type(ListKit.applyTextLabelStyle) == "function" then
+                ListKit.applyTextLabelStyle(label)
+            end
+        end)
+
+        -- Best-effort: ensure readable monospace for diagnostics.
+        pcall(function()
+            if type(label.setFont) == "function" then
+                label:setFont("Consolas")
+            end
+        end)
+        pcall(function()
+            if type(label.setFontSize) == "function" then
+                label:setFontSize(9)
+            end
+        end)
 
         return {
             uiId = M.UI_ID,
 
-            -- runtime identity (from ui_window)
             frame = container,
             container = container,
             content = contentParent,
@@ -307,7 +372,6 @@ local function _ensureWidgets()
             nameContent = (type(meta) == "table" and meta.nameContent) or nil,
             closeLabel = bundle.closeLabel,
 
-            -- widgets
             panel = panel,
             label = label,
         }
@@ -322,7 +386,6 @@ local function _ensureWidgets()
     _state.widgets.panel = widgets.panel
     _state.widgets.label = widgets.label
 
-    -- deterministic runtime signal: created implies visible true only when shown; initialize as false (hidden by default)
     _markRuntimeVisible(false)
 
     return true, nil
@@ -330,7 +393,18 @@ end
 
 local function _setLabelText(txt)
     local label = _state.widgets.label
+    txt = tostring(txt or "")
 
+    -- Preferred: MiniConsole surface
+    if type(label) == "table" and type(label.clear) == "function" and type(label.echo) == "function" then
+        pcall(function()
+            label:clear()
+            label:echo(txt)
+        end)
+        return
+    end
+
+    -- Fallback: Label-like object
     if type(label) == "table" and type(label.setText) == "function" then
         pcall(function()
             label:setText(ListKit.toPreHtml(txt))
@@ -412,6 +486,7 @@ local function _ensureSubscription()
 end
 
 function M.getModuleVersion() return M.VERSION end
+
 function M.getUiId() return M.UI_ID end
 
 function M.init(opts)
@@ -535,16 +610,11 @@ end
 function M.dispose(opts)
     opts = (type(opts) == "table") and opts or {}
 
-    -- stop subscriptions first
     U.unsubscribeServiceUpdates(_state.subscription)
     _state.subscription = nil
 
-    -- deterministic runtime signal for UI Manager UI (rt:)
     _markRuntimeVisible(false)
 
-    -- IMPORTANT:
-    -- Do NOT clear the ui_base store entry here.
-    -- UI Manager depends on storeEntry.state.visible being deterministic (never nil).
     local entry = nil
     if type(U.ensureUiStoreEntry) == "function" then
         entry = U.ensureUiStoreEntry(M.UI_ID)
@@ -552,7 +622,6 @@ function M.dispose(opts)
     if type(entry) == "table" then
         entry.state = (type(entry.state) == "table") and entry.state or {}
         entry.state.visible = false
-        -- clear runtime handles (but keep the entry)
         entry.frame = nil
         entry.container = nil
         entry.content = nil
@@ -561,7 +630,6 @@ function M.dispose(opts)
         entry.closeLabel = nil
     end
 
-    -- delete widgets best-effort
     U.safeDelete(_state.widgets.label)
     U.safeDelete(_state.widgets.panel)
     U.safeDelete(_state.widgets.container)
