@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_theme
 -- Owner       : UI
--- Version     : v2026-01-28A
+-- Version     : v2026-02-24A
 -- Purpose     :
 --   - Centralized DWKit UI theme styles (Qt stylesheet strings).
 --   - Mirrors the proven dwkit.txt aesthetic:
@@ -27,7 +27,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-28A"
+M.VERSION = "v2026-02-24A"
 
 -- Header: dark + bottom accent line (dwkit.txt: themeHeaderStyle)
 function M.headerStyle()
@@ -59,10 +59,13 @@ function M.frameStyle()
     ]]
 end
 
--- Body/container default: slightly dark translucent (safe default)
+-- Body/container default:
+-- IMPORTANT (v2026-02-24A):
+-- Use an OPAQUE dark body background to prevent Mudlet/Qt default grey bleed-through on some builds.
+-- This aligns with the proven dwkit.txt look where the "inside" paint surface is explicitly forced dark.
 function M.bodyStyle()
     return [[
-        background-color: rgba(0,0,0,130);
+        background-color: rgba(10,12,16,230);
         border: 1px solid #2a2f3a;
         border-radius: 6px;
         color: #e5e9f0;

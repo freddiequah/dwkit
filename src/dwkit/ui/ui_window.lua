@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_window
 -- Owner       : UI
--- Version     : v2026-02-12B
+-- Version     : v2026-02-24A
 -- Purpose     :
 --   - Shared DWKit "frame" creator:
 --       * Prefer Adjustable.Container (movable/resizable + autoSave/autoLoad)
@@ -48,13 +48,20 @@
 --   v2026-02-12B:
 --     - FIX: Adjustable resize hook guard flags were colliding, preventing actual function wrapping.
 --       Separate "hook installed" vs "function wrapped" flags so onResize reliably fires on drag-resize.
+--
+--   v2026-02-24A:
+--     - FIX(UI paint): force-style the resolved content parent (Inside or insideShim) with an
+--       opaque dark body background (mirrors dwkit.txt aesthetic) to prevent Mudlet/Qt default grey
+--       from bleeding through. This is applied at the shared frame layer to avoid per-UI hacks.
+--     - HARDEN: noInsetInside no longer forces transparent background (which re-exposed grey bleed);
+--       it now removes inset padding/border while preserving the dark paint surface.
 -- #########################################################################
 
 local Theme = require("dwkit.ui.ui_theme")
 
 local M = {}
 
-M.VERSION = "v2026-02-12B"
+M.VERSION = "v2026-02-24A"
 
 local function _pcall(fn, ...)
     local ok, res = pcall(fn, ...)
@@ -580,33 +587,57 @@ local function _applyFixedBestEffort(bundle)
     end
 end
 
+-- Paint the resolved "real content parent" with an opaque dark body background.
+-- This prevents Mudlet/Qt default grey bleed-through and mirrors proven dwkit.txt aesthetic.
+local function _applyInsidePaintStyleBestEffort(parent)
+    if type(parent) ~= "table" then return end
+
+    local css = [[
+        background-color: rgba(10,12,16,230);
+        border: 0px;
+        border-radius: 0px;
+        margin: 0px;
+        padding: 0px;
+    ]]
+
+    if type(parent.setStyleSheet) == "function" then
+        pcall(function()
+            parent:setStyleSheet(css)
+        end)
+    end
+
+    -- Best-effort: some widget stacks expose a nested .window that actually paints
+    if type(parent.window) == "table" and type(parent.window.setStyleSheet) == "function" then
+        pcall(function()
+            parent.window:setStyleSheet(css)
+        end)
+    end
+end
+
 -- OPT-IN: remove inset painting/padding on Adjustable "Inside" widget.
 local function _applyAdjustableInsideNoInsetBestEffort(insideParent)
     if type(insideParent) ~= "table" then return end
 
+    -- Preserve opaque dark paint surface while removing inset/borders/padding.
+    local css = [[
+        background-color: rgba(10,12,16,230);
+        border: 0px;
+        border-radius: 0px;
+        margin: 0px;
+        padding: 0px;
+    ]]
+
     -- Apply to Inside itself
     if type(insideParent.setStyleSheet) == "function" then
         pcall(function()
-            insideParent:setStyleSheet([[
-                background-color: rgba(0,0,0,0);
-                border: 0px;
-                border-radius: 0px;
-                margin: 0px;
-                padding: 0px;
-            ]])
+            insideParent:setStyleSheet(css)
         end)
     end
 
     -- Some Adjustable versions nest widgets differently; try window too (best-effort).
     if type(insideParent.window) == "table" and type(insideParent.window.setStyleSheet) == "function" then
         pcall(function()
-            insideParent.window:setStyleSheet([[
-                background-color: rgba(0,0,0,0);
-                border: 0px;
-                border-radius: 0px;
-                margin: 0px;
-                padding: 0px;
-            ]])
+            insideParent.window:setStyleSheet(css)
         end)
     end
 end
@@ -975,22 +1006,17 @@ function M.create(opts)
                 height = "-" .. tostring(headerH) .. "px",
             }, shimBase)
 
-            if type(shim.setStyleSheet) == "function" then
-                pcall(function()
-                    shim:setStyleSheet([[
-                        background-color: rgba(0,0,0,0);
-                        border: 0px;
-                        margin: 0px;
-                        padding: 0px;
-                    ]])
-                end)
-            end
+            -- IMPORTANT: make the shim a real paint surface (opaque dark) to prevent grey bleed.
+            _applyInsidePaintStyleBestEffort(shim)
 
             insideParent = shim
             usedShim = true
         end
 
         bundle.meta.insideShim = (usedShim == true)
+
+        -- Always enforce paint surface style on the resolved "real content parent".
+        _applyInsidePaintStyleBestEffort(insideParent)
 
         -- OPT-IN only.
         if opts.noInsetInside == true then
@@ -1044,6 +1070,9 @@ function M.create(opts)
             width = "100%",
             height = "-" .. tostring(headerH) .. "px",
         }, frame)
+
+        -- Make fallback content parent a real paint surface too.
+        _applyInsidePaintStyleBestEffort(content)
 
         bundle.frame = frame
         bundle.content = content

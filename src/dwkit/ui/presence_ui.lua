@@ -1,35 +1,24 @@
+-- FILE: src/dwkit/ui/presence_ui.lua
 -- #########################################################################
 -- Module Name : dwkit.ui.presence_ui
 -- Owner       : UI
--- Version     : v2026-02-24E
+-- Version     : v2026-02-24F
 -- Purpose     :
 --   - SAFE Presence UI scaffold with live render from PresenceService (data only).
 --   - Renders "My profiles" vs "Other players" split from PresenceService state.
---   - Creates a small window frame via ui_window + content panel + label-like surface.
+--   - Creates a small window frame via ui_window + content panel + multiline surface.
 --   - Demonstrates gui_settings self-seeding (register) + apply()/dispose() lifecycle.
 --   - Subscribes to PresenceService "updated" event to auto-refresh when state changes.
 --   - No timers, no send(), no automation.
 --
 -- Key Fixes:
---   v2026-02-07A:
---     1) Deterministic runtime visibility: never clear ui_base store entry on dispose.
---        Instead, set storeEntry.state.visible to boolean and clear widget handles safely.
---        This prevents UI Manager UI runtime visibility (rt:) from becoming nil.
---     2) Safe UI Manager refresh: use ui_manager_ui.refresh() (rows-only) instead of apply().
---
---   v2026-02-24B:
---     - Render PresenceService split fields:
---         * myProfilesInRoom (array of "Name (ProfileLabel)")
---         * otherPlayersInRoom (array of "Name")
---       And show stale status + reason.
---
---   v2026-02-24C:
---     - Attempted label HTML multiline fixes.
---
 --   v2026-02-24E:
---     - FIX: Some Mudlet/Qt builds still clip/single-line Geyser.Label text regardless of <br/>/wrap.
---       Use a MiniConsole as the label surface for deterministic multi-line rendering.
---       Also: remove any stylesheet overrides that made the UI look grey/ugly; keep ListKit styling.
+--     - Use MiniConsole as the text surface for deterministic multi-line rendering.
+--
+--   v2026-02-24F:
+--     - FIX: MiniConsole default background can appear grey/ugly on some builds.
+--       Apply DWKit-style console styling best-effort (prefer ListKit helper; fallback to
+--       explicit bg/fg + border suppression).
 --
 -- Public API  :
 --   - getModuleVersion() -> string
@@ -42,7 +31,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-24E"
+M.VERSION = "v2026-02-24F"
 M.UI_ID = "presence_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -162,7 +151,7 @@ local _state = {
 
     widgets = {
         container = nil,
-        label = nil, -- NOTE: this is a MiniConsole surface in v2026-02-24E
+        label = nil, -- MiniConsole surface
         content = nil,
         panel = nil,
     },
@@ -289,6 +278,49 @@ local function _setVisibleOffSessionBestEffort()
     _markRuntimeVisible(false)
 end
 
+-- -------------------------------------------------------------------------
+-- MiniConsole style (best-effort, DWKit-look)
+-- -------------------------------------------------------------------------
+
+local function _applyMiniConsoleStyleBestEffort(mc)
+    if type(mc) ~= "table" then return end
+
+    -- Prefer a ListKit helper if present (some builds may have console-specific styling)
+    pcall(function()
+        if type(ListKit.applyTextConsoleStyle) == "function" then
+            ListKit.applyTextConsoleStyle(mc)
+        end
+    end)
+
+    -- Fallback: avoid grey default background; keep it dark + readable.
+    -- (Colors are best-effort; wrapped in pcall to avoid build differences.)
+    pcall(function()
+        if type(mc.setBgColor) == "function" then
+            mc:setBgColor(20, 24, 30) -- dark slate
+        end
+    end)
+    pcall(function()
+        if type(mc.setFgColor) == "function" then
+            mc:setFgColor(230, 235, 245) -- near-white
+        end
+    end)
+    pcall(function()
+        if type(mc.setFont) == "function" then
+            mc:setFont("Consolas")
+        end
+    end)
+    pcall(function()
+        if type(mc.setFontSize) == "function" then
+            mc:setFontSize(9)
+        end
+    end)
+    pcall(function()
+        if type(mc.setBorderSize) == "function" then
+            mc:setBorderSize(0)
+        end
+    end)
+end
+
 local function _ensureWidgets()
     local ok, widgets, err = U.ensureWidgets(M.UI_ID, { "container", "label", "content", "panel" }, function()
         local G = U.getGeyser()
@@ -333,7 +365,6 @@ local function _ensureWidgets()
 
         ListKit.applyPanelStyle(panel)
 
-        -- Use MiniConsole for deterministic multi-line rendering (Label can be clipped/single-line on some builds).
         local label = G.MiniConsole:new({
             name = "__DWKit_presence_ui_label",
             x = 0,
@@ -342,24 +373,7 @@ local function _ensureWidgets()
             height = "100%",
         }, panel)
 
-        -- Best-effort: keep DWKit look. Some ListKit helpers are label-oriented; pcall to avoid breakage.
-        pcall(function()
-            if type(ListKit.applyTextLabelStyle) == "function" then
-                ListKit.applyTextLabelStyle(label)
-            end
-        end)
-
-        -- Best-effort: ensure readable monospace for diagnostics.
-        pcall(function()
-            if type(label.setFont) == "function" then
-                label:setFont("Consolas")
-            end
-        end)
-        pcall(function()
-            if type(label.setFontSize) == "function" then
-                label:setFontSize(9)
-            end
-        end)
+        _applyMiniConsoleStyleBestEffort(label)
 
         return {
             uiId = M.UI_ID,
@@ -395,7 +409,6 @@ local function _setLabelText(txt)
     local label = _state.widgets.label
     txt = tostring(txt or "")
 
-    -- Preferred: MiniConsole surface
     if type(label) == "table" and type(label.clear) == "function" and type(label.echo) == "function" then
         pcall(function()
             label:clear()
@@ -404,7 +417,6 @@ local function _setLabelText(txt)
         return
     end
 
-    -- Fallback: Label-like object
     if type(label) == "table" and type(label.setText) == "function" then
         pcall(function()
             label:setText(ListKit.toPreHtml(txt))
@@ -486,7 +498,6 @@ local function _ensureSubscription()
 end
 
 function M.getModuleVersion() return M.VERSION end
-
 function M.getUiId() return M.UI_ID end
 
 function M.init(opts)
@@ -645,3 +656,4 @@ function M.dispose(opts)
 end
 
 return M
+-- END FILE: src/dwkit/ui/presence_ui.lua
