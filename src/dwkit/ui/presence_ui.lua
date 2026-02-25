@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.presence_ui
 -- Owner       : UI
--- Version     : v2026-02-25C
+-- Version     : v2026-02-25D
 -- Purpose     :
 --   - SAFE Presence UI (consumer-only) rendered from PresenceService (data only).
 --   - Renders "My profiles" vs "Other players" split from PresenceService state.
@@ -21,11 +21,15 @@
 --   v2026-02-25C:
 --     - STANDARDIZE: render via shared ui_row_scaffold so future UIs start from the same
 --       row-based scaffold and we never fight widget-internal paint behavior again.
+--
+--   v2026-02-25D:
+--     - UI: hide metaLine ("Status: OK Reason: none") when not stale.
+--       Meta line is shown only when stale=true.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-25C"
+M.VERSION = "v2026-02-25D"
 M.UI_ID = "presence_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -64,6 +68,7 @@ local _state = {
         rowCount = 0,
         stale = false,
         staleReason = nil,
+        metaShown = false,
         overflow = false,
         overflowMore = 0,
         lastError = nil,
@@ -231,8 +236,15 @@ local function _renderRows(state)
     local staleReason = tostring(state.staleReason or "")
     if staleReason == "" then staleReason = "none" end
 
-    local status = stale and "STALE" or "OK"
-    local metaLine = string.format("Status: %s   Reason: %s", status, staleReason)
+    -- v2026-02-25D: meta line is only shown when stale
+    local metaShown = (stale == true)
+    local metaLine = nil
+    if metaShown then
+        local status = "STALE"
+        metaLine = string.format("Status: %s   Reason: %s", status, staleReason)
+    end
+
+    local metaH = metaShown and 26 or 0
 
     local okR, result, errR = RowScaffold.render({
         root = root,
@@ -250,7 +262,7 @@ local function _renderRows(state)
             gap = 3,
             headerH = 30,
             rowH = 26,
-            metaH = 26,
+            metaH = metaH,
         },
         overflowRowTextFn = function(moreN)
             return string.format("... (more rows not shown: +%d)", tonumber(moreN) or 0)
@@ -269,6 +281,7 @@ local function _renderRows(state)
     _state.lastRender.rowCount = tonumber(result.rowCount) or 0
     _state.lastRender.stale = (stale == true)
     _state.lastRender.staleReason = staleReason
+    _state.lastRender.metaShown = (metaShown == true)
     _state.lastRender.overflow = (result.overflow == true)
     _state.lastRender.overflowMore = tonumber(result.overflowMore) or 0
     _state.lastRender.lastError = nil
@@ -548,6 +561,7 @@ function M.getState()
             rowCount = _state.lastRender.rowCount,
             stale = _state.lastRender.stale,
             staleReason = _state.lastRender.staleReason,
+            metaShown = _state.lastRender.metaShown,
             overflow = _state.lastRender.overflow,
             overflowMore = _state.lastRender.overflowMore,
             lastError = _state.lastRender.lastError,

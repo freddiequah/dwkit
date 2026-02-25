@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwwho
 -- Owner       : Commands
--- Version     : v2026-02-24D
+-- Version     : v2026-02-25A
 -- Purpose     :
 --   - Implements dwwho command handler (SAFE + GAME refresh capture).
 --   - Split out from dwkit.services.command_aliases (Phase 1 split).
@@ -60,10 +60,14 @@
 -- NEW (v2026-02-24D):
 --   - Status output includes WhoStore persistence diagnostics when available:
 --       persist.enabled/path/lastLoadErr/lastSaveErr
+--
+-- FIX (v2026-02-25A):
+--   - Watcher header regex now tolerates leading/trailing whitespace to avoid missing manual WHO
+--     captures when the MUD outputs "Players" with padding.
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-02-24D"
+M.VERSION = "v2026-02-25A"
 
 -- GLOBAL singleton key for watcher trigger IDs (survives reloads)
 local WATCH_SINGLETON_KEY = "DWKit_WHO_WATCH_SINGLETON"
@@ -693,7 +697,8 @@ local function _watchEnable()
     WATCH.enabled = true
     WATCH.lastErr = nil
 
-    WATCH.trigPlayers = tempRegexTrigger([[^Players$]], function()
+    -- FIX: tolerate whitespace around header to avoid missing manual WHO.
+    WATCH.trigPlayers = tempRegexTrigger([[^\s*Players\s*$]], function()
         if WATCH.enabled ~= true then return end
         if CAP.active == true then return end
 
@@ -715,7 +720,8 @@ local function _watchEnable()
         _beginCaptureWithHeaderLine(svc2, "Players", {})
     end)
 
-    WATCH.trigTotal = tempRegexTrigger([[^Total players:.*$]], function()
+    -- FIX: tolerate whitespace; keep existing semantics.
+    WATCH.trigTotal = tempRegexTrigger([[^\s*Total players:.*$]], function()
         if WATCH.enabled ~= true then return end
         if CAP.active == true then return end
 

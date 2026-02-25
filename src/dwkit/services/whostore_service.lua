@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.whostore_service
 -- Owner       : Services
--- Version     : v2026-02-24C
+-- Version     : v2026-02-25A
 -- Purpose     :
 --   - SAFE WhoStore service (manual-only) to cache an authoritative WHO snapshot
 --     derived from parsing WHO output (No-GMCP compatible).
@@ -74,11 +74,15 @@
 -- NEW (v2026-02-24C):
 --   - Persistence: save/load WhoStore snapshot to profile-local file.
 --   - On successful load, emits Updated once (source=persist:load).
+--
+-- FIX (v2026-02-25A):
+--   - Persistence serializer emitted an extra trailing '}' causing snapshot dofile() to fail.
+--   - Persist load error now records the real dofile() failure text for diagnosis.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-24C"
+M.VERSION = "v2026-02-25A"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -712,7 +716,6 @@ local function _persistSerialize(snapshot, autoCaptureEnabled)
     lines[#lines + 1] = "    },"
     lines[#lines + 1] = "  },"
     lines[#lines + 1] = "}"
-    lines[#lines + 1] = "}"
 
     return table.concat(lines, "\n")
 end
@@ -759,8 +762,12 @@ local function _persistLoadBestEffort()
     f:close()
 
     local ok, data = pcall(dofile, path)
-    if not ok or type(data) ~= "table" then
-        _persist.lastLoadErr = "dofile failed"
+    if not ok then
+        _persist.lastLoadErr = "dofile failed: " .. tostring(data)
+        return false
+    end
+    if type(data) ~= "table" then
+        _persist.lastLoadErr = "dofile returned non-table: " .. tostring(type(data))
         return false
     end
 
