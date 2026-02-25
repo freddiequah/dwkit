@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-02-22A
+-- Version     : v2026-02-25D
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -41,7 +41,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-22A"
+M.VERSION = "v2026-02-25D"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -446,6 +446,32 @@ local REG = {
                 "Implemented as a Mudlet alias (local only).",
                 "Backed by WhoStoreService (dwkit.services.whostore_service) and SAFE helpers.",
                 "Intended for inspection, fixtures, and state debug; no automation.",
+            },
+        },
+
+        -- NEW: prompt discovery + prompt detector seeding (manual gameplay wrapper)
+        dwprompt = {
+            command               = "dwprompt",
+            aliases               = {},
+            ownerModule           = "dwkit.commands.dwprompt",
+            description           =
+            "Prompt utilities: refresh captures current MUD prompt (supports multi-line) and updates PromptDetector stored prompt.",
+            syntax                = "dwprompt [status|refresh]",
+            examples              = {
+                "dwprompt",
+                "dwprompt status",
+                "dwprompt refresh",
+            },
+            safety                = "COMBAT-SAFE",
+            mode                  = "manual",
+            sendsToGame           = true,
+            underlyingGameCommand = "prompt",
+            sideEffects           =
+            "Sends 'prompt' to the MUD and prints current prompt (may be multi-line). No gameplay state change expected.",
+            notes                 = {
+                "This is a manual gameplay wrapper (sendsToGame=true) used to seed PromptDetector so passive captures can detect custom prompts.",
+                "Typed alias implemented by dwkit.services.command_aliases.",
+                "If PromptDetector is unconfigured, roomfeed passive capture may fail to finalize (abort:max_lines) for non-<...> prompts.",
             },
         },
 

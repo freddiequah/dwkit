@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-25C
+-- Version     : v2026-02-25E
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-25C"
+M.VERSION = "v2026-02-25E"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -57,6 +57,34 @@ local SUITES = {
             "dwwho fixture basic",
             "dwwho list",
             "dwwho status",
+        },
+    },
+
+    -- NEW: Prompt detection + dwprompt refresh path
+    prompt_detect_refresh = {
+        title = "prompt_detect_refresh",
+        description =
+        "PromptDetector: run dwprompt refresh (manual wrapper that sends 'prompt'), then assert PromptDetector is configured (supports multi-line/custom prompts).",
+        delay = 0.45,
+        steps = {
+            {
+                cmd =
+                'lua do local ok,P=pcall(require,"dwkit.services.prompt_detector_service"); if not ok then error("require prompt_detector_service failed: "..tostring(P)) end; if type(P)~="table" or type(P.isConfigured)~="function" then error("PromptDetector missing isConfigured()") end; print(string.format("[dwverify-prompt] pre configured=%s", tostring(P.isConfigured()==true))) end',
+                note = "Precondition: print whether PromptDetector is already configured.",
+            },
+            { cmd = "dwprompt refresh", delay = 0.90,                              note = "Manual wrapper: sends 'prompt' to game and should trigger capture + store update." },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.prompt_detector_service"); if P.isConfigured()~=true then error("Expected PromptDetector configured=true after dwprompt refresh. If dwprompt alias does not exist or handler errors, fix command_aliases wiring + handler.") end; print("[dwverify-prompt] PASS configured=true after dwprompt refresh") end',
+                note = "ASSERT: PromptDetector configured after refresh.",
+            },
+            { cmd = "dwroom watch on",  note = "Install roomfeed passive capture." },
+            { cmd = "look",             delay = 1.80,                              note = "Trigger room snapshot capture and wait for prompt finalize." },
+            {
+                cmd =
+                'lua do local C=require("dwkit.capture.roomfeed_capture"); local s=C.getDebugState(); local abort=tostring(s.lastAbortReason or ""); if abort=="" then abort="nil" end; if tostring(s.lastAbortReason or "")=="abort:max_lines" then error("Roomfeed abort:max_lines; prompt finalize did not trigger (prompt mismatch or sequence not seen).") end; if s.lastOkTs==nil then error("Expected roomfeed lastOkTs non-nil after look finalize; got nil. abort="..tostring(s.lastAbortReason).." snapCapturing="..tostring(s.snapCapturing).." hasExits="..tostring(s.snapHasExits).." bufLen="..tostring(s.snapBufLen).." tailLen="..tostring(s.promptTailLen).." lastLine="..tostring(s.lastLineSeenClean)) end; if tostring(s.lastAbortReason or "")~="" then error("Expected lastAbortReason nil/empty on PASS; got "..tostring(s.lastAbortReason)) end; print(string.format("[dwverify-prompt] PASS roomfeed okTs=%s abort=%s", tostring(s.lastOkTs), tostring(s.lastAbortReason))) end',
+                note = "ASSERT: roomfeed finalized snapshot (okTs non-nil) and did not abort.",
+            },
         },
     },
 
@@ -123,7 +151,6 @@ local SUITES = {
         },
     },
 
-    -- Keep suite key for continuity; it now validates row-UI rendering and the no-grey-slab visual expectation.
     presence_ui_paint_targets = {
         title = "presence_ui_paint_targets",
         description =
@@ -236,7 +263,7 @@ local SUITES = {
     whostore_gate_force_open_on_header = {
         title = "whostore_gate_force_open_on_header",
         description =
-        "Regression: if autoCaptureEnabled is forced false, manual WHO header trigger must force-open gate before capture/ingest (expect autoCaptureEnabled=true after).",
+        "Regression: if autoCaptureEnabled is forced false, manual WHO header trigger must force-open gate before capture/ingest (expect autoCaptureEnabled=true after manual who).",
         delay = 0.45,
         steps = {
             { cmd = "dwwho watch on", note = "Ensure watcher is ON so header triggers fire." },

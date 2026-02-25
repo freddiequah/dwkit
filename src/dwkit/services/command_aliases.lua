@@ -3,7 +3,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-01-28A
+-- Version     : v2026-02-25A
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for DWKit commands.
 --   - AUTO-GENERATES SAFE aliases from the Command Registry (best-effort).
@@ -95,7 +95,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-28A"
+M.VERSION = "v2026-02-25A"
 
 local AliasCtl = require("dwkit.services.alias_control")
 local CommandCtx = require("dwkit.services.command_ctx")
@@ -277,6 +277,82 @@ local function _installDwverifyAliases(created)
 end
 
 -- ------------------------------------------------------------
+-- Manual GAME wrapper alias: dwprompt
+-- Reason:
+--   - Auto SAFE alias generation intentionally excludes sendsToGame commands.
+--   - dwprompt refresh is a manual gameplay wrapper (sends 'prompt') needed to seed PromptDetector.
+-- ------------------------------------------------------------
+local function _installDwpromptAlias(created, kit)
+    -- Pattern captures full tail (can include spaces).
+    local id = _mkAlias([[^dwprompt(?:\s+(.*))?$]], function()
+        local tail = (matches and matches[2]) or ""
+        tail = tostring(tail or "")
+
+        -- Build tokens with minimal parsing + preserve regex payloads with spaces.
+        local tokens = { "dwprompt" }
+
+        local t = tail:gsub("^%s+", ""):gsub("%s+$", "")
+        if t ~= "" then
+            local a, b, rest = t:match("^(%S+)%s+(%S+)%s+(.+)$")
+            local a1 = tostring(a or ""):lower()
+            local b1 = tostring(b or ""):lower()
+
+            if (a1 == "add" or a1 == "set") and b1 == "regex" and type(rest) == "string" and rest ~= "" then
+                tokens[#tokens + 1] = a
+                tokens[#tokens + 1] = b
+                tokens[#tokens + 1] = rest
+            else
+                for w in t:gmatch("%S+") do
+                    tokens[#tokens + 1] = w
+                end
+            end
+        end
+
+        -- Enriched ctx from CommandCtx (canonical). Ensure send() exists for refresh.
+        local ctx = CommandCtx.make({
+            kit = kit,
+            errPrefix = "[DWKit Alias]",
+            commandAliasesVersion = M.VERSION,
+        })
+
+        if type(ctx) ~= "table" then
+            _err("[DWKit Alias] dwprompt: ctx create failed")
+            return
+        end
+
+        if type(ctx.send) ~= "function" then
+            if type(send) == "function" then
+                ctx.send = function(cmd)
+                    cmd = tostring(cmd or "")
+                    if cmd == "" then return false end
+                    send(cmd)
+                    return true
+                end
+            end
+        end
+
+        local okCmd, Cmd = _safeRequire("dwkit.commands.dwprompt")
+        if not okCmd or type(Cmd) ~= "table" or type(Cmd.dispatch) ~= "function" then
+            _err("[DWKit Alias] dwprompt: command module not available")
+            return
+        end
+
+        -- Handler signature: dispatch(ctx, kit, tokens)
+        local okCall, errCall = pcall(Cmd.dispatch, ctx, kit, tokens)
+        if not okCall then
+            _err("[DWKit Alias] dwprompt dispatch error: " .. tostring(errCall))
+        end
+    end)
+
+    if not id then
+        return false, "Failed to create alias: dwprompt"
+    end
+
+    created["dwprompt"] = id
+    return true, nil
+end
+
+-- ------------------------------------------------------------
 -- Install (AUTO SAFE aliases via alias_factory) - REQUIRED
 -- ------------------------------------------------------------
 function M.install(opts)
@@ -383,6 +459,21 @@ function M.install(opts)
         end
         STATE.aliasIds = {}
         return false, STATE.lastError
+    end
+
+    -- Install dwprompt (manual GAME wrapper) so it never falls through to the MUD.
+    do
+        local okP, pErr = _installDwpromptAlias(created, kit)
+        if not okP then
+            STATE.lastError = tostring(pErr or "Failed to install dwprompt alias")
+            if type(killAlias) == "function" then
+                for _, xid in pairs(created) do
+                    if xid then pcall(killAlias, xid) end
+                end
+            end
+            STATE.aliasIds = {}
+            return false, STATE.lastError
+        end
     end
 
     -- Install dwverify aliases (manual verification runner)

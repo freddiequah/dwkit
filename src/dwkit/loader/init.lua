@@ -294,6 +294,17 @@ function Loader.init()
             DWKit.services.whoStoreService = nil
             DWKit._whoStoreServiceLoadError = tostring(whoOrErr)
         end
+
+        -- PromptDetector (SAFE passive capture): learns from MUD 'prompt' output and provides
+        -- prompt sequence detection for passive captures (eg roomfeed_capture finalize).
+        local okPrompt, promptOrErr = pcall(require, "dwkit.services.prompt_detector_service")
+        if okPrompt and type(promptOrErr) == "table" then
+            DWKit.services.promptDetectorService = promptOrErr
+            DWKit._promptDetectorServiceLoadError = nil
+        else
+            DWKit.services.promptDetectorService = nil
+            DWKit._promptDetectorServiceLoadError = tostring(promptOrErr)
+        end
     end
 
     -- ---------------------------------------------------------------------
