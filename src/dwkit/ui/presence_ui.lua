@@ -1,38 +1,37 @@
+-- FILE: src/dwkit/ui/presence_ui.lua
+-- #########################################################################
+-- BEGIN FILE: src/dwkit/ui/presence_ui.lua
 -- #########################################################################
 -- Module Name : dwkit.ui.presence_ui
 -- Owner       : UI
--- Version     : v2026-02-07A
+-- Version     : v2026-02-25C
 -- Purpose     :
---   - SAFE Presence UI scaffold with live render from PresenceService (data only).
---   - Creates a small window frame via ui_window + content panel + label.
---   - Demonstrates gui_settings self-seeding (register) + apply()/dispose() lifecycle.
---   - Subscribes to PresenceService "updated" event to auto-refresh when state changes.
+--   - SAFE Presence UI (consumer-only) rendered from PresenceService (data only).
+--   - Renders "My profiles" vs "Other players" split from PresenceService state.
+--   - Row-based UI, aligned with RoomEntities UI style and DWKit standard look.
+--   - Uses shared ui_window frame + panel + listRoot rows.
+--   - Subscribes to PresenceService "updated" event to auto-refresh while visible.
 --   - No timers, no send(), no automation.
 --
--- Key Fixes:
---   v2026-02-07A:
---     1) Deterministic runtime visibility: never clear ui_base store entry on dispose.
---        Instead, set storeEntry.state.visible to boolean and clear widget handles safely.
---        This prevents UI Manager UI runtime visibility (rt:) from becoming nil.
---     2) Safe UI Manager refresh: use ui_manager_ui.refresh() (rows-only) instead of apply().
+-- Key Changes:
+--   v2026-02-25B:
+--     - REFACTOR(UI): remove MiniConsole multiline approach.
+--       Presence UI is now row-based to match DWKit UI standard and eliminate grey slab issues.
 --
--- Public API  :
---   - getModuleVersion() -> string
---   - getUiId() -> string
---   - init(opts?) -> boolean ok, string|nil err
---   - apply(opts?) -> boolean ok, string|nil err
---   - getState() -> table copy
---   - dispose(opts?) -> boolean ok, string|nil err
+--   v2026-02-25C:
+--     - STANDARDIZE: render via shared ui_row_scaffold so future UIs start from the same
+--       row-based scaffold and we never fight widget-internal paint behavior again.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-07A"
+M.VERSION = "v2026-02-25C"
 M.UI_ID = "presence_ui"
 
 local U = require("dwkit.ui.ui_base")
 local W = require("dwkit.ui.ui_window")
 local ListKit = require("dwkit.ui.ui_list_kit")
+local RowScaffold = require("dwkit.ui.ui_row_scaffold")
 
 local function _safeRequire(modName)
     local ok, mod = pcall(require, modName)
@@ -40,59 +39,14 @@ local function _safeRequire(modName)
     return false, mod
 end
 
-local function _sortedKeys(t)
-    local keys = {}
-    if type(t) ~= "table" then return keys end
-    for k, _ in pairs(t) do keys[#keys + 1] = k end
-    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
-    return keys
-end
-
-local function _asOneLine(x)
-    if x == nil then return "nil" end
-    if type(x) == "string" then
-        local s = x:gsub("\n", " "):gsub("\r", " ")
-        if #s > 80 then s = s:sub(1, 80) .. "..." end
-        return s
+local function _sortedCopy(arr)
+    arr = (type(arr) == "table") and arr or {}
+    local out = {}
+    for i = 1, #arr do
+        out[#out + 1] = tostring(arr[i] or "")
     end
-    if type(x) == "number" or type(x) == "boolean" then
-        return tostring(x)
-    end
-    if type(x) == "table" then
-        local n = 0
-        for _ in pairs(x) do n = n + 1 end
-        return "{table,count=" .. tostring(n) .. "}"
-    end
-    return tostring(x)
-end
-
-local function _formatPresenceState(state)
-    state = (type(state) == "table") and state or {}
-    local keys = _sortedKeys(state)
-
-    local lines = {}
-    lines[#lines + 1] = "DWKit presence_ui"
-    lines[#lines + 1] = "keys=" .. tostring(#keys)
-
-    if type(state.selfName) == "string" and state.selfName ~= "" then
-        lines[#lines + 1] = "self=" .. tostring(state.selfName)
-    end
-
-    if type(state.nearbyPlayers) == "table" then
-        local cnt = #state.nearbyPlayers
-        lines[#lines + 1] = "nearbyPlayers=" .. tostring(cnt)
-    end
-
-    local shown = 0
-    for _, k in ipairs(keys) do
-        if shown >= 4 then break end
-        if k ~= "selfName" and k ~= "nearbyPlayers" then
-            lines[#lines + 1] = tostring(k) .. "=" .. _asOneLine(state[k])
-            shown = shown + 1
-        end
-    end
-
-    return table.concat(lines, "\n")
+    table.sort(out, function(a, b) return tostring(a):lower() < tostring(b):lower() end)
+    return out
 end
 
 local _state = {
@@ -104,19 +58,32 @@ local _state = {
 
     subscription = nil,
 
+    lastRender = {
+        myCount = 0,
+        otherCount = 0,
+        rowCount = 0,
+        stale = false,
+        staleReason = nil,
+        overflow = false,
+        overflowMore = 0,
+        lastError = nil,
+    },
+
     widgets = {
         container = nil,
-        label = nil,
         content = nil,
         panel = nil,
+        listRoot = nil,
+        rendered = {}, -- dynamic rows/headers we must delete on refresh
     },
 }
 
+local function _isQuiet(opts)
+    return type(opts) == "table" and opts.quiet == true
+end
+
 local function _out(line, opts)
-    opts = (type(opts) == "table") and opts or {}
-    if opts.quiet == true then
-        return
-    end
+    if _isQuiet(opts) then return end
     U.out(line)
 end
 
@@ -143,13 +110,10 @@ local function _markRuntimeVisible(visible)
     if type(U.setUiStateVisibleBestEffort) == "function" then
         pcall(U.setUiStateVisibleBestEffort, M.UI_ID, (visible == true))
     else
-        -- fallback: store via setUiRuntime state merge
         pcall(U.setUiRuntime, M.UI_ID, { state = { visible = (visible == true) } })
     end
 end
 
--- Deep best-effort patching for gui_settings implementations that store ui records
--- in internal tables which setVisible() does not touch (or signature mismatch).
 local function _forceVisibleFalseDeep(gs)
     if type(gs) ~= "table" then return false end
     local uiId = M.UI_ID
@@ -192,7 +156,6 @@ local function _forceVisibleFalseDeep(gs)
     return changed
 end
 
--- Robustly set gui_settings.visible=false WITHOUT assuming the setVisible signature.
 local function _setVisibleOffSessionBestEffort()
     local okGS, gs = pcall(require, "dwkit.config.gui_settings")
     if not okGS or type(gs) ~= "table" then
@@ -239,108 +202,6 @@ local function _setVisibleOffSessionBestEffort()
     _markRuntimeVisible(false)
 end
 
-local function _ensureWidgets()
-    local ok, widgets, err = U.ensureWidgets(M.UI_ID, { "container", "label", "content", "panel" }, function()
-        local G = U.getGeyser()
-        if not G then
-            return nil
-        end
-
-        local bundle = W.create({
-            uiId = M.UI_ID,
-            title = "Presence",
-            x = 30,
-            y = 220,
-            width = 300,
-            height = 260,
-            padding = 6,
-            onClose = function(b)
-                -- ui_window X already does: cfg visible OFF (session) + refresh ui_manager_ui (rows-only)
-                -- Keep compatibility net but ensure we do NOT call ui_manager_ui.apply() here.
-                _setVisibleOffSessionBestEffort()
-                _applyViaUiManagerBestEffort("presence_ui:onClose")
-                _refreshUiManagerUiRowsBestEffort("presence_ui:onClose")
-
-                if type(b) == "table" and type(b.frame) == "table" then
-                    U.safeHide(b.frame)
-                end
-            end,
-        })
-
-        if type(bundle) ~= "table" or type(bundle.frame) ~= "table" or type(bundle.content) ~= "table" then
-            return nil
-        end
-
-        local container = bundle.frame
-        local contentParent = bundle.content
-        local meta = bundle.meta or {}
-
-        local panel = G.Container:new({
-            name = "__DWKit_presence_ui_panel",
-            x = 0,
-            y = 0,
-            width = "100%",
-            height = "100%",
-        }, contentParent)
-
-        ListKit.applyPanelStyle(panel)
-
-        local label = G.Label:new({
-            name = "__DWKit_presence_ui_label",
-            x = 0,
-            y = 0,
-            width = "100%",
-            height = "100%",
-        }, panel)
-
-        ListKit.applyTextLabelStyle(label)
-
-        return {
-            uiId = M.UI_ID,
-
-            -- runtime identity (from ui_window)
-            frame = container,
-            container = container,
-            content = contentParent,
-            meta = meta,
-            nameFrame = (type(meta) == "table" and meta.nameFrame) or nil,
-            nameContent = (type(meta) == "table" and meta.nameContent) or nil,
-            closeLabel = bundle.closeLabel,
-
-            -- widgets
-            panel = panel,
-            label = label,
-        }
-    end)
-
-    if not ok or type(widgets) ~= "table" then
-        return false, err or "Failed to create widgets"
-    end
-
-    _state.widgets.container = widgets.container
-    _state.widgets.content = widgets.content
-    _state.widgets.panel = widgets.panel
-    _state.widgets.label = widgets.label
-
-    -- deterministic runtime signal: created implies visible true only when shown; initialize as false (hidden by default)
-    _markRuntimeVisible(false)
-
-    return true, nil
-end
-
-local function _setLabelText(txt)
-    local label = _state.widgets.label
-
-    if type(label) == "table" and type(label.setText) == "function" then
-        pcall(function()
-            label:setText(ListKit.toPreHtml(txt))
-        end)
-        return
-    end
-
-    U.safeSetLabelText(label, txt)
-end
-
 local function _resolveUpdatedEventName(S)
     if type(S) ~= "table" then return nil end
     if type(S.getUpdatedEventName) == "function" then
@@ -355,6 +216,66 @@ local function _resolveUpdatedEventName(S)
     return nil
 end
 
+local function _renderRows(state)
+    state = (type(state) == "table") and state or {}
+
+    local root = _state.widgets.listRoot
+    if type(root) ~= "table" then
+        return false, "listRoot not available"
+    end
+
+    local my = _sortedCopy(state.myProfilesInRoom)
+    local other = _sortedCopy(state.otherPlayersInRoom)
+
+    local stale = (state.stale == true)
+    local staleReason = tostring(state.staleReason or "")
+    if staleReason == "" then staleReason = "none" end
+
+    local status = stale and "STALE" or "OK"
+    local metaLine = string.format("Status: %s   Reason: %s", status, staleReason)
+
+    local okR, result, errR = RowScaffold.render({
+        root = root,
+        rendered = _state.widgets.rendered,
+        ListKit = ListKit,
+        U = U,
+        metaLine = metaLine,
+        sections = {
+            { title = "My profiles",   items = my,    emptySuffix = "(empty)", itemPrefix = "  - " },
+            { title = "Other players", items = other, emptySuffix = "(empty)", itemPrefix = "  - " },
+        },
+        layout = {
+            topPad = 3,
+            bottomPad = 2,
+            gap = 3,
+            headerH = 30,
+            rowH = 26,
+            metaH = 26,
+        },
+        overflowRowTextFn = function(moreN)
+            return string.format("... (more rows not shown: +%d)", tonumber(moreN) or 0)
+        end,
+    })
+
+    if not okR then
+        _state.lastRender.lastError = tostring(errR or "render failed")
+        return false, errR
+    end
+
+    result = (type(result) == "table") and result or {}
+
+    _state.lastRender.myCount = #my
+    _state.lastRender.otherCount = #other
+    _state.lastRender.rowCount = tonumber(result.rowCount) or 0
+    _state.lastRender.stale = (stale == true)
+    _state.lastRender.staleReason = staleReason
+    _state.lastRender.overflow = (result.overflow == true)
+    _state.lastRender.overflowMore = tonumber(result.overflowMore) or 0
+    _state.lastRender.lastError = nil
+
+    return true, nil
+end
+
 local function _renderFromService()
     local okS, S = _safeRequire("dwkit.services.presence_service")
     if not okS or type(S) ~= "table" then
@@ -367,8 +288,7 @@ local function _renderFromService()
         if okGet and type(v) == "table" then state = v end
     end
 
-    _setLabelText(_formatPresenceState(state))
-    return true, nil
+    return _renderRows(state)
 end
 
 local function _ensureSubscription()
@@ -391,7 +311,7 @@ local function _ensureSubscription()
     end
 
     local handlerFn = function(_payload)
-        if _state.enabled == true and _state.visible == true and type(_state.widgets.label) == "table" then
+        if _state.enabled == true and _state.visible == true and type(_state.widgets.listRoot) == "table" then
             _renderFromService()
         end
     end
@@ -411,7 +331,99 @@ local function _ensureSubscription()
     return true, nil
 end
 
+local function _tryCreateListRoot(panel, tag)
+    local name = "__DWKit_presence_ui_listRoot_" .. tostring(tag or "default")
+
+    local okRoot, root, err = RowScaffold.createListRoot(panel, name)
+    if not okRoot or type(root) ~= "table" then
+        return false, nil, err or "Failed to create listRoot"
+    end
+
+    if type(ListKit.applyListRootStyle) == "function" then
+        pcall(function() ListKit.applyListRootStyle(root) end)
+    end
+
+    return true, root, nil
+end
+
+local function _ensureWidgets()
+    local ok, widgets, err = U.ensureWidgets(M.UI_ID, { "container", "content", "panel", "listRoot" }, function()
+        local G = U.getGeyser()
+        if not G then
+            return nil
+        end
+
+        local bundle = W.create({
+            uiId = M.UI_ID,
+            title = "Presence",
+            x = 30,
+            y = 220,
+            width = 320,
+            height = 300,
+            padding = 6,
+            onClose = function(b)
+                _setVisibleOffSessionBestEffort()
+                _applyViaUiManagerBestEffort("presence_ui:onClose")
+                _refreshUiManagerUiRowsBestEffort("presence_ui:onClose")
+
+                if type(b) == "table" and type(b.frame) == "table" then
+                    U.safeHide(b.frame)
+                end
+            end,
+        })
+
+        if type(bundle) ~= "table" or type(bundle.frame) ~= "table" or type(bundle.content) ~= "table" then
+            return nil
+        end
+
+        local container = bundle.frame
+        local contentParent = bundle.content
+        local meta = bundle.meta or {}
+
+        local tag = tostring((type(meta) == "table" and meta.profileTag) or "")
+        if tag == "" then tag = "default" end
+
+        local panelName = "__DWKit_presence_ui_panel_" .. tag
+
+        local panel = G.Container:new({
+            name = panelName,
+            x = 0,
+            y = 0,
+            width = "100%",
+            height = "100%",
+        }, contentParent)
+
+        ListKit.applyPanelStyle(panel)
+
+        local okRoot, listRoot = _tryCreateListRoot(panel, tag)
+        if not okRoot then
+            return nil
+        end
+
+        return {
+            container = container,
+            content = contentParent,
+            panel = panel,
+            listRoot = listRoot,
+        }
+    end)
+
+    if not ok or type(widgets) ~= "table" then
+        return false, err or "Failed to create widgets"
+    end
+
+    _state.widgets.container = widgets.container
+    _state.widgets.content = widgets.content
+    _state.widgets.panel = widgets.panel
+    _state.widgets.listRoot = widgets.listRoot
+
+    _markRuntimeVisible(false)
+
+    return true, nil
+end
+
 function M.getModuleVersion() return M.VERSION end
+
 function M.getUiId() return M.UI_ID end
 
 function M.init(opts)
@@ -527,7 +539,18 @@ function M.getState()
         },
         widgets = {
             hasContainer = (type(_state.widgets.container) == "table"),
-            hasLabel = (type(_state.widgets.label) == "table"),
+            hasPanel = (type(_state.widgets.panel) == "table"),
+            hasListRoot = (type(_state.widgets.listRoot) == "table"),
+        },
+        lastRender = {
+            myCount = _state.lastRender.myCount,
+            otherCount = _state.lastRender.otherCount,
+            rowCount = _state.lastRender.rowCount,
+            stale = _state.lastRender.stale,
+            staleReason = _state.lastRender.staleReason,
+            overflow = _state.lastRender.overflow,
+            overflowMore = _state.lastRender.overflowMore,
+            lastError = _state.lastRender.lastError,
         },
     }
 end
@@ -535,16 +558,11 @@ end
 function M.dispose(opts)
     opts = (type(opts) == "table") and opts or {}
 
-    -- stop subscriptions first
     U.unsubscribeServiceUpdates(_state.subscription)
     _state.subscription = nil
 
-    -- deterministic runtime signal for UI Manager UI (rt:)
     _markRuntimeVisible(false)
 
-    -- IMPORTANT:
-    -- Do NOT clear the ui_base store entry here.
-    -- UI Manager depends on storeEntry.state.visible being deterministic (never nil).
     local entry = nil
     if type(U.ensureUiStoreEntry) == "function" then
         entry = U.ensureUiStoreEntry(M.UI_ID)
@@ -552,28 +570,33 @@ function M.dispose(opts)
     if type(entry) == "table" then
         entry.state = (type(entry.state) == "table") and entry.state or {}
         entry.state.visible = false
-        -- clear runtime handles (but keep the entry)
         entry.frame = nil
         entry.container = nil
         entry.content = nil
         entry.panel = nil
-        entry.label = nil
+        entry.listRoot = nil
         entry.closeLabel = nil
     end
 
-    -- delete widgets best-effort
-    U.safeDelete(_state.widgets.label)
+    RowScaffold.clearRendered(_state.widgets.rendered, U)
+
+    U.safeDelete(_state.widgets.listRoot)
     U.safeDelete(_state.widgets.panel)
     U.safeDelete(_state.widgets.container)
 
-    _state.widgets.label = nil
+    _state.widgets.listRoot = nil
+    _state.widgets.panel = nil
     _state.widgets.container = nil
     _state.widgets.content = nil
-    _state.widgets.panel = nil
+    _state.widgets.rendered = {}
 
     _state.inited = false
     _state.lastError = nil
+    _state.lastRender.lastError = nil
     return true, nil
 end
 
 return M
+-- #########################################################################
+-- END FILE: src/dwkit/ui/presence_ui.lua
+-- #########################################################################

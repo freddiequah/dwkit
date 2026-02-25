@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_base
 -- Owner       : UI
--- Version     : v2026-02-11E
+-- Version     : v2026-02-24A
 -- Purpose     :
 --   - Shared SAFE helper utilities for DWKit UI modules.
 --   - Avoids copy/paste across UI modules (store, widgets, show/hide/delete, etc).
@@ -33,11 +33,22 @@
 --   - No timers
 --   - No automation
 --   - Best-effort event subscription/unsubscription ONLY (no emits here)
+--
+-- v2026-02-24A:
+--   - FIX: Some Mudlet/Geyser builds do not expose Geyser.containers (windows only).
+--     Also, some reload sequences can result in ui_base store entries losing runtime handles
+--     (frame/content), while Geyser still retains the live widgets by name.
+--     We now provide a deterministic best-effort runtime resolver:
+--       * If store entry is missing frame/content/container, resolve from Geyser by
+--         nameFrame/nameContent (preferring Geyser.windows, then Geyser.containers if present).
+--       * Backfill the resolved handles into the store entry (best-effort) so subsequent calls
+--         are stable.
+--     This enables consistent UI styling/inspection across builds without per-UI hacks.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-11E"
+M.VERSION = "v2026-02-24A"
 
 local function _isNonEmptyString(s)
     return type(s) == "string" and s ~= ""
@@ -89,13 +100,95 @@ function M.getUiStore()
     return _G.DWKit._uiStore
 end
 
+-- -------------------------------------------------------------------------
+-- Runtime handle resolution (best-effort; SAFE)
+-- -------------------------------------------------------------------------
+
+local function _getGeyserMapsBestEffort()
+    local G = _G.Geyser
+    if type(G) ~= "table" then return nil, nil end
+    local windows = (type(G.windows) == "table") and G.windows or nil
+    local containers = (type(G.containers) == "table") and G.containers or nil
+    return windows, containers
+end
+
+local function _resolveFromGeyserByNameBestEffort(name)
+    name = tostring(name or "")
+    if name == "" then return nil end
+
+    local windows, containers = _getGeyserMapsBestEffort()
+
+    -- IMPORTANT:
+    -- Some builds: Geyser.containers is nil; only windows exists.
+    -- Prefer windows first (it exists on more builds).
+    if type(windows) == "table" and type(windows[name]) == "table" then
+        return windows[name]
+    end
+    if type(containers) == "table" and type(containers[name]) == "table" then
+        return containers[name]
+    end
+
+    return nil
+end
+
+local function _backfillRuntimeHandlesBestEffort(uiId, e)
+    if not _isNonEmptyString(uiId) then return end
+    if type(e) ~= "table" then return end
+
+    -- If already present as tables, do nothing.
+    local hasFrame = (type(e.frame) == "table")
+    local hasContent = (type(e.content) == "table")
+    local hasContainer = (type(e.container) == "table")
+
+    if hasFrame and hasContent and hasContainer then
+        return
+    end
+
+    -- Resolve by stored names if possible.
+    local nf = _isNonEmptyString(e.nameFrame) and e.nameFrame or nil
+    local nc = _isNonEmptyString(e.nameContent) and e.nameContent or nil
+
+    local rf = (not hasFrame) and _resolveFromGeyserByNameBestEffort(nf) or nil
+    local rc = (not hasContent) and _resolveFromGeyserByNameBestEffort(nc) or nil
+
+    -- Backfill (best-effort, non-destructive).
+    if type(rf) == "table" and not hasFrame then
+        e.frame = rf
+        -- container is usually the frame for DWKit (unless overwritten by callers).
+        if not hasContainer then
+            e.container = rf
+            hasContainer = true
+        end
+        hasFrame = true
+    end
+
+    if type(rc) == "table" and not hasContent then
+        e.content = rc
+        hasContent = true
+    end
+
+    -- As a fallback, some UIs only store container; if content missing but container exists,
+    -- leave it (do not guess nested fields here).
+    if (not hasContainer) and type(e.frame) == "table" then
+        e.container = e.frame
+    end
+
+    if hasFrame or hasContent then
+        e.runtimeResolvedAt = (type(_G.getEpoch) == "function" and _G.getEpoch()) or os.time()
+    end
+end
+
 -- Stable accessor (may return nil if not created yet)
 function M.getUiStoreEntry(uiId)
     if not _isNonEmptyString(uiId) then return nil end
     local store = M.getUiStore()
     if type(store) ~= "table" then return nil end
     local e = store[uiId]
-    if type(e) == "table" then return e end
+    if type(e) == "table" then
+        -- Best-effort: if runtime handles were lost but names exist, resolve them.
+        _backfillRuntimeHandlesBestEffort(uiId, e)
+        return e
+    end
     return nil
 end
 
@@ -128,6 +221,9 @@ function M.ensureUiStoreEntry(uiId)
         e.state = {}
     end
 
+    -- Best-effort: if the entry already has names but lost handles, resolve them.
+    _backfillRuntimeHandlesBestEffort(uiId, e)
+
     return e
 end
 
@@ -157,6 +253,10 @@ function M.setUiRuntime(uiId, rt)
     end
 
     e.runtimeUpdatedAt = (type(_G.getEpoch) == "function" and _G.getEpoch()) or os.time()
+
+    -- Best-effort: if some handles were nil but names exist, resolve and backfill.
+    _backfillRuntimeHandlesBestEffort(uiId, e)
+
     return true
 end
 
@@ -220,24 +320,60 @@ end
 
 function M.getUiContainer(uiId)
     local e = M.getUiStoreEntry(uiId)
-    if type(e) == "table" and type(e.container) == "table" then
-        return e.container
+    if type(e) == "table" then
+        if type(e.container) == "table" then
+            return e.container
+        end
+        -- Best-effort: container is usually the frame
+        if type(e.frame) == "table" then
+            return e.frame
+        end
+        -- Best-effort: resolve by nameFrame if present
+        if _isNonEmptyString(e.nameFrame) then
+            local obj = _resolveFromGeyserByNameBestEffort(e.nameFrame)
+            if type(obj) == "table" then
+                e.frame = e.frame or obj
+                e.container = e.container or obj
+                return obj
+            end
+        end
     end
     return nil
 end
 
 function M.getUiFrame(uiId)
     local e = M.getUiStoreEntry(uiId)
-    if type(e) == "table" and type(e.frame) == "table" then
-        return e.frame
+    if type(e) == "table" then
+        if type(e.frame) == "table" then
+            return e.frame
+        end
+        if _isNonEmptyString(e.nameFrame) then
+            local obj = _resolveFromGeyserByNameBestEffort(e.nameFrame)
+            if type(obj) == "table" then
+                e.frame = obj
+                if type(e.container) ~= "table" then
+                    e.container = obj
+                end
+                return obj
+            end
+        end
     end
     return nil
 end
 
 function M.getUiContent(uiId)
     local e = M.getUiStoreEntry(uiId)
-    if type(e) == "table" and type(e.content) == "table" then
-        return e.content
+    if type(e) == "table" then
+        if type(e.content) == "table" then
+            return e.content
+        end
+        if _isNonEmptyString(e.nameContent) then
+            local obj = _resolveFromGeyserByNameBestEffort(e.nameContent)
+            if type(obj) == "table" then
+                e.content = obj
+                return obj
+            end
+        end
     end
     return nil
 end
@@ -418,6 +554,8 @@ function M.ensureWidgets(uiId, requiredKeys, createFn)
         local cached = store[uiId]
         if _hasRequiredKeys(cached, requiredKeys) then
             _stampIdentityFieldsBestEffort(cached, uiId)
+            -- Best-effort: if runtime handles were lost but names exist, resolve them now.
+            _backfillRuntimeHandlesBestEffort(uiId, cached)
             return true, cached, nil
         end
     end
@@ -447,6 +585,9 @@ function M.ensureWidgets(uiId, requiredKeys, createFn)
     if type(store) == "table" then
         store[uiId] = entry
     end
+
+    -- Best-effort: resolve runtime handles if names exist (covers builds where only Geyser.windows exists).
+    _backfillRuntimeHandlesBestEffort(uiId, entry)
 
     return true, entry, nil
 end

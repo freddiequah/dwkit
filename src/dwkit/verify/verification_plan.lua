@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-24B
+-- Version     : v2026-02-25C
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-24B"
+M.VERSION = "v2026-02-25C"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -61,18 +61,102 @@ local SUITES = {
     },
 
     -- ---------------------------------------------------------------------
-    -- RoomEntities dump diagnostics (new)
+    -- Presence UI suites
+    -- ---------------------------------------------------------------------
+
+    presence_ui_populates = {
+        title = "presence_ui_populates",
+        description =
+        "Presence_UI: RoomEntities -> PresenceService bridge. Seed owned profiles mapping, seed WhoStore names deterministically (setState with 2 players), ingest deterministic snapshot via roomfeed_capture._testIngestSnapshot (SAFE; no sends), then show Presence_UI and assert split (My profiles vs Other players). Visual note: Presence UI is row-based and should NOT show any grey slab.",
+        delay = 0.30,
+        steps = {
+            {
+                cmd =
+                'lua do local O=require("dwkit.config.owned_profiles"); local ok,err=O.setMap({["FixturePlayer"]="Ancient-Dev"},{noSave=true}); if ok==false then error("owned_profiles.setMap failed: "..tostring(err)) end; local st=O.status(); print(string.format("[dwverify-presence] seeded owned_profiles count=%s", tostring(st.count))) end',
+                note = "Seed deterministic mapping (session-only): FixturePlayer -> Ancient-Dev.",
+            },
+
+            {
+                cmd =
+                'lua do local W=require("dwkit.services.whostore_service"); local ok1,err1=W.clear({source="dwverify:presence:whoclear"}); if ok1==false then error("WhoStore.clear failed: "..tostring(err1)) end; local ok2,err2=W.setState({players={FixturePlayer=true,OtherGuy=true}},{source="dwverify:presence:whoseed"}); if ok2==false then error("WhoStore.setState failed: "..tostring(err2)) end; local names=W.getAllNames(); print(string.format("[dwverify-presence] seeded WhoStore names=%s count=%s", tostring(table.concat(names,",")), tostring(#names))) end',
+                note =
+                "Seed WhoStore deterministically with BOTH names (authoritative snapshot): FixturePlayer + OtherGuy (SAFE; no gameplay sends).",
+            },
+
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.presence_service"); local ok,err=P.clear({source="dwverify:presence:clear"}); if ok==false then error("PresenceService.clear failed: "..tostring(err)) end; print("[dwverify-presence] cleared PresenceService") end',
+                note = "Clear Presence state to known baseline.",
+            },
+            {
+                cmd =
+                'lua do local R=require("dwkit.services.roomentities_service"); local ok,err=R.clear({source="dwverify:presence:roomclear",forceEmit=true}); if ok==false then error("RoomEntities.clear failed: "..tostring(err)) end; print("[dwverify-presence] cleared RoomEntities") end',
+                note = "Clear RoomEntities state so we can deterministically ingest a snapshot.",
+            },
+            {
+                cmd =
+                'lua do local C=require("dwkit.capture.roomfeed_capture"); local ok,err=C._testIngestSnapshot({"The Board Room (#1204) [ INDOORS IMMROOM ]","FixturePlayer is here.","OtherGuy is standing here.","Obvious exits:","North - The Voting Booth"},{hasExits=true,startKind="strong"}); if ok==false then error("roomfeed _testIngestSnapshot failed: "..tostring(err)) end; print("[dwverify-presence] ingested deterministic snapshot via roomfeed_capture") end',
+                note =
+                "Ingest deterministic snapshot (SAFE; no sends). With WhoStore seeded, RoomEntities should classify both as players.",
+            },
+            {
+                cmd =
+                'lua do local R=require("dwkit.services.roomentities_service"); local st=R.getState(); local v2=st and st.entitiesV2 or {}; local p=v2 and v2.players or {}; local ks={}; for k in pairs(p or {}) do ks[#ks+1]=k end; table.sort(ks); if #ks<2 then error("Expected RoomEntities V2 players >=2; got "..tostring(#ks).." keys="..table.concat(ks,",")) end; print("[dwverify-presence] RoomEntities V2 players keys="..table.concat(ks,",")) end',
+                note = "ASSERT: RoomEntities V2 players contains FixturePlayer + OtherGuy after ingest.",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.presence_service"); local st=P.getState(); local my=st.myProfilesInRoom or {}; local ot=st.otherPlayersInRoom or {}; if type(my)~="table" or type(ot)~="table" then error("Expected myProfilesInRoom/otherPlayersInRoom tables") end; local hasMy=false; for i=1,#my do if tostring(my[i])=="FixturePlayer (Ancient-Dev)" then hasMy=true end end; local hasOther=false; for i=1,#ot do if tostring(ot[i])=="OtherGuy" then hasOther=true end end; if hasMy~=true then error("Expected FixturePlayer in My profiles as FixturePlayer (Ancient-Dev)") end; if hasOther~=true then error("Expected OtherGuy in Other players") end; print(string.format("[dwverify-presence] PASS presence split my=%s other=%s", tostring(#my), tostring(#ot))) end',
+                note = "ASSERT: PresenceService computed split (My profiles vs Other players) deterministically.",
+            },
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("presence_ui", true, {noSave=true}); gs.setVisible("presence_ui", true, {noSave=true}); local UI=require("dwkit.ui.presence_ui"); local ok,err=UI.apply({source="dwverify:presence_ui_populates"}); if ok==false then error("presence_ui.apply failed: "..tostring(err)) end; local s=UI.getState(); local lr=s.lastRender or {}; print(string.format("[dwverify-presence] presence_ui visible=%s enabled=%s hasContainer=%s hasListRoot=%s rows=%s my=%s other=%s", tostring(s.visible), tostring(s.enabled), tostring(s.widgets and s.widgets.hasContainer), tostring(s.widgets and s.widgets.hasListRoot), tostring(lr.rowCount), tostring(lr.myCount), tostring(lr.otherCount))) end',
+                note =
+                "Show Presence_UI and print state (row-based). Visual note: Presence should match DWKit list UI feel, with no grey slab.",
+            },
+            {
+                cmd =
+                'lua do print("[dwverify-presence] VISUAL CHECK: Presence UI is row-based, DWKit dark body background, and NO grey slab.") end',
+                note = "Human visual PASS/FAIL gate.",
+            },
+        },
+    },
+
+    -- Keep suite key for continuity; it now validates row-UI rendering and the no-grey-slab visual expectation.
+    presence_ui_paint_targets = {
+        title = "presence_ui_paint_targets",
+        description =
+        "Presence_UI visual check (row-based): show Presence_UI, print row render stats, and visually confirm there is NO grey slab.",
+        delay = 0.25,
+        steps = {
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("presence_ui", true, {noSave=true}); gs.setVisible("presence_ui", true, {noSave=true}); local UI=require("dwkit.ui.presence_ui"); local ok,err=UI.apply({source="dwverify:presence_ui_paint_targets"}); if ok==false then error("presence_ui.apply failed: "..tostring(err)) end; local s=UI.getState(); local lr=s.lastRender or {}; print(string.format("[dwverify-presence-visual] row_ui hasListRoot=%s rows=%s overflow=%s overflowMore=%s", tostring(s.widgets and s.widgets.hasListRoot), tostring(lr.rowCount), tostring(lr.overflow), tostring(lr.overflowMore))) end',
+                note = "Print row-based render info (no internal target probing).",
+            },
+            {
+                cmd =
+                'lua do print("[dwverify-presence-visual] VISUAL CHECK: Presence content background should be DWKit dark, no grey slab.") end',
+                note = "Human visual PASS/FAIL gate.",
+            },
+        },
+    },
+
+    -- ---------------------------------------------------------------------
+    -- RoomEntities dump diagnostics
     -- ---------------------------------------------------------------------
 
     room_dump = {
         title = "room_dump",
-        description = "RoomEntities dump: seed WhoStore names + seed titled entity + SAFE refresh promotion + run dwroom dump (SAFE; no gameplay sends)",
+        description =
+        "RoomEntities dump: seed WhoStore names + seed titled entity + SAFE refresh promotion + run dwroom dump (SAFE; no gameplay sends)",
         delay = 0.30,
         steps = {
-            { cmd = "dwwho clear", note = "Clear WhoStore to a known baseline (SAFE)." },
+            { cmd = "dwwho clear",       note = "Clear WhoStore to a known baseline (SAFE)." },
             { cmd = "dwwho set Snorrin", note = "Seed WhoStore with a canonical name (SAFE; no gameplay sends)." },
 
-            { cmd = "dwroom clear", note = "Clear RoomEntities snapshot (SAFE)." },
+            { cmd = "dwroom clear",      note = "Clear RoomEntities snapshot (SAFE)." },
 
             {
                 cmd =
@@ -83,11 +167,12 @@ local SUITES = {
 
             { cmd = "dwroom refresh", note = "SAFE refresh: triggers WhoStore-based reclassify (candidate-name gate) and emits Updated." },
 
-            { cmd = "dwroom status", note = "Expect players=1 unknown=0 (or unknown excludes Snorrin if other fixtures exist)." },
+            { cmd = "dwroom status",  note = "Expect players=1 unknown=0 (or unknown excludes Snorrin if other fixtures exist)." },
 
             {
                 cmd = "dwroom dump",
-                note = "Inspect dump output: expect Snorrin promoted to players; labelExact=false and candidateExact=true.",
+                note =
+                "Inspect dump output: expect Snorrin promoted to players; labelExact=false and candidateExact=true.",
                 expect =
                 "For the Snorrin entry (under bucket=players): candidateName=Snorrin, who.labelExact=false, who.candidateExact=true, who.canonByCandidate=Snorrin",
             },
@@ -192,8 +277,8 @@ local SUITES = {
         steps = {
             {
                 cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("presence_ui", true, {noSave=true}); gs.setVisible("presence_ui", true, {noSave=true}); local UI=require("dwkit.ui.presence_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] presence_ui visible=%s enabled=%s hasContainer=%s hasLabel=%s", tostring(s.visible), tostring(s.enabled), tostring(s.widgets and s.widgets.hasContainer), tostring(s.widgets and s.widgets.hasLabel))) end',
-                note = "Show presence_ui via gui_settings + apply(); print state.",
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("presence_ui", true, {noSave=true}); gs.setVisible("presence_ui", true, {noSave=true}); local UI=require("dwkit.ui.presence_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); local lr=s.lastRender or {}; print(string.format("[dwverify-ui] presence_ui visible=%s enabled=%s hasContainer=%s hasListRoot=%s rows=%s", tostring(s.visible), tostring(s.enabled), tostring(s.widgets and s.widgets.hasContainer), tostring(s.widgets and s.widgets.hasListRoot), tostring(lr.rowCount))) end',
+                note = "Show presence_ui (row-based) and print state.",
             },
             {
                 cmd =
@@ -238,7 +323,7 @@ local SUITES = {
     },
 
     -- ---------------------------------------------------------------------
-    -- Chat UI feature propagation (your existing one)
+    -- Chat UI feature propagation
     -- ---------------------------------------------------------------------
     chat_ui_feature_effects = {
         title = "chat_ui_feature_effects",

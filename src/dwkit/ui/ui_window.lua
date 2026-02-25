@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_window
 -- Owner       : UI
--- Version     : v2026-02-12B
+-- Version     : v2026-02-24C
 -- Purpose     :
 --   - Shared DWKit "frame" creator:
 --       * Prefer Adjustable.Container (movable/resizable + autoSave/autoLoad)
@@ -48,13 +48,31 @@
 --   v2026-02-12B:
 --     - FIX: Adjustable resize hook guard flags were colliding, preventing actual function wrapping.
 --       Separate "hook installed" vs "function wrapped" flags so onResize reliably fires on drag-resize.
+--
+--   v2026-02-24A:
+--     - FIX(UI paint): force-style the resolved content parent (Inside or insideShim) with an
+--       opaque dark body background (mirrors dwkit.txt aesthetic) to prevent Mudlet/Qt default grey
+--       from bleeding through. This is applied at the shared frame layer to avoid per-UI hacks.
+--     - HARDEN: noInsetInside no longer forces transparent background (which re-exposed grey bleed);
+--       it now removes inset padding/border while preserving the dark paint surface.
+--
+--   v2026-02-24B:
+--     - HARDEN(UI paint): some Mudlet/Geyser/Adjustable stacks do not expose setStyleSheet on the
+--       wrapper object; the real paint widget lives at obj.window (or deeper: obj.window.window ...).
+--       Add a deep-style helper that walks the .window chain (bounded) and applies CSS to the first
+--       widget(s) that support setStyleSheet. Use it for frame style + inside paint style.
+--
+--   v2026-02-24C:
+--     - FIX(UI paint): on some Mudlet builds, wrapper objects (and their .window chain) do not expose
+--       setStyleSheet at all; styling must be applied via global Mudlet functions using the widget name.
+--       Add name-based stylesheet application fallback (best-effort) and use it in deep-style helper.
 -- #########################################################################
 
 local Theme = require("dwkit.ui.ui_theme")
 
 local M = {}
 
-M.VERSION = "v2026-02-12B"
+M.VERSION = "v2026-02-24C"
 
 local function _pcall(fn, ...)
     local ok, res = pcall(fn, ...)
@@ -209,6 +227,89 @@ local function _refreshUiManagerUiBestEffort(source, targetUiId)
             end)
         end
     end
+end
+
+-- -------------------------------------------------------------------------
+-- Name-based stylesheet fallback (best-effort)
+-- -------------------------------------------------------------------------
+
+local function _applyStyleByNameBestEffort(name, css)
+    name = tostring(name or "")
+    css = tostring(css or "")
+    if name == "" or css == "" then return false end
+
+    -- Many Mudlet builds expose style setters as global functions that accept a window/label name.
+    local candidates = {
+        "setLabelStyleSheet",
+        "setWindowStyleSheet",
+        "setContainerStyleSheet",
+        "setUserWindowStyleSheet",
+        "setUserWindowStyle",
+        "setWindowStyle",
+    }
+
+    for _, fnName in ipairs(candidates) do
+        local fn = _G[fnName]
+        if type(fn) == "function" then
+            local ok = pcall(fn, name, css)
+            if ok then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+-- -------------------------------------------------------------------------
+-- Deep style helper (bounded .window traversal + name-based fallback)
+-- -------------------------------------------------------------------------
+
+local function _applyStyleDeepBestEffort(obj, css, maxDepth)
+    if type(obj) ~= "table" then return false end
+    css = tostring(css or "")
+    if css == "" then return false end
+    maxDepth = tonumber(maxDepth or 4) or 4
+    if maxDepth < 0 then maxDepth = 0 end
+    if maxDepth > 10 then maxDepth = 10 end
+
+    local applied = false
+    local cur = obj
+    local seen = {}
+
+    for _ = 0, maxDepth do
+        if type(cur) ~= "table" then break end
+
+        if seen[cur] == true then
+            break
+        end
+        seen[cur] = true
+
+        -- 1) Prefer direct method when present
+        if type(cur.setStyleSheet) == "function" then
+            pcall(function()
+                cur:setStyleSheet(css)
+            end)
+            applied = true
+        else
+            -- 2) Fallback: style by name using global functions
+            local nm = tostring(cur.name or "")
+            if nm ~= "" then
+                if _applyStyleByNameBestEffort(nm, css) then
+                    applied = true
+                end
+            end
+        end
+
+        -- Move down the .window chain if present
+        if type(cur.window) == "table" then
+            cur = cur.window
+        else
+            break
+        end
+    end
+
+    return applied
 end
 
 -- Best-effort: register runtime frame+content in Geyser maps + store into ui_base
@@ -443,15 +544,7 @@ end
 
 local function _applyFrameStyleBestEffort(frame)
     if type(frame) ~= "table" then return end
-
-    if type(frame.setStyleSheet) == "function" then
-        pcall(function() frame:setStyleSheet(Theme.frameStyle()) end)
-        return
-    end
-
-    if type(frame.window) == "table" and type(frame.window.setStyleSheet) == "function" then
-        pcall(function() frame.window:setStyleSheet(Theme.frameStyle()) end)
-    end
+    _applyStyleDeepBestEffort(frame, Theme.frameStyle(), 6)
 end
 
 local function _wireClickBestEffort(labelObj, fn)
@@ -484,6 +577,11 @@ local function _safeEchoX(lbl)
     pcall(function()
         if type(lbl.setStyleSheet) == "function" then
             lbl:setStyleSheet(Theme.closeStyle())
+        else
+            local nm = tostring(lbl.name or "")
+            if nm ~= "" then
+                _applyStyleByNameBestEffort(nm, Theme.closeStyle())
+            end
         end
         if type(lbl.echo) == "function" then
             lbl:echo("X")
@@ -580,35 +678,36 @@ local function _applyFixedBestEffort(bundle)
     end
 end
 
+-- Paint the resolved "real content parent" with an opaque dark body background.
+-- This prevents Mudlet/Qt default grey bleed-through and mirrors proven dwkit.txt aesthetic.
+local function _applyInsidePaintStyleBestEffort(parent)
+    if type(parent) ~= "table" then return end
+
+    local css = [[
+        background-color: rgba(10,12,16,230);
+        border: 0px;
+        border-radius: 0px;
+        margin: 0px;
+        padding: 0px;
+    ]]
+
+    _applyStyleDeepBestEffort(parent, css, 6)
+end
+
 -- OPT-IN: remove inset painting/padding on Adjustable "Inside" widget.
 local function _applyAdjustableInsideNoInsetBestEffort(insideParent)
     if type(insideParent) ~= "table" then return end
 
-    -- Apply to Inside itself
-    if type(insideParent.setStyleSheet) == "function" then
-        pcall(function()
-            insideParent:setStyleSheet([[
-                background-color: rgba(0,0,0,0);
-                border: 0px;
-                border-radius: 0px;
-                margin: 0px;
-                padding: 0px;
-            ]])
-        end)
-    end
+    -- Preserve opaque dark paint surface while removing inset/borders/padding.
+    local css = [[
+        background-color: rgba(10,12,16,230);
+        border: 0px;
+        border-radius: 0px;
+        margin: 0px;
+        padding: 0px;
+    ]]
 
-    -- Some Adjustable versions nest widgets differently; try window too (best-effort).
-    if type(insideParent.window) == "table" and type(insideParent.window.setStyleSheet) == "function" then
-        pcall(function()
-            insideParent.window:setStyleSheet([[
-                background-color: rgba(0,0,0,0);
-                border: 0px;
-                border-radius: 0px;
-                margin: 0px;
-                padding: 0px;
-            ]])
-        end)
-    end
+    _applyStyleDeepBestEffort(insideParent, css, 6)
 end
 
 -- -------------------------------------------------------------------------
@@ -774,14 +873,20 @@ local function _installAdjustableResizeHookBestEffort(frame, bundle)
         for _, fn in ipairs({ "get_width", "getWidth", "width" }) do
             if type(obj[fn]) == "function" then
                 local ok, v = pcall(function() return obj[fn](obj) end)
-                if ok then w = _num(v) break end
+                if ok then
+                    w = _num(v)
+                    break
+                end
             end
         end
 
         for _, fn in ipairs({ "get_height", "getHeight", "height" }) do
             if type(obj[fn]) == "function" then
                 local ok, v = pcall(function() return obj[fn](obj) end)
-                if ok then h = _num(v) break end
+                if ok then
+                    h = _num(v)
+                    break
+                end
             end
         end
 
@@ -975,22 +1080,17 @@ function M.create(opts)
                 height = "-" .. tostring(headerH) .. "px",
             }, shimBase)
 
-            if type(shim.setStyleSheet) == "function" then
-                pcall(function()
-                    shim:setStyleSheet([[
-                        background-color: rgba(0,0,0,0);
-                        border: 0px;
-                        margin: 0px;
-                        padding: 0px;
-                    ]])
-                end)
-            end
+            -- IMPORTANT: make the shim a real paint surface (opaque dark) to prevent grey bleed.
+            _applyInsidePaintStyleBestEffort(shim)
 
             insideParent = shim
             usedShim = true
         end
 
         bundle.meta.insideShim = (usedShim == true)
+
+        -- Always enforce paint surface style on the resolved "real content parent".
+        _applyInsidePaintStyleBestEffort(insideParent)
 
         -- OPT-IN only.
         if opts.noInsetInside == true then
@@ -1031,7 +1131,14 @@ function M.create(opts)
             height = headerH,
         }, frame)
         pcall(function()
-            header:setStyleSheet(Theme.headerStyle())
+            if type(header.setStyleSheet) == "function" then
+                header:setStyleSheet(Theme.headerStyle())
+            else
+                local nm = tostring(header.name or "")
+                if nm ~= "" then
+                    _applyStyleByNameBestEffort(nm, Theme.headerStyle())
+                end
+            end
             header:echo(" " .. title)
         end)
 
@@ -1044,6 +1151,9 @@ function M.create(opts)
             width = "100%",
             height = "-" .. tostring(headerH) .. "px",
         }, frame)
+
+        -- Make fallback content parent a real paint surface too.
+        _applyInsidePaintStyleBestEffort(content)
 
         bundle.frame = frame
         bundle.content = content
