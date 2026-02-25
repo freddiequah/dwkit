@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-25D
+-- Version     : v2026-02-25E
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-25D"
+M.VERSION = "v2026-02-25E"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -82,8 +82,8 @@ local SUITES = {
             { cmd = "look",             delay = 1.80,                              note = "Trigger room snapshot capture and wait for prompt finalize." },
             {
                 cmd =
-                'lua do local C=require("dwkit.capture.roomfeed_capture"); local s=C.getDebugState(); if tostring(s.lastAbortReason or "")=="abort:max_lines" then error("Roomfeed still abort:max_lines; prompt finalize did not trigger. PromptDetector may not match your prompt output.") end; print(string.format("[dwverify-prompt] roomfeed okTs=%s abort=%s", tostring(s.lastOkTs), tostring(s.lastAbortReason))) end',
-                note = "ASSERT: roomfeed does not abort on max_lines after prompt is known.",
+                'lua do local C=require("dwkit.capture.roomfeed_capture"); local s=C.getDebugState(); local abort=tostring(s.lastAbortReason or ""); if abort=="" then abort="nil" end; if tostring(s.lastAbortReason or "")=="abort:max_lines" then error("Roomfeed abort:max_lines; prompt finalize did not trigger (prompt mismatch or sequence not seen).") end; if s.lastOkTs==nil then error("Expected roomfeed lastOkTs non-nil after look finalize; got nil. abort="..tostring(s.lastAbortReason).." snapCapturing="..tostring(s.snapCapturing).." hasExits="..tostring(s.snapHasExits).." bufLen="..tostring(s.snapBufLen).." tailLen="..tostring(s.promptTailLen).." lastLine="..tostring(s.lastLineSeenClean)) end; if tostring(s.lastAbortReason or "")~="" then error("Expected lastAbortReason nil/empty on PASS; got "..tostring(s.lastAbortReason)) end; print(string.format("[dwverify-prompt] PASS roomfeed okTs=%s abort=%s", tostring(s.lastOkTs), tostring(s.lastAbortReason))) end',
+                note = "ASSERT: roomfeed finalized snapshot (okTs non-nil) and did not abort.",
             },
         },
     },

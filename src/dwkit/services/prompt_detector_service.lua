@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.prompt_detector_service
 -- Owner       : Services
--- Version     : v2026-02-25F
+-- Version     : v2026-02-25I
 -- Purpose     :
 --   - Maintain per-profile prompt detection configuration for passive capture.
 --   - Learn and persist the current MUD prompt spec when the user runs 'prompt'.
@@ -10,7 +10,8 @@
 --   - Send any MUD commands (manual commands do that via command handlers).
 --
 -- Public API:
---   - getStatus() -> table
+--   - getStatus(opts?) -> table
+--   - getDebugRegexes() -> table
 --   - isConfigured() -> boolean
 --   - normalizeLine(line) -> string
 --   - isPromptLineCandidate(lineClean) -> boolean
@@ -34,7 +35,7 @@
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-02-25F"
+M.VERSION = "v2026-02-25I"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -465,12 +466,15 @@ local function _patternForPromptSpecLine(lineSpec)
     -- Escape literal text first
     spec = _escapeLuaPatternLiteral(spec)
 
-    -- Replace known prompt codes with broad matches
-    local function rep(code, pat)
-        spec = spec:gsub("%%%%" .. code, pat)
+    -- Replace known prompt codes with broad matches.
+    -- IMPORTANT:
+    --   string.gsub replacement strings treat %1..%9 as capture references.
+    --   Therefore, any literal '%' we want in the RESULTING pattern must be escaped as '%%' here.
+    local function rep(code, patReplacement)
+        spec = spec:gsub("%%%%" .. code, patReplacement)
     end
 
-    -- Numeric-ish
+    -- Numeric-ish (result patterns must contain %d etc; escape % in replacement strings)
     rep("h", "(%%d+)")
     rep("H", "(%%d+)")
     rep("m", "(%%d+)")
@@ -498,8 +502,8 @@ local function _patternForPromptSpecLine(lineSpec)
     -- Any remaining %<letter> treat loosely
     spec = spec:gsub("%%%%[%a]", ".*")
 
-    -- Collapse spaces in pattern to allow flexible whitespace
-    -- FIX v2026-02-25F: was %s+ (too strict when %o/%t empty or spacing varies)
+    -- Collapse spaces in pattern to allow flexible whitespace.
+    -- IMPORTANT: replacement must be '%%s*' so result contains '%s*' in the pattern.
     spec = spec:gsub("%s+", "%%s*")
 
     return "^%s*" .. spec .. "%s*$"
@@ -521,8 +525,13 @@ local function _rebuildDerivedRegexes(reason)
         local collapsed = spec:gsub("\n", " ")
         local parts = {}
         local last = 1
+
+        -- FIX v2026-02-25H:
+        -- We are using plain=true, so we must search for literal "%r" (not "%%r").
+        local needle = "%r"
+
         while true do
-            local s1, e1 = collapsed:find("%%r", last, true)
+            local s1, e1 = collapsed:find(needle, last, true)
             if not s1 then
                 parts[#parts + 1] = collapsed:sub(last)
                 break
@@ -598,6 +607,20 @@ local function _allRegexes()
     addAll(p.derivedRegexes)
 
     return out
+end
+
+function M.getDebugRegexes()
+    local p = _state.promptSpec
+    return {
+        userRegexes = (type(p.userRegexes) == "table") and p.userRegexes or {},
+        derivedRegexes = (type(p.derivedRegexes) == "table") and p.derivedRegexes or {},
+        allRegexes = _allRegexes(),
+        lineCountMin = tonumber(p.lineCountMin or 0) or 0,
+        lineCountMax = tonumber(p.lineCountMax or 0) or 0,
+        promptSpecRaw = p.promptSpecRaw,
+        source = p.source,
+        ts = p.ts,
+    }
 end
 
 function M.isPromptLineCandidate(lineClean)
@@ -749,9 +772,10 @@ function M.notePromptSpecFromOutput(specText, meta)
     return true, "updated"
 end
 
-function M.getStatus()
+function M.getStatus(opts)
+    opts = (type(opts) == "table") and opts or {}
     local p = _state.promptSpec
-    return {
+    local out = {
         serviceVersion = M.VERSION,
         configured = (M.isConfigured() == true),
         ts = p.ts,
@@ -776,6 +800,13 @@ function M.getStatus()
             lastErr = _state.watcher.lastErr,
         },
     }
+
+    if opts.includeRegexes == true then
+        out.userRegexes = (type(p.userRegexes) == "table") and p.userRegexes or {}
+        out.derivedRegexes = (type(p.derivedRegexes) == "table") and p.derivedRegexes or {}
+    end
+
+    return out
 end
 
 -- Passive watcher: learn prompt spec from MUD output when user runs 'prompt'.
