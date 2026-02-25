@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwroom
 -- Owner       : Commands
--- Version     : v2026-02-23C
+-- Version     : v2026-02-25D
 -- Purpose     :
 --   - Command handler for "dwroom" alias (SAFE manual surface).
 --   - Implements RoomEntities SAFE inspection + helpers:
@@ -27,7 +27,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-23C"
+M.VERSION = "v2026-02-25D"
 
 local function _mkOut(ctx)
     if type(ctx) == "table" and type(ctx.out) == "function" then
@@ -189,7 +189,9 @@ local function _doDump(ctx, svc)
     out("[DWKit Room] dump (dwroom)")
     out("  svcVersion=" .. tostring(snap.version or "unknown"))
     if type(snap.state) == "table" then
-        out("  lastTs=" .. tostring(snap.state.lastTs or "nil") .. " updates=" .. tostring(snap.state.updates or "0") .. " emits=" .. tostring(snap.state.emits or "0"))
+        out("  lastTs=" ..
+            tostring(snap.state.lastTs or "nil") ..
+            " updates=" .. tostring(snap.state.updates or "0") .. " emits=" .. tostring(snap.state.emits or "0"))
         if type(snap.state.counts) == "table" then
             out("  counts players=" .. tostring(snap.state.counts.players or "0") ..
                 " mobs=" .. tostring(snap.state.counts.mobs or "0") ..
@@ -213,7 +215,8 @@ local function _doDump(ctx, svc)
         if type(B) ~= "table" then return end
 
         out("")
-        out(string.format("[DWKit Room] bucket=%s count=%s truncated=%s", tostring(B.name or b), tostring(B.count or 0), tostring(B.truncated == true)))
+        out(string.format("[DWKit Room] bucket=%s count=%s truncated=%s", tostring(B.name or b), tostring(B.count or 0),
+            tostring(B.truncated == true)))
 
         local items = (type(B.items) == "table") and B.items or {}
         for i = 1, #items do
@@ -228,8 +231,11 @@ local function _doDump(ctx, svc)
 
                     local who = e.diag.who
                     if type(who) == "table" then
-                        out("    who.labelConfidence=" .. tostring(who.labelConfidence or "none") .. " labelExact=" .. tostring(who.labelExact == true))
-                        out("    who.candidateConfidence=" .. tostring(who.candidateConfidence or "none") .. " candidateExact=" .. tostring(who.candidateExact == true))
+                        out("    who.labelConfidence=" ..
+                            tostring(who.labelConfidence or "none") .. " labelExact=" .. tostring(who.labelExact == true))
+                        out("    who.candidateConfidence=" ..
+                            tostring(who.candidateConfidence or "none") ..
+                            " candidateExact=" .. tostring(who.candidateExact == true))
                         if who.canonByCandidate ~= nil then
                             out("    who.canonByCandidate=" .. tostring(who.canonByCandidate))
                         end
@@ -570,7 +576,7 @@ local function _uiCommand(ctx, arg)
     if action == "" or action == "status" then
         local enabled = gs.getEnabledOrDefault("roomentities_ui", false)
         local visible = gs.getVisibleOrDefault("roomentities_ui", false)
-        local st = (type(ui)=="table" and type(ui.getState)=="function") and ui.getState() or {}
+        local st = (type(ui) == "table" and type(ui.getState) == "function") and ui.getState() or {}
         out(string.format("[DWKit Room UI] roomentities_ui enabled=%s visible=%s", tostring(enabled), tostring(visible)))
         if type(st) == "table" then
             if st.lastError ~= nil then out("[DWKit Room UI] lastError=" .. tostring(st.lastError)) end
@@ -580,7 +586,7 @@ local function _uiCommand(ctx, arg)
     end
 
     local function _apply()
-        if type(ui)=="table" and type(ui.apply)=="function" then
+        if type(ui) == "table" and type(ui.apply) == "function" then
             local ok, err2 = ui.apply()
             if ok == false then out("[DWKit Room UI] apply failed: " .. tostring(err2)) end
         end
@@ -692,6 +698,18 @@ local function _watchCommand(ctx, arg)
             out("  lastCaptureTs=" .. tostring(st.lastCaptureTs or "nil"))
             out("  lastAbortReason=" .. tostring(st.lastAbortReason or "nil"))
             out("  lastError=" .. tostring(st.lastError or "nil"))
+
+            -- NEW: prompt configured indicator + hint if abort is likely due to prompt mismatch.
+            do
+                local okP, Prompt = pcall(require, "dwkit.services.prompt_detector_service")
+                if okP and type(Prompt) == "table" and type(Prompt.isConfigured) == "function" then
+                    local cfg = (Prompt.isConfigured() == true)
+                    out("  promptConfigured=" .. tostring(cfg))
+                    if cfg ~= true and tostring(st.lastAbortReason or "") == "abort:max_lines" then
+                        out("  hint=prompt_unknown (run: prompt  OR  dwprompt refresh)")
+                    end
+                end
+            end
         else
             out("  (status state not available)")
         end

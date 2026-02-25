@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.capture.roomfeed_capture
 -- Owner       : Capture
--- Version     : v2026-02-23B
+-- Version     : v2026-02-25E
 -- Purpose     :
 --   - Passive capture of room output blocks (movement room header, look output)
 --     without GMCP and without sending any commands.
@@ -79,6 +79,19 @@
 --   - BUGFIX: fallback-kind detection used string.find("^fallback", 1, true) which can never match
 --       because plain=true treats '^' literally. Replaced with prefix check (sub()) so guard executes.
 --
+-- Feb 2026 fix (v2026-02-25D):
+--   - PromptDetector integration:
+--       * finalize snapshots using PromptDetectorService prompt sequence detection (supports custom/multi-line prompts)
+--       * keep legacy <...> prompt-noise fallback
+--       * avoid abort:max_lines when prompt format differs (e.g. Opp/Tank prompt)
+--
+-- Feb 2026 fix (v2026-02-25E):
+--   - PromptDetector integration hardened:
+--       * maintain rolling tail buffer of last N normalized lines (not only prompt candidates)
+--       * finalize when PromptDetector sees sequence anywhere in tail
+--       * do NOT append prompt-line candidates into snapBuf
+--       * treat prompt-line candidates as prompt noise for header/title detection
+--
 -- Public API  :
 --   - getVersion() -> string
 --   - isInstalled() -> boolean
@@ -101,11 +114,12 @@
 -- Dependencies     :
 --   - dwkit.services.roomentities_service
 --   - dwkit.services.roomfeed_status_service
+--   - dwkit.services.prompt_detector_service (best-effort; fallback if missing)
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-23B"
+M.VERSION = "v2026-02-25E"
 
 local function _nowTs()
     return os.time()
@@ -217,14 +231,6 @@ local function _splitPromptPrefix(lnClean)
     return false, ln, false
 end
 
-local function _isPromptNoise(lnClean)
-    local has, _, promptOnly = _splitPromptPrefix(lnClean)
-    if has and promptOnly then
-        return true
-    end
-    return false
-end
-
 local function _isExitsLine(lnClean)
     local ln = tostring(lnClean or "")
     return (ln:lower():match("^%s*obvious exits:%s*$") ~= nil)
@@ -263,6 +269,41 @@ local function _isExitEntryLine(lnClean)
     end
 
     return true
+end
+
+-- Prompt detector (best-effort). If unavailable, roomfeed falls back to legacy <...> prompt noise only.
+local function _resolvePromptSvc()
+    local ok, modOrErr = pcall(require, "dwkit.services.prompt_detector_service")
+    if ok and type(modOrErr) == "table"
+        and type(modOrErr.normalizeLine) == "function"
+        and type(modOrErr.isPromptLineCandidate) == "function"
+        and type(modOrErr.isPromptSequence) == "function"
+        and type(modOrErr.isConfigured) == "function"
+    then
+        return true, modOrErr, nil
+    end
+    return false, nil, tostring(modOrErr)
+end
+
+-- NEW(v2026-02-25E): treat PromptDetector prompt candidates as prompt noise too
+local function _isPromptNoise(lnClean)
+    local has, _, promptOnly = _splitPromptPrefix(lnClean)
+    if has and promptOnly then
+        return true
+    end
+
+    local okP, PromptSvc = _resolvePromptSvc()
+    if okP and type(PromptSvc) == "table" and PromptSvc.isConfigured() == true then
+        local okN, lnNorm = pcall(PromptSvc.normalizeLine, lnClean)
+        if okN and type(lnNorm) == "string" and lnNorm ~= "" then
+            local okC, isCand = pcall(PromptSvc.isPromptLineCandidate, lnNorm)
+            if okC and isCand == true then
+                return true
+            end
+        end
+    end
+
+    return false
 end
 
 -- Strong header detection (see prior notes).
@@ -607,6 +648,11 @@ local ROOT = {
     snapHasExits = false,
     snapSeenLines = 0,
 
+    -- Prompt tail buffer for multi-line/custom prompt sequence detection
+    -- v2026-02-25E: rolling tail of last N normalized lines (not only candidates)
+    promptTailCleanBuf = {},
+    promptTailMax = 8,
+
     lastOkTs = nil,
     lastAbortReason = nil,
     lastDegradedReason = nil,
@@ -637,6 +683,7 @@ local function _resetSnap()
     ROOT.snapStartKind = nil
     ROOT.snapHasExits = false
     ROOT.snapSeenLines = 0
+    ROOT.promptTailCleanBuf = {}
 end
 
 local function _beginSnap(lnRaw, lnCleanEffective, startKind)
@@ -849,6 +896,35 @@ function M.install(opts)
             return
         end
 
+        -- NEW: PromptDetector-based finalize (supports custom + multi-line prompts).
+        -- v2026-02-25E: keep rolling tail of last N normalized lines, and finalize when sequence matches.
+        -- Also: do NOT append prompt-line candidates into snapBuf.
+        do
+            local okP, PromptSvc = _resolvePromptSvc()
+            if okP and type(PromptSvc) == "table" and PromptSvc.isConfigured() == true then
+                local lnNorm = PromptSvc.normalizeLine(lnRaw)
+
+                ROOT.promptTailCleanBuf = (type(ROOT.promptTailCleanBuf) == "table") and ROOT.promptTailCleanBuf or {}
+                ROOT.promptTailCleanBuf[#ROOT.promptTailCleanBuf + 1] = tostring(lnNorm or "")
+                local maxN = tonumber(ROOT.promptTailMax or 8) or 8
+                while #ROOT.promptTailCleanBuf > maxN do
+                    table.remove(ROOT.promptTailCleanBuf, 1)
+                end
+
+                if PromptSvc.isPromptSequence(ROOT.promptTailCleanBuf) then
+                    ROOT.promptTailCleanBuf = {}
+                    _finalizeSnap()
+                    return
+                end
+
+                if PromptSvc.isPromptLineCandidate(lnNorm) then
+                    -- Keep capturing until prompt sequence completes.
+                    -- Do NOT treat prompt lines as snapshot content.
+                    return
+                end
+            end
+        end
+
         if _isPromptNoise(lnClean) then
             _finalizeSnap()
             return
@@ -939,6 +1015,8 @@ function M.status(opts)
         seenLineCount = ROOT.seenLineCount,
         lastLineSeenTs = ROOT.lastLineSeenTs,
         lastLineSeenClean = ROOT.lastLineSeenClean,
+
+        promptTailLen = (type(ROOT.promptTailCleanBuf) == "table") and #ROOT.promptTailCleanBuf or 0,
     }
 
     if opts.quiet ~= true then
@@ -949,6 +1027,7 @@ function M.status(opts)
             "lastHeaderSeenTs", "lastHeaderSeenClean", "lastHeaderSeenEffectiveClean", "lastHeaderSeenKind",
             "lastSnapStartTs", "lastSnapStartClean", "lastSnapStartKind",
             "seenLineCount", "lastLineSeenTs", "lastLineSeenClean",
+            "promptTailLen",
         }) do
             _out(string.format("  %s=%s", k, tostring(s[k])))
         end

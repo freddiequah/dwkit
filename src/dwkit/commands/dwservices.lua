@@ -90,6 +90,9 @@ function M.dispatch(ctx, kit)
     showSvc("skillRegistryService", "_skillRegistryServiceLoadError")
     showSvc("scoreStoreService", "_scoreStoreServiceLoadError")
 
+    -- New: prompt detector status surface (helps diagnose roomfeed abort:max_lines due to prompt mismatch)
+    showSvc("promptDetectorService", "_promptDetectorServiceLoadError")
+
     return true
 end
 
