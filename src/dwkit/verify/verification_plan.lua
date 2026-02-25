@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-24E
+-- Version     : v2026-02-25C
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-24E"
+M.VERSION = "v2026-02-25C"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -67,7 +67,7 @@ local SUITES = {
     presence_ui_populates = {
         title = "presence_ui_populates",
         description =
-        "Presence_UI: RoomEntities -> PresenceService bridge. Seed owned profiles mapping, seed WhoStore names deterministically (setState with 2 players), ingest deterministic snapshot via roomfeed_capture._testIngestSnapshot (SAFE; no sends), then show Presence_UI and assert split (My profiles vs Other players).",
+        "Presence_UI: RoomEntities -> PresenceService bridge. Seed owned profiles mapping, seed WhoStore names deterministically (setState with 2 players), ingest deterministic snapshot via roomfeed_capture._testIngestSnapshot (SAFE; no sends), then show Presence_UI and assert split (My profiles vs Other players). Visual note: Presence UI is row-based and should NOT show any grey slab.",
         delay = 0.30,
         steps = {
             {
@@ -111,8 +111,34 @@ local SUITES = {
             },
             {
                 cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("presence_ui", true, {noSave=true}); gs.setVisible("presence_ui", true, {noSave=true}); local UI=require("dwkit.ui.presence_ui"); local ok,err=UI.apply({source="dwverify:presence_ui_populates"}); if ok==false then error("presence_ui.apply failed: "..tostring(err)) end; local s=UI.getState(); print(string.format("[dwverify-presence] presence_ui visible=%s enabled=%s hasContainer=%s hasLabel=%s", tostring(s.visible), tostring(s.enabled), tostring(s.widgets and s.widgets.hasContainer), tostring(s.widgets and s.widgets.hasLabel))) end',
-                note = "Show Presence_UI and print state. Visually confirm UI text shows split lists.",
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("presence_ui", true, {noSave=true}); gs.setVisible("presence_ui", true, {noSave=true}); local UI=require("dwkit.ui.presence_ui"); local ok,err=UI.apply({source="dwverify:presence_ui_populates"}); if ok==false then error("presence_ui.apply failed: "..tostring(err)) end; local s=UI.getState(); local lr=s.lastRender or {}; print(string.format("[dwverify-presence] presence_ui visible=%s enabled=%s hasContainer=%s hasListRoot=%s rows=%s my=%s other=%s", tostring(s.visible), tostring(s.enabled), tostring(s.widgets and s.widgets.hasContainer), tostring(s.widgets and s.widgets.hasListRoot), tostring(lr.rowCount), tostring(lr.myCount), tostring(lr.otherCount))) end',
+                note =
+                "Show Presence_UI and print state (row-based). Visual note: Presence should match DWKit list UI feel, with no grey slab.",
+            },
+            {
+                cmd =
+                'lua do print("[dwverify-presence] VISUAL CHECK: Presence UI is row-based, DWKit dark body background, and NO grey slab.") end',
+                note = "Human visual PASS/FAIL gate.",
+            },
+        },
+    },
+
+    -- Keep suite key for continuity; it now validates row-UI rendering and the no-grey-slab visual expectation.
+    presence_ui_paint_targets = {
+        title = "presence_ui_paint_targets",
+        description =
+        "Presence_UI visual check (row-based): show Presence_UI, print row render stats, and visually confirm there is NO grey slab.",
+        delay = 0.25,
+        steps = {
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("presence_ui", true, {noSave=true}); gs.setVisible("presence_ui", true, {noSave=true}); local UI=require("dwkit.ui.presence_ui"); local ok,err=UI.apply({source="dwverify:presence_ui_paint_targets"}); if ok==false then error("presence_ui.apply failed: "..tostring(err)) end; local s=UI.getState(); local lr=s.lastRender or {}; print(string.format("[dwverify-presence-visual] row_ui hasListRoot=%s rows=%s overflow=%s overflowMore=%s", tostring(s.widgets and s.widgets.hasListRoot), tostring(lr.rowCount), tostring(lr.overflow), tostring(lr.overflowMore))) end',
+                note = "Print row-based render info (no internal target probing).",
+            },
+            {
+                cmd =
+                'lua do print("[dwverify-presence-visual] VISUAL CHECK: Presence content background should be DWKit dark, no grey slab.") end',
+                note = "Human visual PASS/FAIL gate.",
             },
         },
     },
@@ -251,8 +277,8 @@ local SUITES = {
         steps = {
             {
                 cmd =
-                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("presence_ui", true, {noSave=true}); gs.setVisible("presence_ui", true, {noSave=true}); local UI=require("dwkit.ui.presence_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); print(string.format("[dwverify-ui] presence_ui visible=%s enabled=%s hasContainer=%s hasLabel=%s", tostring(s.visible), tostring(s.enabled), tostring(s.widgets and s.widgets.hasContainer), tostring(s.widgets and s.widgets.hasLabel))) end',
-                note = "Show presence_ui via gui_settings + apply(); print state.",
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("presence_ui", true, {noSave=true}); gs.setVisible("presence_ui", true, {noSave=true}); local UI=require("dwkit.ui.presence_ui"); local ok,err=UI.apply({}); if not ok then error(err) end; local s=UI.getState(); local lr=s.lastRender or {}; print(string.format("[dwverify-ui] presence_ui visible=%s enabled=%s hasContainer=%s hasListRoot=%s rows=%s", tostring(s.visible), tostring(s.enabled), tostring(s.widgets and s.widgets.hasContainer), tostring(s.widgets and s.widgets.hasListRoot), tostring(lr.rowCount))) end',
+                note = "Show presence_ui (row-based) and print state.",
             },
             {
                 cmd =

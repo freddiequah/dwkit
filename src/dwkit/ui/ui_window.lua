@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_window
 -- Owner       : UI
--- Version     : v2026-02-24A
+-- Version     : v2026-02-24C
 -- Purpose     :
 --   - Shared DWKit "frame" creator:
 --       * Prefer Adjustable.Container (movable/resizable + autoSave/autoLoad)
@@ -55,13 +55,24 @@
 --       from bleeding through. This is applied at the shared frame layer to avoid per-UI hacks.
 --     - HARDEN: noInsetInside no longer forces transparent background (which re-exposed grey bleed);
 --       it now removes inset padding/border while preserving the dark paint surface.
+--
+--   v2026-02-24B:
+--     - HARDEN(UI paint): some Mudlet/Geyser/Adjustable stacks do not expose setStyleSheet on the
+--       wrapper object; the real paint widget lives at obj.window (or deeper: obj.window.window ...).
+--       Add a deep-style helper that walks the .window chain (bounded) and applies CSS to the first
+--       widget(s) that support setStyleSheet. Use it for frame style + inside paint style.
+--
+--   v2026-02-24C:
+--     - FIX(UI paint): on some Mudlet builds, wrapper objects (and their .window chain) do not expose
+--       setStyleSheet at all; styling must be applied via global Mudlet functions using the widget name.
+--       Add name-based stylesheet application fallback (best-effort) and use it in deep-style helper.
 -- #########################################################################
 
 local Theme = require("dwkit.ui.ui_theme")
 
 local M = {}
 
-M.VERSION = "v2026-02-24A"
+M.VERSION = "v2026-02-24C"
 
 local function _pcall(fn, ...)
     local ok, res = pcall(fn, ...)
@@ -216,6 +227,89 @@ local function _refreshUiManagerUiBestEffort(source, targetUiId)
             end)
         end
     end
+end
+
+-- -------------------------------------------------------------------------
+-- Name-based stylesheet fallback (best-effort)
+-- -------------------------------------------------------------------------
+
+local function _applyStyleByNameBestEffort(name, css)
+    name = tostring(name or "")
+    css = tostring(css or "")
+    if name == "" or css == "" then return false end
+
+    -- Many Mudlet builds expose style setters as global functions that accept a window/label name.
+    local candidates = {
+        "setLabelStyleSheet",
+        "setWindowStyleSheet",
+        "setContainerStyleSheet",
+        "setUserWindowStyleSheet",
+        "setUserWindowStyle",
+        "setWindowStyle",
+    }
+
+    for _, fnName in ipairs(candidates) do
+        local fn = _G[fnName]
+        if type(fn) == "function" then
+            local ok = pcall(fn, name, css)
+            if ok then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+-- -------------------------------------------------------------------------
+-- Deep style helper (bounded .window traversal + name-based fallback)
+-- -------------------------------------------------------------------------
+
+local function _applyStyleDeepBestEffort(obj, css, maxDepth)
+    if type(obj) ~= "table" then return false end
+    css = tostring(css or "")
+    if css == "" then return false end
+    maxDepth = tonumber(maxDepth or 4) or 4
+    if maxDepth < 0 then maxDepth = 0 end
+    if maxDepth > 10 then maxDepth = 10 end
+
+    local applied = false
+    local cur = obj
+    local seen = {}
+
+    for _ = 0, maxDepth do
+        if type(cur) ~= "table" then break end
+
+        if seen[cur] == true then
+            break
+        end
+        seen[cur] = true
+
+        -- 1) Prefer direct method when present
+        if type(cur.setStyleSheet) == "function" then
+            pcall(function()
+                cur:setStyleSheet(css)
+            end)
+            applied = true
+        else
+            -- 2) Fallback: style by name using global functions
+            local nm = tostring(cur.name or "")
+            if nm ~= "" then
+                if _applyStyleByNameBestEffort(nm, css) then
+                    applied = true
+                end
+            end
+        end
+
+        -- Move down the .window chain if present
+        if type(cur.window) == "table" then
+            cur = cur.window
+        else
+            break
+        end
+    end
+
+    return applied
 end
 
 -- Best-effort: register runtime frame+content in Geyser maps + store into ui_base
@@ -450,15 +544,7 @@ end
 
 local function _applyFrameStyleBestEffort(frame)
     if type(frame) ~= "table" then return end
-
-    if type(frame.setStyleSheet) == "function" then
-        pcall(function() frame:setStyleSheet(Theme.frameStyle()) end)
-        return
-    end
-
-    if type(frame.window) == "table" and type(frame.window.setStyleSheet) == "function" then
-        pcall(function() frame.window:setStyleSheet(Theme.frameStyle()) end)
-    end
+    _applyStyleDeepBestEffort(frame, Theme.frameStyle(), 6)
 end
 
 local function _wireClickBestEffort(labelObj, fn)
@@ -491,6 +577,11 @@ local function _safeEchoX(lbl)
     pcall(function()
         if type(lbl.setStyleSheet) == "function" then
             lbl:setStyleSheet(Theme.closeStyle())
+        else
+            local nm = tostring(lbl.name or "")
+            if nm ~= "" then
+                _applyStyleByNameBestEffort(nm, Theme.closeStyle())
+            end
         end
         if type(lbl.echo) == "function" then
             lbl:echo("X")
@@ -600,18 +691,7 @@ local function _applyInsidePaintStyleBestEffort(parent)
         padding: 0px;
     ]]
 
-    if type(parent.setStyleSheet) == "function" then
-        pcall(function()
-            parent:setStyleSheet(css)
-        end)
-    end
-
-    -- Best-effort: some widget stacks expose a nested .window that actually paints
-    if type(parent.window) == "table" and type(parent.window.setStyleSheet) == "function" then
-        pcall(function()
-            parent.window:setStyleSheet(css)
-        end)
-    end
+    _applyStyleDeepBestEffort(parent, css, 6)
 end
 
 -- OPT-IN: remove inset painting/padding on Adjustable "Inside" widget.
@@ -627,19 +707,7 @@ local function _applyAdjustableInsideNoInsetBestEffort(insideParent)
         padding: 0px;
     ]]
 
-    -- Apply to Inside itself
-    if type(insideParent.setStyleSheet) == "function" then
-        pcall(function()
-            insideParent:setStyleSheet(css)
-        end)
-    end
-
-    -- Some Adjustable versions nest widgets differently; try window too (best-effort).
-    if type(insideParent.window) == "table" and type(insideParent.window.setStyleSheet) == "function" then
-        pcall(function()
-            insideParent.window:setStyleSheet(css)
-        end)
-    end
+    _applyStyleDeepBestEffort(insideParent, css, 6)
 end
 
 -- -------------------------------------------------------------------------
@@ -805,14 +873,20 @@ local function _installAdjustableResizeHookBestEffort(frame, bundle)
         for _, fn in ipairs({ "get_width", "getWidth", "width" }) do
             if type(obj[fn]) == "function" then
                 local ok, v = pcall(function() return obj[fn](obj) end)
-                if ok then w = _num(v) break end
+                if ok then
+                    w = _num(v)
+                    break
+                end
             end
         end
 
         for _, fn in ipairs({ "get_height", "getHeight", "height" }) do
             if type(obj[fn]) == "function" then
                 local ok, v = pcall(function() return obj[fn](obj) end)
-                if ok then h = _num(v) break end
+                if ok then
+                    h = _num(v)
+                    break
+                end
             end
         end
 
@@ -1057,7 +1131,14 @@ function M.create(opts)
             height = headerH,
         }, frame)
         pcall(function()
-            header:setStyleSheet(Theme.headerStyle())
+            if type(header.setStyleSheet) == "function" then
+                header:setStyleSheet(Theme.headerStyle())
+            else
+                local nm = tostring(header.name or "")
+                if nm ~= "" then
+                    _applyStyleByNameBestEffort(nm, Theme.headerStyle())
+                end
+            end
             header:echo(" " .. title)
         end)
 

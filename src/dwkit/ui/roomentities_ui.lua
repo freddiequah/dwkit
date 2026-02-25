@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.roomentities_ui
 -- Owner       : UI
--- Version     : v2026-02-11A
+-- Version     : v2026-02-25D
 -- Purpose     :
 --   - SAFE RoomEntities UI (consumer-only) that renders a per-entity ROW LIST with
 --     sections: Players / Mobs / Items-Objects / Unknown.
@@ -61,11 +61,15 @@
 --       * Dispose correctness: dispose() must not clear/remove ui_store entry (align rtvis2
 --         deterministic visible state approach). Instead set module visible/enabled false and
 --         best-effort mark store state visible=false if helper exists.
+--
+--   - v2026-02-25D:
+--       * STANDARDIZE: use ui_row_scaffold layout context for headers, yCursor, overflow, and
+--         rendered widget lifecycle. Keeps button rows unchanged while reducing duplication.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-11A"
+M.VERSION = "v2026-02-25D"
 M.UI_ID = "roomentities_ui"
 M.id = M.UI_ID -- convenience alias (some tooling/debug expects ui.id)
 
@@ -79,6 +83,7 @@ end
 local U = require("dwkit.ui.ui_base")
 local W = require("dwkit.ui.ui_window")
 local ListKit = require("dwkit.ui.ui_list_kit")
+local RowScaffold = require("dwkit.ui.ui_row_scaffold")
 
 local function _safeRequire(modName)
     local ok, mod = pcall(require, modName)
@@ -240,6 +245,8 @@ local _state = {
         usedWhoStoreBoost = false,
         usedRowUi = false,
         lastError = nil,
+        -- NEW: row scaffold stats (best-effort)
+        rowUi = { rowCount = 0, overflow = false, overflowMore = 0 },
     },
 
     widgets = {
@@ -267,19 +274,8 @@ local function _resolveUpdatedEventName(S)
 end
 
 local function _clearRenderedWidgets()
-    local r = _state.widgets.rendered
-    if type(r) ~= "table" then
-        _state.widgets.rendered = {}
-        return
-    end
-
-    for i = #r, 1, -1 do
-        local w = r[i]
-        if type(w) == "table" then
-            U.safeDelete(w)
-        end
-        r[i] = nil
-    end
+    -- standardized via scaffold
+    RowScaffold.clearRendered(_state.widgets.rendered, U)
 end
 
 local function _tryCreateRowUiRoot(parent)
@@ -660,27 +656,6 @@ local function _computeEffectiveLists(state)
     return outLists, overrideCount, usedWhoBoost
 end
 
-local function _applyHeaderStyleBestEffort(labelObj)
-    if type(ListKit.applySectionHeaderStyle) == "function" then
-        pcall(function() ListKit.applySectionHeaderStyle(labelObj) end)
-        return
-    end
-
-    if type(labelObj) == "table" and type(labelObj.setStyleSheet) == "function" then
-        pcall(function()
-            labelObj:setStyleSheet([[
-                QLabel {
-                    font-weight: bold;
-                    padding: 4px;
-                    margin: 0px;
-                    border: 1px solid rgba(255,255,255,0.10);
-                    background: rgba(255,255,255,0.05);
-                }
-            ]])
-        end)
-    end
-end
-
 local function _applyRowNameStyleBestEffort(labelObj)
     if type(ListKit.applyRowTextStyle) == "function" then
         pcall(function() ListKit.applyRowTextStyle(labelObj) end)
@@ -746,22 +721,6 @@ local function _wireLabelClickBestEffort(labelName, fn)
     end
 end
 
-local function _getHeightBestEffort(widget)
-    if type(widget) ~= "table" then return nil end
-
-    local candidates = { "get_height", "getHeight", "height" }
-    for _, fn in ipairs(candidates) do
-        if type(widget[fn]) == "function" then
-            local ok, v = pcall(widget[fn], widget)
-            if ok and tonumber(v) ~= nil then
-                return tonumber(v)
-            end
-        end
-    end
-
-    return nil
-end
-
 local function _setOverrideModeForName(name, typeStr)
     name = tostring(name or "")
     if name == "" then return end
@@ -804,6 +763,9 @@ local function _setOverrideModeForName(name, typeStr)
     end
 end
 
+-- -------------------------------------------------------------------------
+-- Row UI render using shared scaffold layout context (custom rows)
+-- -------------------------------------------------------------------------
 local function _renderRowsIntoRoot(root, effectiveLists)
     local G = U.getGeyser()
     if not G or type(root) ~= "table" then
@@ -812,182 +774,169 @@ local function _renderRowsIntoRoot(root, effectiveLists)
 
     _clearRenderedWidgets()
 
-    local TOP_PAD = 3
-    local BOTTOM_PAD = 2
-
-    local yCursor = TOP_PAD
-    local GAP = 3
-
-    local HEADER_H = 30
-    local ROW_H = 28
-
-    local availH = _getHeightBestEffort(root)
-
-    local function canPlace(h)
-        h = tonumber(h) or 0
-        if type(availH) ~= "number" then
-            return true
-        end
-        return (yCursor + h + BOTTOM_PAD) <= availH
-    end
-
-    local function placeNext(h)
-        yCursor = yCursor + (tonumber(h) or 0) + GAP
+    local okL, ctx, errL = RowScaffold.createLayout({
+        root = root,
+        rendered = _state.widgets.rendered,
+        ListKit = ListKit,
+        U = U,
+        layout = {
+            topPad = 3,
+            bottomPad = 2,
+            gap = 3,
+            headerH = 30,
+            rowH = 28,
+            metaH = 26,
+        },
+    })
+    if not okL then
+        return false, errL
     end
 
     local function addHeader(text)
-        if not canPlace(HEADER_H) then
-            return nil, "insufficient height (header)"
-        end
-
-        local h = G.Label:new({
-            name = "__DWKit_roomentities_ui_hdr_" .. tostring(os.time()) .. "_" .. tostring(math.random(1000, 9999)),
-            x = 0,
-            y = yCursor,
-            width = "100%",
-            height = HEADER_H,
-        }, root)
-
-        _applyHeaderStyleBestEffort(h)
-        _setLabelText(h, tostring(text))
-        _state.widgets.rendered[#_state.widgets.rendered + 1] = h
-        placeNext(HEADER_H)
-        return h, nil
+        return ctx.addHeader(tostring(text or ""))
     end
 
-    local function addRow(name)
-        if not canPlace(ROW_H) then
-            return false, "insufficient height (row)"
-        end
-
+    local function addEntityRow(name)
         name = tostring(name or "")
-        local row = G.Container:new({
-            name = "__DWKit_roomentities_ui_rowC_" .. tostring(os.time()) .. "_" .. tostring(math.random(1000, 9999)),
-            x = 0,
-            y = yCursor,
-            width = "100%",
-            height = ROW_H,
-        }, root)
-
-        _state.widgets.rendered[#_state.widgets.rendered + 1] = row
-
-        if type(row) == "table" and type(row.setStyleSheet) == "function" then
-            pcall(function()
-                row:setStyleSheet([[background-color: rgba(0,0,0,0); border: 0px;]])
-            end)
+        if name == "" then
+            return true
         end
 
-        local nameLabel = G.Label:new({
-            name = row.name .. "_name",
-            x = 0,
-            y = 0,
-            width = "60%",
-            height = "100%",
-        }, row)
+        return ctx.addCustom(ctx.constants.ROW_H, function(y)
+            local row = G.Container:new({
+                name = "__DWKit_roomentities_ui_rowC_" .. tostring(os.time()) .. "_" .. tostring(math.random(1000, 9999)),
+                x = 0,
+                y = y,
+                width = "100%",
+                height = ctx.constants.ROW_H,
+            }, root)
 
-        _applyRowNameStyleBestEffort(nameLabel)
-        _setLabelText(nameLabel, name)
-        _state.widgets.rendered[#_state.widgets.rendered + 1] = nameLabel
+            _state.widgets.rendered[#_state.widgets.rendered + 1] = row
 
-        local btnMob = G.Label:new({
-            name = row.name .. "_btn_mob",
-            x = "60%",
-            y = 0,
-            width = "13.3333%",
-            height = "100%",
-        }, row)
-        _applyOverrideButtonStyleBestEffort(btnMob)
-        _setLabelText(btnMob, "MOB")
-        _state.widgets.rendered[#_state.widgets.rendered + 1] = btnMob
-
-        local btnItem = G.Label:new({
-            name = row.name .. "_btn_item",
-            x = "73.3333%",
-            y = 0,
-            width = "13.3333%",
-            height = "100%",
-        }, row)
-        _applyOverrideButtonStyleBestEffort(btnItem)
-        _setLabelText(btnItem, "ITEM")
-        _state.widgets.rendered[#_state.widgets.rendered + 1] = btnItem
-
-        local btnIgn = G.Label:new({
-            name = row.name .. "_btn_ign",
-            x = "86.6666%",
-            y = 0,
-            width = "13.3334%",
-            height = "100%",
-        }, row)
-        _applyOverrideButtonStyleBestEffort(btnIgn)
-        _setLabelText(btnIgn, "IGN")
-        _state.widgets.rendered[#_state.widgets.rendered + 1] = btnIgn
-
-        _wireLabelClickBestEffort(btnMob.name, function()
-            if _state.enabled ~= true or _state.visible ~= true then return end
-            local ok, errMsg = pcall(function()
-                _setOverrideModeForName(name, "mob")
-            end)
-            if not ok then
-                _out("[DWKit UI] roomentities_ui WARN: btn MOB click threw err=" .. tostring(errMsg), nil)
+            if type(row) == "table" and type(row.setStyleSheet) == "function" then
+                pcall(function()
+                    row:setStyleSheet([[background-color: rgba(0,0,0,0); border: 0px;]])
+                end)
             end
-        end)
 
-        _wireLabelClickBestEffEffort = _wireLabelClickBestEffort -- keep local alias stable if tooling inspects
-        _wireLabelClickBestEffort(btnItem.name, function()
-            if _state.enabled ~= true or _state.visible ~= true then return end
-            local ok, errMsg = pcall(function()
-                _setOverrideModeForName(name, "item")
+            local nameLabel = G.Label:new({
+                name = row.name .. "_name",
+                x = 0,
+                y = 0,
+                width = "60%",
+                height = "100%",
+            }, row)
+
+            _applyRowNameStyleBestEffort(nameLabel)
+            _setLabelText(nameLabel, name)
+            _state.widgets.rendered[#_state.widgets.rendered + 1] = nameLabel
+
+            local btnMob = G.Label:new({
+                name = row.name .. "_btn_mob",
+                x = "60%",
+                y = 0,
+                width = "13.3333%",
+                height = "100%",
+            }, row)
+            _applyOverrideButtonStyleBestEffort(btnMob)
+            _setLabelText(btnMob, "MOB")
+            _state.widgets.rendered[#_state.widgets.rendered + 1] = btnMob
+
+            local btnItem = G.Label:new({
+                name = row.name .. "_btn_item",
+                x = "73.3333%",
+                y = 0,
+                width = "13.3333%",
+                height = "100%",
+            }, row)
+            _applyOverrideButtonStyleBestEffort(btnItem)
+            _setLabelText(btnItem, "ITEM")
+            _state.widgets.rendered[#_state.widgets.rendered + 1] = btnItem
+
+            local btnIgn = G.Label:new({
+                name = row.name .. "_btn_ign",
+                x = "86.6666%",
+                y = 0,
+                width = "13.3334%",
+                height = "100%",
+            }, row)
+            _applyOverrideButtonStyleBestEffort(btnIgn)
+            _setLabelText(btnIgn, "IGN")
+            _state.widgets.rendered[#_state.widgets.rendered + 1] = btnIgn
+
+            _wireLabelClickBestEffort(btnMob.name, function()
+                if _state.enabled ~= true or _state.visible ~= true then return end
+                local ok, errMsg = pcall(function()
+                    _setOverrideModeForName(name, "mob")
+                end)
+                if not ok then
+                    _out("[DWKit UI] roomentities_ui WARN: btn MOB click threw err=" .. tostring(errMsg), nil)
+                end
             end)
-            if not ok then
-                _out("[DWKit UI] roomentities_ui WARN: btn ITEM click threw err=" .. tostring(errMsg), nil)
-            end
-        end)
 
-        _wireLabelClickBestEffort(btnIgn.name, function()
-            if _state.enabled ~= true or _state.visible ~= true then return end
-            local ok, errMsg = pcall(function()
-                _setOverrideModeForName(name, "ignore")
+            _wireLabelClickBestEffEffort = _wireLabelClickBestEffort -- keep local alias stable if tooling inspects
+            _wireLabelClickBestEffort(btnItem.name, function()
+                if _state.enabled ~= true or _state.visible ~= true then return end
+                local ok, errMsg = pcall(function()
+                    _setOverrideModeForName(name, "item")
+                end)
+                if not ok then
+                    _out("[DWKit UI] roomentities_ui WARN: btn ITEM click threw err=" .. tostring(errMsg), nil)
+                end
             end)
-            if not ok then
-                _out("[DWKit UI] roomentities_ui WARN: btn IGN click threw err=" .. tostring(errMsg), nil)
-            end
-        end)
 
-        placeNext(ROW_H)
-        return true, nil
+            _wireLabelClickBestEffort(btnIgn.name, function()
+                if _state.enabled ~= true or _state.visible ~= true then return end
+                local ok, errMsg = pcall(function()
+                    _setOverrideModeForName(name, "ignore")
+                end)
+                if not ok then
+                    _out("[DWKit UI] roomentities_ui WARN: btn IGN click threw err=" .. tostring(errMsg), nil)
+                end
+            end)
+
+            return true
+        end)
     end
 
     local function addSection(title, list)
-        local n = (type(list) == "table") and #list or 0
+        list = (type(list) == "table") and list or {}
+        local n = #list
 
         local hdr = string.format("%s (%d)", tostring(title), tonumber(n) or 0)
         if n == 0 then
             hdr = hdr .. " (empty)"
         end
 
-        local okHdr = addHeader(hdr)
-        if not okHdr then
-            return true, nil
-        end
-
-        if n == 0 then
-            return true, nil
+        if not addHeader(hdr) then
+            -- header couldn't fit, count remainder as overflow
+            ctx.markOverflow(n)
+            return false
         end
 
         for i = 1, n do
-            local okRow = addRow(list[i])
-            if not okRow then
-                return true, nil
+            if not addEntityRow(list[i]) then
+                ctx.markOverflow(n - i + 1)
+                return false
             end
         end
 
-        return true, nil
+        return true
     end
 
     addSection("Players", effectiveLists.players)
     addSection("Mobs", effectiveLists.mobs)
     addSection("Items-Objects", effectiveLists.items)
     addSection("Unknown", effectiveLists.unknown)
+
+    local st = ctx.getStats()
+    _state.lastRender.rowUi.rowCount = tonumber(st.rowCount) or 0
+    _state.lastRender.rowUi.overflow = (st.overflow == true)
+    _state.lastRender.rowUi.overflowMore = tonumber(st.overflowMore) or 0
+
+    if st.overflow == true and ctx.canPlace(ctx.constants.ROW_H) then
+        ctx.addOverflowNote(string.format("... (more rows not shown: +%d)", tonumber(st.overflowMore) or 0))
+    end
 
     return true, nil
 end
@@ -1318,6 +1267,7 @@ function M.getState()
             usedWhoStoreBoost = _state.lastRender.usedWhoStoreBoost,
             usedRowUi = _state.lastRender.usedRowUi,
             lastError = _state.lastRender.lastError,
+            rowUi = _state.lastRender.rowUi,
         },
     }
 end
