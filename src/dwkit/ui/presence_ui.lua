@@ -4,10 +4,10 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.presence_ui
 -- Owner       : UI
--- Version     : v2026-02-25D
+-- Version     : v2026-02-26A
 -- Purpose     :
 --   - SAFE Presence UI (consumer-only) rendered from PresenceService (data only).
---   - Renders "My profiles" vs "Other players" split from PresenceService state.
+--   - Renders "My profiles (online/offline)" and "Other players" split from PresenceService state.
 --   - Row-based UI, aligned with RoomEntities UI style and DWKit standard look.
 --   - Uses shared ui_window frame + panel + listRoot rows.
 --   - Subscribes to PresenceService "updated" event to auto-refresh while visible.
@@ -25,11 +25,14 @@
 --   v2026-02-25D:
 --     - UI: hide metaLine ("Status: OK Reason: none") when not stale.
 --       Meta line is shown only when stale=true.
+--
+--   v2026-02-26A:
+--     - UI: show full roster: My profiles (online) + My profiles (offline) + Other players (room).
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-25D"
+M.VERSION = "v2026-02-26A"
 M.UI_ID = "presence_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -64,6 +67,8 @@ local _state = {
 
     lastRender = {
         myCount = 0,
+        myOnlineCount = 0,
+        myOfflineCount = 0,
         otherCount = 0,
         rowCount = 0,
         stale = false,
@@ -229,14 +234,16 @@ local function _renderRows(state)
         return false, "listRoot not available"
     end
 
-    local my = _sortedCopy(state.myProfilesInRoom)
-    local other = _sortedCopy(state.otherPlayersInRoom)
+    -- Prefer new roster fields; keep backward compatibility.
+    local myOnline = _sortedCopy(state.myProfilesOnline or state.myProfilesInRoom or {})
+    local myOffline = _sortedCopy(state.myProfilesOffline or {})
+    local other = _sortedCopy(state.otherPlayersInRoom or {})
 
     local stale = (state.stale == true)
     local staleReason = tostring(state.staleReason or "")
     if staleReason == "" then staleReason = "none" end
 
-    -- v2026-02-25D: meta line is only shown when stale
+    -- meta line is only shown when stale
     local metaShown = (stale == true)
     local metaLine = nil
     if metaShown then
@@ -253,8 +260,9 @@ local function _renderRows(state)
         U = U,
         metaLine = metaLine,
         sections = {
-            { title = "My profiles",   items = my,    emptySuffix = "(empty)", itemPrefix = "  - " },
-            { title = "Other players", items = other, emptySuffix = "(empty)", itemPrefix = "  - " },
+            { title = "My profiles (online)",  items = myOnline,  emptySuffix = "(empty)", itemPrefix = "  - " },
+            { title = "My profiles (offline)", items = myOffline, emptySuffix = "(empty)", itemPrefix = "  - " },
+            { title = "Other players",         items = other,     emptySuffix = "(empty)", itemPrefix = "  - " },
         },
         layout = {
             topPad = 3,
@@ -276,7 +284,9 @@ local function _renderRows(state)
 
     result = (type(result) == "table") and result or {}
 
-    _state.lastRender.myCount = #my
+    _state.lastRender.myOnlineCount = #myOnline
+    _state.lastRender.myOfflineCount = #myOffline
+    _state.lastRender.myCount = (#myOnline + #myOffline)
     _state.lastRender.otherCount = #other
     _state.lastRender.rowCount = tonumber(result.rowCount) or 0
     _state.lastRender.stale = (stale == true)
@@ -347,7 +357,7 @@ end
 local function _tryCreateListRoot(panel, tag)
     local name = "__DWKit_presence_ui_listRoot_" .. tostring(tag or "default")
 
-    local okRoot, root, err = RowScaffold.createListRoot(panel, name)
+    local okRoot, root, err = require("dwkit.ui.ui_row_scaffold").createListRoot(panel, name)
     if not okRoot or type(root) ~= "table" then
         return false, nil, err or "Failed to create listRoot"
     end
@@ -371,8 +381,8 @@ local function _ensureWidgets()
             title = "Presence",
             x = 30,
             y = 220,
-            width = 320,
-            height = 300,
+            width = 340,
+            height = 340,
             padding = 6,
             onClose = function(b)
                 _setVisibleOffSessionBestEffort()
@@ -557,6 +567,8 @@ function M.getState()
         },
         lastRender = {
             myCount = _state.lastRender.myCount,
+            myOnlineCount = _state.lastRender.myOnlineCount,
+            myOfflineCount = _state.lastRender.myOfflineCount,
             otherCount = _state.lastRender.otherCount,
             rowCount = _state.lastRender.rowCount,
             stale = _state.lastRender.stale,

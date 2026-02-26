@@ -1,7 +1,8 @@
+-- FILE: src/dwkit/loader/init.lua
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-02-26A
+-- Version     : v2026-02-26C
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -114,6 +115,34 @@ function Loader.init()
         DWKit._guiSettingsLoadError = tostring(guiOrErr)
         DWKit._guiSettingsInitLoaded = false
         DWKit._guiSettingsInitLoadError = "guiSettings require failed"
+    end
+
+    -- owned_profiles (SAFE). Best-effort read-only load (missing file => empty, no save).
+    do
+        local okOwned, ownedOrErr = pcall(require, "dwkit.config.owned_profiles")
+        if okOwned and type(ownedOrErr) == "table" then
+            DWKit.config.ownedProfiles = ownedOrErr
+            DWKit._ownedProfilesLoadError = nil
+
+            if type(ownedOrErr.load) == "function" then
+                local okLoad, loadOkOrErr = pcall(ownedOrErr.load, { quiet = true })
+                if okLoad and loadOkOrErr == true then
+                    DWKit._ownedProfilesInitLoaded = true
+                    DWKit._ownedProfilesInitLoadError = nil
+                else
+                    DWKit._ownedProfilesInitLoaded = false
+                    DWKit._ownedProfilesInitLoadError = tostring(loadOkOrErr)
+                end
+            else
+                DWKit._ownedProfilesInitLoaded = false
+                DWKit._ownedProfilesInitLoadError = "ownedProfiles.load() missing"
+            end
+        else
+            DWKit.config.ownedProfiles = nil
+            DWKit._ownedProfilesLoadError = tostring(ownedOrErr)
+            DWKit._ownedProfilesInitLoaded = false
+            DWKit._ownedProfilesInitLoadError = "owned_profiles require failed"
+        end
     end
 
     -- Enable visible persistence in-session (SAFE, noSave) so LaunchPad can toggle show/hide.
@@ -248,6 +277,30 @@ function Loader.init()
     -- Attach SAFE spine services (data only). Guarded, no automation.
     -- ---------------------------------------------------------------------
     do
+        -- Cross-profile comm (SAFE). Same-instance Mudlet transport only.
+        do
+            local okC, cpcOrErr = pcall(require, "dwkit.services.cross_profile_comm_service")
+            if okC and type(cpcOrErr) == "table" then
+                DWKit.services.crossProfileCommService = cpcOrErr
+                DWKit._crossProfileCommServiceLoadError = nil
+
+                if type(cpcOrErr.install) == "function" then
+                    local okInstall, errInstall = cpcOrErr.install({ quiet = true })
+                    if okInstall then
+                        DWKit._crossProfileCommServiceInstallError = nil
+                    else
+                        DWKit._crossProfileCommServiceInstallError = tostring(errInstall)
+                    end
+                else
+                    DWKit._crossProfileCommServiceInstallError = "install() missing"
+                end
+            else
+                DWKit.services.crossProfileCommService = nil
+                DWKit._crossProfileCommServiceLoadError = tostring(cpcOrErr)
+                DWKit._crossProfileCommServiceInstallError = "require failed"
+            end
+        end
+
         local okP, modOrErr = pcall(require, "dwkit.services.presence_service")
         if okP and type(modOrErr) == "table" then
             DWKit.services.presenceService = modOrErr

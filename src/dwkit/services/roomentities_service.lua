@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.roomentities_service
 -- Owner       : Services
--- Version     : v2026-02-24B
+-- Version     : v2026-02-26D
 -- Purpose     :
 --   - SAFE, profile-portable RoomEntitiesService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
@@ -24,31 +24,17 @@
 --           "Obvious exits:".
 --         * Description/title lines are ignored (conservative).
 --
--- Public API  :
---   - getVersion() -> string
---   - getState() -> table copy
---   - setState(newState, opts?) -> boolean ok, string|nil err
---   - update(delta, opts?) -> boolean ok, string|nil err
---   - clear(opts?) -> boolean ok, string|nil err
---   - onUpdated(handlerFn) -> boolean ok, number|nil token, string|nil err
---   - getStats() -> table
---   - getUpdatedEventName() -> string
---   - emitUpdated(meta?) -> boolean ok, string|nil err
---   - ingestFixture(opts?) -> boolean ok, string|nil err
---   - ingestLookLines(lines, opts?) -> boolean ok, string|nil err
---   - ingestLookText(text, opts?) -> boolean ok, string|nil err
---   - reclassifyFromWhoStore(opts?) -> boolean ok, string|nil err
---   - getDebugSnapshot(opts?) -> table (SAFE diagnostics; bounded)
+-- Fix v2026-02-26C:
+--   - Prevent feedback loop: default known-player index must NOT use PresenceService.
+--     WhoStore is the authority signal. Presence is a consumer projection and can be polluted.
 --
--- Events Emitted:
---   - DWKit:Service:RoomEntities:Updated
--- Automation Policy: Manual only (no gameplay commands). WhoStore reclassify is event-driven.
--- Dependencies     : dwkit.core.identity, dwkit.bus.event_bus
+-- NEW v2026-02-26D:
+--   - Add getSnapshotV2() helper for diagnostics compatibility (returns entitiesV2 copy).
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-24B"
+M.VERSION = "v2026-02-26D"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -67,14 +53,12 @@ local function _newBuckets()
     }
 end
 
--- V2: occurrence-aware structure (per snapshot ingest)
--- NOTE: mobs/items are present for completeness; service keeps them empty by policy.
 local function _newEntitiesV2()
     return {
-        players = {}, -- { [displayName] = { label=displayName, key=displayName, count=1, raws={...} } }
-        mobs = {},    -- intentionally empty (policy)
-        items = {},   -- intentionally empty (policy)
-        unknown = {}, -- { [normKey] = { label=displayName, key=normKey, count=N, raws={...} } }
+        players = {},
+        mobs = {},
+        items = {},
+        unknown = {},
     }
 end
 
@@ -101,15 +85,14 @@ local function _ensureEntitiesV2Present(s)
 end
 
 local STATE = {
-    state = _newBuckets(),         -- legacy sets
-    entitiesV2 = _newEntitiesV2(), -- V2 occurrence map
+    state = _newBuckets(),
+    entitiesV2 = _newEntitiesV2(),
     lastTs = nil,
     updates = 0,
     emits = 0,
     suppressedEmits = 0,
 }
 
--- Supported player postures in "is <posture> here."
 local POSTURES = {
     standing = true,
     sitting = true,
@@ -130,8 +113,6 @@ local function _normName(s)
     return s:lower()
 end
 
--- Strip trailing parenthetical tags like "(glowing)" "(humming)" etc.
--- Repeats to remove multiple tags at end.
 local function _stripTrailingParenTags(s)
     if type(s) ~= "string" then return "" end
     local out = _trim(s)
@@ -151,8 +132,6 @@ local function _stripTrailingParenTags(s)
     return out
 end
 
--- Strip trailing bracket/flag blocks like "[ INDOORS IMMROOM ]" or "[FIGHTING]"
--- Repeats to remove multiple blocks at end.
 local function _stripTrailingBracketTags(s)
     if type(s) ~= "string" then return "" end
     local out = _trim(s)
@@ -172,9 +151,6 @@ local function _stripTrailingBracketTags(s)
     return out
 end
 
--- Strip trailing id tokens:
---   "(#12345)"  (already covered by paren stripping, but kept explicit for clarity)
---   "#12345"
 local function _stripTrailingIdTokens(s)
     if type(s) ~= "string" then return "" end
     local out = _trim(s)
@@ -199,7 +175,6 @@ local function _stripTrailingIdTokens(s)
     return out
 end
 
--- shallow copy with 1-level copy for nested tables (good enough for buckets)
 local function _copyOneLevel(t)
     local out = {}
     if type(t) ~= "table" then return out end
@@ -254,7 +229,6 @@ local function _merge(dst, src)
     end
 end
 
--- FIXED: event_bus.emit requires (eventName, payload, meta) in this DWKit environment.
 local function _emit(stateCopy, deltaCopy, source)
     local payload = {
         ts = os.time(),
@@ -290,8 +264,6 @@ local function _emit(stateCopy, deltaCopy, source)
     return false, errMsg
 end
 
--- Normalize + build a stable key for buckets.
--- IMPORTANT: legacy buckets remain keyed by display label ONLY (string), even if ids exist in output.
 local function _asKey(s)
     s = _trim(s or "")
     if s == "" then return nil end
@@ -386,8 +358,8 @@ end
 
 local function _newNameIndex()
     return {
-        set = {},          -- { [lower] = true }
-        canonByLower = {}, -- { [lower] = "DisplayName" }
+        set = {},
+        canonByLower = {},
     }
 end
 
@@ -404,7 +376,6 @@ local function _indexAdd(idx, name)
     idx.canonByLower[lower] = canon
 end
 
--- candidate-only add: membership without a canonical display name
 local function _indexAddLowerOnly(idx, name)
     if type(idx) ~= "table" or type(name) ~= "string" then return end
     local canon = _asKey(name)
@@ -461,7 +432,6 @@ local function _absorbNamesToIndex(idx, t)
     end
 end
 
--- returns "exact" | "candidate" | "none"
 local function _confidenceForName(name, idx)
     if type(name) ~= "string" then return "none" end
     idx = (type(idx) == "table") and idx or _newNameIndex()
@@ -618,7 +588,9 @@ local function _getKnownPlayersIndexCombined(opts)
 
     local idx = _newNameIndex()
 
-    if opts.usePresence == nil or opts.usePresence == true then
+    -- v2026-02-26C: default is NOT to use Presence as a known-player source (avoid feedback loop).
+    local usePresence = (opts.usePresence == true)
+    if usePresence then
         local pIdx = _getPresenceKnownPlayersIndexBestEffort(opts)
         _indexMerge(idx, pIdx)
     end
@@ -639,7 +611,7 @@ local function _isNoiseLine(lowerTrimmed)
     if type(lowerTrimmed) ~= "string" then return false end
     if lowerTrimmed == "" then return true end
 
-    if lowerTrimmed:find("^%<%d+") then return true end -- prompt-ish
+    if lowerTrimmed:find("^%<%d+") then return true end
     if lowerTrimmed:find("gossips,") then return true end
     if lowerTrimmed:find("tells you") then return true end
     if lowerTrimmed:find("shouts,") then return true end
@@ -671,15 +643,6 @@ local function _looksLikeRoomTitle(line)
     return true
 end
 
--- Returns phrase (label) if this is a candidate entity line, else nil.
--- Allowed:
---   "<X> is here..."
---   "<X> is <posture> here..."
---   "<X> stands here..."
---   "<X> lies here..."
---   "<X> has been placed here..."
---   "<X> is standing here..."
---   "<X> is mounted <...> here..."   (added for bulletin boards / mounted objects)
 local function _extractEntityPhrase(lineClean)
     if type(lineClean) ~= "string" then return nil end
     local trimmed = _trim(lineClean)
@@ -690,8 +653,7 @@ local function _extractEntityPhrase(lineClean)
     if _isExitBoundary(lower) then return nil end
     if _looksLikeExitRow(lower) then return nil end
     if _looksLikeRoomTitle(trimmed) and lower:find(" here") == nil then
-        -- conservative: treat title/description as non-entity unless it matches entity patterns
-        -- (entity patterns below will still catch "X is here" etc)
+        -- conservative
     end
 
     do
@@ -718,8 +680,6 @@ local function _extractEntityPhrase(lineClean)
         if phrase ~= "" then return phrase end
     end
 
-    -- capture lines like:
-    --   "A large bulletin board is mounted on a wall here."
     do
         local phrase = trimmed:match("^(.-)%s+is%s+mounted%s+.-%s+here[%s,%.]")
         phrase = _trim(phrase or "")
@@ -788,7 +748,6 @@ local function _extractCandidateName(labelOrKey)
     local s = _trim(labelOrKey)
     if s == "" then return nil end
 
-    -- Use the same cleanup logic as keys (remove trailing tags), then take first token.
     s = _asKey(s) or s
     s = _trim(s)
     if s == "" then return nil end
@@ -809,7 +768,6 @@ local function _boundedCopyRaws(raws, maxN)
     return out
 end
 
--- Public: bounded debug snapshot for dwroom dump (SAFE; no emits)
 function M.getDebugSnapshot(opts)
     opts = (type(opts) == "table") and opts or {}
 
@@ -825,7 +783,7 @@ function M.getDebugSnapshot(opts)
     if maxRawsPerEntity <= 0 then maxRawsPerEntity = 3 end
 
     local knownIdx = _getKnownPlayersIndexCombined({
-        usePresence = (opts.usePresence ~= false),
+        usePresence = (opts.usePresence == true),
         useWhoStore = (opts.useWhoStore ~= false),
     })
 
@@ -955,7 +913,7 @@ function M.getDebugSnapshot(opts)
             limits = {
                 maxEntities = maxEntities,
                 maxRawsPerEntity = maxRawsPerEntity,
-                usePresence = (opts.usePresence ~= false),
+                usePresence = (opts.usePresence == true),
                 useWhoStore = (opts.useWhoStore ~= false),
             },
         },
@@ -965,8 +923,6 @@ end
 
 -- ############################################################
 -- WhoStore "superpower" wiring (SAFE)
--- Still allowed: auto promote to players when WhoStore becomes confident.
--- But per agreement: ONLY players can be auto-typed; everything else remains unknown.
 -- ############################################################
 
 local _who = {
@@ -998,7 +954,6 @@ local function _reclassifyUnknownToPlayersOnly(current, knownIdx)
     local next = _newBuckets()
     local moved = 0
 
-    -- keep legacy mobs/items as-is (typically empty); policy is unknown-first.
     next.mobs = _copyOneLevel(current.mobs)
     next.items = _copyOneLevel(current.items)
 
@@ -1012,7 +967,6 @@ local function _reclassifyUnknownToPlayersOnly(current, knownIdx)
             return
         end
 
-        -- candidate-name gate for titled room labels (keep label as display key)
         local cand = _extractCandidateName(label)
         if cand then
             local confCand = _confidenceForName(cand, knownIdx)
@@ -1040,7 +994,6 @@ local function _reclassifyUnknownToPlayersOnly(current, knownIdx)
     return next, moved
 end
 
--- NEW: keep entitiesV2 consistent with legacy reclassify promotions.
 local function _syncEntitiesV2AfterReclassify(beforeLegacy, afterLegacy)
     beforeLegacy = _ensureBucketsPresent((type(beforeLegacy) == "table") and beforeLegacy or {})
     afterLegacy = _ensureBucketsPresent((type(afterLegacy) == "table") and afterLegacy or {})
@@ -1096,7 +1049,6 @@ local function _applyReclassifyNow(opts)
         return true, nil
     end
 
-    -- Update legacy first, then sync V2 promotions to keep dump/UI diagnostics truthful.
     STATE.state = _copyOneLevel(_ensureBucketsPresent(next))
     local movedV2 = _syncEntitiesV2AfterReclassify(before, STATE.state)
 
@@ -1177,6 +1129,11 @@ function M.getState()
     return out
 end
 
+-- Diagnostics compatibility helper: return entitiesV2 copy only.
+function M.getSnapshotV2()
+    return _copyEntitiesV2(STATE.entitiesV2)
+end
+
 function M.emitUpdated(meta)
     meta = (type(meta) == "table") and meta or {}
 
@@ -1220,7 +1177,6 @@ function M.ingestFixture(opts)
     local buckets = _newBuckets()
     local v2 = _newEntitiesV2()
 
-    -- V2 helper: preserve duplicates by incrementing count and storing raws.
     local function addV2(bucketMap, label, rawLine)
         bucketMap = (type(bucketMap) == "table") and bucketMap or {}
         label = tostring(label or "")
@@ -1292,7 +1248,6 @@ function M.ingestFixture(opts)
         end
     end
 
-    -- Backward-compatible default fixture if caller provided nothing usable.
     if not hasAny then
         buckets.players["FixturePlayer"] = true
         buckets.unknown["Mysterious figure"] = true
@@ -1313,9 +1268,6 @@ function M.setState(newState, opts)
 
     _armWhoStoreSubscriptionBestEffort()
 
-    -- Accept two shapes:
-    --   A) legacy: {players=..., mobs=..., items=..., unknown=...}
-    --   B) wrapped: { state=legacyBuckets, entitiesV2=v2 }
     local incomingBuckets = newState
     local incomingV2 = nil
 
@@ -1334,7 +1286,6 @@ function M.setState(newState, opts)
     local sameLegacy = _statesEqual(before, nextState)
     local nextV2 = (type(incomingV2) == "table") and _copyEntitiesV2(incomingV2) or _newEntitiesV2()
 
-    -- If caller didn't provide V2, keep existing V2 only when legacy is unchanged.
     if type(incomingV2) ~= "table" and sameLegacy then
         nextV2 = _copyEntitiesV2(STATE.entitiesV2)
     end
@@ -1431,9 +1382,6 @@ function M.reclassifyFromWhoStore(opts)
     return _applyReclassifyNow({ source = opts.source or "manual:reclassify", forceEmit = (opts.forceEmit == true) })
 end
 
--- Best-effort entity-region scan:
---   - Collect candidates until "Obvious exits:" (or exit rows).
---   - Ignore room title / description lines conservatively.
 function M.ingestLookLines(lines, opts)
     opts = (type(opts) == "table") and opts or {}
     if type(lines) ~= "table" then
@@ -1486,12 +1434,10 @@ function M.ingestLookLines(lines, opts)
                             _addBucket(buckets.players, label)
                             addV2(v2.players, label, label, trimmed)
                         else
-                            -- candidate-name gate (WhoStore exact match) for titled labels
                             local cand = _extractCandidateName(label)
                             local confCand = (cand and _confidenceForName(cand, knownPlayersIdx)) or "none"
 
                             if confCand == "exact" then
-                                -- Keep label as the display key so UI retains title text.
                                 _addBucket(buckets.players, label)
                                 addV2(v2.players, label, label, trimmed)
                             else
@@ -1505,7 +1451,6 @@ function M.ingestLookLines(lines, opts)
         end
     end
 
-    -- Policy: service does not auto-fill mobs/items; leave empty.
     local wrapped = { state = buckets, entitiesV2 = v2 }
     return M.setState(wrapped, { source = opts.source or "ingestLookLines", forceEmit = (opts.forceEmit == true) })
 end
@@ -1547,8 +1492,6 @@ function M.getStats()
     }
 end
 
--- Arm subscription at module load (best-effort) so init() immediately reflects subscribed=true
--- when WhoStore + BUS are available.
 _armWhoStoreSubscriptionBestEffort()
 
 return M
