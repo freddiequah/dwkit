@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.event_registry
 -- Owner       : Bus
--- Version     : v2026-02-10B
+-- Version     : v2026-02-26C
 -- Purpose     :
 --   - Canonical registry for all DWKit events (code mirror of docs/Event_Registry_v1.0.md).
 --   - No events are emitted here. Registry only.
@@ -34,7 +34,7 @@
 
 local M                             = {}
 
-M.VERSION                           = "v2026-02-10B"
+M.VERSION                           = "v2026-02-26C"
 
 local ID                            = require("dwkit.core.identity")
 
@@ -49,6 +49,7 @@ local EV_SVC_ROOMENTITIES_UPDATED   = PREFIX .. "Service:RoomEntities:Updated"
 local EV_SVC_WHOSTORE_UPDATED       = PREFIX .. "Service:WhoStore:Updated"
 local EV_SVC_ROOMFEEDSTATUS_UPDATED = PREFIX .. "Service:RoomFeedStatus:Updated"
 local EV_SVC_CHATLOG_UPDATED        = PREFIX .. "Service:ChatLog:Updated"
+local EV_SVC_CPC_UPDATED            = PREFIX .. "Service:CrossProfileComm:Updated"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -72,7 +73,7 @@ end
 -- - M.VERSION is the code module version tag (calendar style)
 -- -------------------------
 local REG = {
-  version = "v1.11",
+  version = "v1.12",
   moduleVersion = M.VERSION,
   events = {
     [EV_BOOT_READY] = {
@@ -265,6 +266,28 @@ local REG = {
         "SAFE internal event (no gameplay commands).",
         "Manual-only: emitted only when ChatLogService API is invoked.",
         "Primary consumer is dwkit.ui.chat_ui (event-driven refresh while visible).",
+      },
+    },
+
+    [EV_SVC_CPC_UPDATED] = {
+      name = EV_SVC_CPC_UPDATED,
+      description =
+      "Emitted when CrossProfileCommService peer state changes (HELLO/BYE/seen). SAFE; no gameplay sends; same-instance transport only.",
+      payloadSchema = {
+        ts = "number",
+        state = "table",
+        delta = "table (optional)",
+        source = "string (optional)",
+      },
+      producers = {
+        "dwkit.services.cross_profile_comm_service",
+      },
+      consumers = {
+        "internal (presence_service/ui/tests)",
+      },
+      notes = {
+        "SAFE internal event (no gameplay commands).",
+        "Manual-only: service is installed during loader.init and reacts to Mudlet lifecycle events best-effort.",
       },
     },
   }

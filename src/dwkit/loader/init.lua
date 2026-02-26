@@ -1,7 +1,8 @@
+-- FILE: src/dwkit/loader/init.lua
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-02-26A
+-- Version     : v2026-02-26B
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -248,6 +249,30 @@ function Loader.init()
     -- Attach SAFE spine services (data only). Guarded, no automation.
     -- ---------------------------------------------------------------------
     do
+        -- Cross-profile comm (SAFE). Same-instance Mudlet transport only.
+        do
+            local okC, cpcOrErr = pcall(require, "dwkit.services.cross_profile_comm_service")
+            if okC and type(cpcOrErr) == "table" then
+                DWKit.services.crossProfileCommService = cpcOrErr
+                DWKit._crossProfileCommServiceLoadError = nil
+
+                if type(cpcOrErr.install) == "function" then
+                    local okInstall, errInstall = cpcOrErr.install({ quiet = true })
+                    if okInstall then
+                        DWKit._crossProfileCommServiceInstallError = nil
+                    else
+                        DWKit._crossProfileCommServiceInstallError = tostring(errInstall)
+                    end
+                else
+                    DWKit._crossProfileCommServiceInstallError = "install() missing"
+                end
+            else
+                DWKit.services.crossProfileCommService = nil
+                DWKit._crossProfileCommServiceLoadError = tostring(cpcOrErr)
+                DWKit._crossProfileCommServiceInstallError = "require failed"
+            end
+        end
+
         local okP, modOrErr = pcall(require, "dwkit.services.presence_service")
         if okP and type(modOrErr) == "table" then
             DWKit.services.presenceService = modOrErr
