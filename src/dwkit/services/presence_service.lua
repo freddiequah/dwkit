@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.presence_service
 -- Owner       : Services
--- Version     : v2026-02-26C
+-- Version     : v2026-02-26E
 -- Purpose     :
 --   - SAFE, profile-portable PresenceService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
@@ -30,11 +30,19 @@
 -- Fix v2026-02-26C:
 --   - Presence must match owned_profiles by candidate character token (e.g. "Scynox" from "Scynox the adventurer").
 --   - Presence must NOT treat obvious objects ("A/An/The ...") as players in Other players list.
+--
+-- NEW v2026-02-26D:
+--   - Presence roster should NOT show "self" (current profile) in My profiles list.
+--     Self is inferred via CPC service myProfile == owned profileLabel.
+--
+-- Fix v2026-02-26E:
+--   - Also hide "self" from backward-compat myProfilesInRoom field.
+--     Some UIs may still fallback to myProfilesInRoom; self must never appear there.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-26C"
+M.VERSION = "v2026-02-26E"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -73,8 +81,6 @@ local function _emit(stateCopy, deltaCopy, source)
     if type(source) == "string" and source ~= "" then payload.source = source end
 
     local ok, delivered, errs = BUS.emit(EV_UPDATED, payload)
-    -- BUS.emit already returns ok, deliveredCount, errors. We do not fail the service
-    -- just because no one is listening. But we do bubble up registry/validation errors.
     if not ok then
         local first = (type(errs) == "table" and errs[1]) and tostring(errs[1]) or "emit failed"
         return false, first
@@ -282,6 +288,39 @@ local function _isLocalProfileOnlineBestEffort(profileLabelOrName)
     return false
 end
 
+local function _getLocalProfileNameBestEffort()
+    local okC, C = _safeRequire("dwkit.services.cross_profile_comm_service")
+    if okC and type(C) == "table" then
+        if type(C.getState) == "function" then
+            local okS, st = pcall(C.getState)
+            if okS and type(st) == "table" then
+                local p = tostring(st.myProfile or "")
+                if p ~= "" then
+                    return p
+                end
+            end
+        end
+        if type(C.getStats) == "function" then
+            local okT, st = pcall(C.getStats)
+            if okT and type(st) == "table" then
+                local p = tostring(st.myProfile or "")
+                if p ~= "" then
+                    return p
+                end
+            end
+        end
+    end
+
+    if type(getProfileName) == "function" then
+        local ok, v = pcall(getProfileName)
+        if ok and type(v) == "string" and v ~= "" then
+            return v
+        end
+    end
+
+    return ""
+end
+
 -- -------------------------------------------------------------------------
 -- Room occupant -> candidate name token (Presence-owned matching)
 -- -------------------------------------------------------------------------
@@ -347,8 +386,6 @@ local _bridge = {
 local function _extractRoomPlayersBestEffort(payload)
     payload = (type(payload) == "table") and payload or {}
 
-    -- Preferred: ask RoomEntitiesService state (agreement).
-    -- IMPORTANT: RoomEntitiesService.getState() does NOT expose lastTs; use getStats().lastTs for freshness.
     do
         local okR, R = _safeRequire("dwkit.services.roomentities_service")
         if okR and type(R) == "table" and type(R.getState) == "function" then
@@ -374,7 +411,6 @@ local function _extractRoomPlayersBestEffort(payload)
                     local ks = _sortedStringKeys(st.entitiesV2.players)
                     for i = 1, #ks do names[#names + 1] = ks[i] end
                 end
-                -- IMPORTANT: Presence should still show room occupants even if RoomEntities typed them as unknown.
                 if type(st.entitiesV2.unknown) == "table" then
                     local ks = _sortedStringKeys(st.entitiesV2.unknown)
                     for i = 1, #ks do names[#names + 1] = ks[i] end
@@ -385,7 +421,6 @@ local function _extractRoomPlayersBestEffort(payload)
         end
     end
 
-    -- Fallback: payload.entitiesV2.players + payload.entitiesV2.unknown keys
     if type(payload.entitiesV2) == "table" then
         local names = {}
         if type(payload.entitiesV2.players) == "table" then
@@ -401,7 +436,6 @@ local function _extractRoomPlayersBestEffort(payload)
         end
     end
 
-    -- Fallback: legacy payload.state.players + payload.state.unknown set-map
     if type(payload.state) == "table" then
         local names = {}
         if type(payload.state.players) == "table" then
@@ -442,6 +476,18 @@ local function _fmtOwned(name, label, tags)
     return out
 end
 
+local function _isSelfOwnedProfile(map, ownedName, profileLabel)
+    if type(map) ~= "table" then return false end
+    ownedName = tostring(ownedName or "")
+    profileLabel = tostring(profileLabel or "")
+    if ownedName == "" or profileLabel == "" then return false end
+
+    local selfProfile = _getLocalProfileNameBestEffort()
+    if selfProfile == "" then return false end
+
+    return (tostring(profileLabel) == tostring(selfProfile))
+end
+
 local function _computePresenceSnapshot(roomPlayers, roomTs, whoPayload, source)
     roomPlayers = (type(roomPlayers) == "table") and roomPlayers or {}
     roomTs = roomTs
@@ -463,7 +509,6 @@ local function _computePresenceSnapshot(roomPlayers, roomTs, whoPayload, source)
                 inRoom[cand] = true
 
                 if type(map[cand]) ~= "string" or map[cand] == "" then
-                    -- "Other players" should show players, not objects; use candidate token display.
                     otherPlayersInRoom[#otherPlayersInRoom + 1] = cand
                 end
             end
@@ -483,21 +528,23 @@ local function _computePresenceSnapshot(roomPlayers, roomTs, whoPayload, source)
     _bridge.lastWhoCount = whoCount
 
     -- Backward compat field: My profiles in room (NO TAGS)
+    -- Fix v2026-02-26E: hide self here as well.
     local myProfilesInRoom = {}
     do
         for cand, _ in pairs(inRoom) do
             local prof = map[cand]
             if type(prof) == "string" and prof ~= "" then
-                myProfilesInRoom[#myProfilesInRoom + 1] = cand .. " (" .. prof .. ")"
+                if _isSelfOwnedProfile(map, cand, prof) then
+                    -- skip self
+                else
+                    myProfilesInRoom[#myProfilesInRoom + 1] = cand .. " (" .. prof .. ")"
+                end
             end
         end
         myProfilesInRoom = _dedupeAndSortStrings(myProfilesInRoom)
     end
 
     -- New: roster across all owned profiles (online/offline/here)
-    -- Online truth:
-    --   - local CPC says profile is running (profileLabel match), OR
-    --   - WhoStore says character is online (secondary, cross-instance/cross-PC)
     local ownedNames = _getOwnedNamesSorted(map)
     local myProfilesOnline = {}
     local myProfilesOffline = {}
@@ -507,27 +554,32 @@ local function _computePresenceSnapshot(roomPlayers, roomTs, whoPayload, source)
         local name = tostring(ownedNames[i] or "")
         local label = map[name]
         if type(label) == "string" and label ~= "" then
-            local localOnline = _isLocalProfileOnlineBestEffort(label)
-            local whoOnline = _isOnlineBestEffort(W, name)
-
-            local online = (localOnline == true) or (whoOnline == true)
-
-            if online then
-                local tags = { "ONLINE" }
-                if inRoom[name] == true then
-                    tags[#tags + 1] = "HERE"
-                end
-                local line = _fmtOwned(name, label, tags)
-                if line then
-                    myProfilesOnline[#myProfilesOnline + 1] = line
-                    if inRoom[name] == true then
-                        myProfilesHere[#myProfilesHere + 1] = line
-                    end
-                end
+            -- hide self from roster
+            if _isSelfOwnedProfile(map, name, label) then
+                -- skip
             else
-                local line = _fmtOwned(name, label, { "OFFLINE" })
-                if line then
-                    myProfilesOffline[#myProfilesOffline + 1] = line
+                local localOnline = _isLocalProfileOnlineBestEffort(label)
+                local whoOnline = _isOnlineBestEffort(W, name)
+
+                local online = (localOnline == true) or (whoOnline == true)
+
+                if online then
+                    local tags = { "ONLINE" }
+                    if inRoom[name] == true then
+                        tags[#tags + 1] = "HERE"
+                    end
+                    local line = _fmtOwned(name, label, tags)
+                    if line then
+                        myProfilesOnline[#myProfilesOnline + 1] = line
+                        if inRoom[name] == true then
+                            myProfilesHere[#myProfilesHere + 1] = line
+                        end
+                    end
+                else
+                    local line = _fmtOwned(name, label, { "OFFLINE" })
+                    if line then
+                        myProfilesOffline[#myProfilesOffline + 1] = line
+                    end
                 end
             end
         end
@@ -619,7 +671,6 @@ local function _onWhoStoreUpdated(payload)
     end
     _bridge.running = true
 
-    -- Only recompute roster/here info from last known room snapshot.
     local ok, err = _recomputeFromLastKnown("presence_bridge:whostore", payload)
     if ok ~= true then
         _bridge.lastErr = tostring(err)
@@ -634,7 +685,6 @@ local function _onCpcUpdated(_payload)
     end
     _bridge.running = true
 
-    -- Recompute roster/here info from last known room snapshot (CPC changes online truth)
     local ok, err = _recomputeFromLastKnown("presence_bridge:cpc", nil)
     if ok ~= true then
         _bridge.lastErr = tostring(err)
@@ -644,7 +694,6 @@ local function _onCpcUpdated(_payload)
 end
 
 local function _resolveRoomEntitiesUpdatedEventNameBestEffort()
-    -- Prefer RoomEntitiesService contract if available
     local okR, R = _safeRequire("dwkit.services.roomentities_service")
     if okR and type(R) == "table" then
         if type(R.getUpdatedEventName) == "function" then
@@ -658,7 +707,6 @@ local function _resolveRoomEntitiesUpdatedEventNameBestEffort()
         end
     end
 
-    -- Fallback to identity-based string
     return tostring(ID.eventPrefix or "DWKit:") .. "Service:RoomEntities:Updated"
 end
 
@@ -875,7 +923,6 @@ function M.getStats()
     }
 end
 
--- Arm subscriptions at module load (best-effort) so Presence can populate as soon as RoomEntities/WhoStore/CPC emits.
 _armSubscriptionsBestEffort()
 
 return M

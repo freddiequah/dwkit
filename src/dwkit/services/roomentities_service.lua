@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.roomentities_service
 -- Owner       : Services
--- Version     : v2026-02-26C
+-- Version     : v2026-02-26D
 -- Purpose     :
 --   - SAFE, profile-portable RoomEntitiesService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
@@ -27,11 +27,14 @@
 -- Fix v2026-02-26C:
 --   - Prevent feedback loop: default known-player index must NOT use PresenceService.
 --     WhoStore is the authority signal. Presence is a consumer projection and can be polluted.
+--
+-- NEW v2026-02-26D:
+--   - Add getSnapshotV2() helper for diagnostics compatibility (returns entitiesV2 copy).
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-26C"
+M.VERSION = "v2026-02-26D"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -1124,6 +1127,11 @@ function M.getState()
     local out = _copyOneLevel(_ensureBucketsPresent(STATE.state))
     out.entitiesV2 = _copyEntitiesV2(STATE.entitiesV2)
     return out
+end
+
+-- Diagnostics compatibility helper: return entitiesV2 copy only.
+function M.getSnapshotV2()
+    return _copyEntitiesV2(STATE.entitiesV2)
 end
 
 function M.emitUpdated(meta)

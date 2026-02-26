@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-02-26B
+-- Version     : v2026-02-26C
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -115,6 +115,34 @@ function Loader.init()
         DWKit._guiSettingsLoadError = tostring(guiOrErr)
         DWKit._guiSettingsInitLoaded = false
         DWKit._guiSettingsInitLoadError = "guiSettings require failed"
+    end
+
+    -- owned_profiles (SAFE). Best-effort read-only load (missing file => empty, no save).
+    do
+        local okOwned, ownedOrErr = pcall(require, "dwkit.config.owned_profiles")
+        if okOwned and type(ownedOrErr) == "table" then
+            DWKit.config.ownedProfiles = ownedOrErr
+            DWKit._ownedProfilesLoadError = nil
+
+            if type(ownedOrErr.load) == "function" then
+                local okLoad, loadOkOrErr = pcall(ownedOrErr.load, { quiet = true })
+                if okLoad and loadOkOrErr == true then
+                    DWKit._ownedProfilesInitLoaded = true
+                    DWKit._ownedProfilesInitLoadError = nil
+                else
+                    DWKit._ownedProfilesInitLoaded = false
+                    DWKit._ownedProfilesInitLoadError = tostring(loadOkOrErr)
+                end
+            else
+                DWKit._ownedProfilesInitLoaded = false
+                DWKit._ownedProfilesInitLoadError = "ownedProfiles.load() missing"
+            end
+        else
+            DWKit.config.ownedProfiles = nil
+            DWKit._ownedProfilesLoadError = tostring(ownedOrErr)
+            DWKit._ownedProfilesInitLoaded = false
+            DWKit._ownedProfilesInitLoadError = "owned_profiles require failed"
+        end
     end
 
     -- Enable visible persistence in-session (SAFE, noSave) so LaunchPad can toggle show/hide.

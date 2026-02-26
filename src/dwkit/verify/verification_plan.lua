@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-26E
+-- Version     : v2026-02-26F
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-26E"
+M.VERSION = "v2026-02-26F"
 
 local SUITES = {
     default = {
@@ -101,6 +101,35 @@ local SUITES = {
                 cmd =
                 'lua do local S=require("dwkit.services.whostore_service"); local st=S.getState(); if st.lastUpdatedTs==nil then error("Expected WhoStore lastUpdatedTs after manual who") end; if tostring(st.source)~="dwwho:auto" then error("Expected WhoStore source dwwho:auto after manual who; got "..tostring(st.source)) end; print(string.format("[dwverify-prereq] PASS WhoStore source=%s lastUpdatedTs=%s autoCaptureEnabled=%s", tostring(st.source), tostring(st.lastUpdatedTs), tostring(st.autoCaptureEnabled))) end',
                 note = "ASSERT: manual who ingested as dwwho:auto.",
+            },
+        },
+    },
+
+    presence_live_inputs = {
+        title = "presence_live_inputs",
+        description =
+        "Live inputs sanity (SAFE): print owned_profiles status, CPC status, RoomEntities V2 counts, and Presence derived lists. Use this on BOTH tabs when live room behavior looks wrong.",
+        delay = 0.25,
+        steps = {
+            {
+                cmd =
+                'lua do local O=require("dwkit.config.owned_profiles"); local st=O.status(); print(string.format("[dwverify-live] owned_profiles loaded=%s count=%s relPath=%s lastErr=%s", tostring(st.loaded), tostring(st.count), tostring(st.relPath), tostring(st.lastError))) local m=O.getMap(); local n=0; for k,v in pairs(m) do n=n+1; print(string.format("[dwverify-live] owned %s -> %s", tostring(k), tostring(v))) end; if n==0 then print("[dwverify-live] owned_profiles map EMPTY") end end',
+                note = "Owned profiles mapping (authoritative).",
+            },
+            {
+                cmd =
+                'lua do local C=require("dwkit.services.cross_profile_comm_service"); local st=C.status(); print(string.format("[dwverify-live] cpc installed=%s myProfile=%s instanceId=%s peerCount=%s", tostring(st.installed), tostring(st.myProfile), tostring(st.instanceId), tostring(st.peerCount))) if type(st.peers)=="table" then for k,p in pairs(st.peers) do print(string.format("[dwverify-live] cpc peer key=%s profile=%s instanceId=%s lastSeen=%s", tostring(k), tostring(p.profile), tostring(p.instanceId), tostring(p.lastSeenTs or "nil"))) end end end',
+                note = "CPC local-online truth (same Mudlet instance).",
+            },
+            {
+                cmd =
+                'lua do local R=require("dwkit.services.roomentities_service"); local v=R.getSnapshotV2 and R.getSnapshotV2() or {}; local function cnt(t) local n=0; if type(t)=="table" then for _ in pairs(t) do n=n+1 end end; return n end; print(string.format("[dwverify-live] roomentities_v2 players=%s unknown=%s", tostring(cnt(v.players)), tostring(cnt(v.unknown)))) end',
+                note = "RoomEntities V2 snapshot counts (Presence uses these via bridge).",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.presence_service"); local s=P.getState(); local function dump(tag,t) if type(t)~="table" then print(tag.."=nil") return end; print(tag..".count="..tostring(#t)); for i=1,#t do print(tag.."["..i.."]="..tostring(t[i])) end end; print(string.format("[dwverify-live] presence roomTs=%s whoTs=%s mappingCount=%s", tostring(s.roomTs or "nil"), tostring(s.whoTs or "nil"), tostring(s.mapping and s.mapping.count or "nil"))) dump("[dwverify-live] myProfilesOnline", s.myProfilesOnline or {}); dump("[dwverify-live] myProfilesOffline", s.myProfilesOffline or {}); dump("[dwverify-live] otherPlayersInRoom", s.otherPlayersInRoom or {}) end',
+                note = "Presence derived lists (what UI should show).",
             },
         },
     },
