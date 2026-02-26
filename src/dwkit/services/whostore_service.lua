@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.whostore_service
 -- Owner       : Services
--- Version     : v2026-02-25A
+-- Version     : v2026-02-26B
 -- Purpose     :
 --   - SAFE WhoStore service (manual-only) to cache an authoritative WHO snapshot
 --     derived from parsing WHO output (No-GMCP compatible).
@@ -78,11 +78,20 @@
 -- FIX (v2026-02-25A):
 --   - Persistence serializer emitted an extra trailing '}' causing snapshot dofile() to fail.
 --   - Persist load error now records the real dofile() failure text for diagnosis.
+--
+-- FIX (v2026-02-26B):
+--   - Manual WHO may use formats without a leading "[rank]" tag. Add fallback parse:
+--       * if bracket/rank parse fails, extract a legacy name token and build a minimal Entry.
+--   - If WHO capture produced rawLines but parsedCount==0 (or delta==0), emit Updated when:
+--       * this is the first capture (previous snapshot ts nil), OR
+--       * source changed, OR
+--       * opts.forceEmit==true
+--     This makes new profiles stop "looking broken" even when snapshot is empty.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-25A"
+M.VERSION = "v2026-02-26B"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -410,36 +419,6 @@ local function _deriveTitleText(extraText)
     return s
 end
 
-local function _parseWhoLineToEntry(line)
-    local pre = _parseRankTagAndRest(line)
-    if not pre then
-        return nil
-    end
-
-    local name, extraText = _parseNameAndExtra(pre.rest)
-    if not name then
-        return nil
-    end
-
-    local level, class = _parseLevelClass(pre.rankTag or "")
-
-    local flags = _detectFlags(extraText)
-    local titleText = _deriveTitleText(extraText)
-
-    local entry = {
-        name = name,
-        rankTag = pre.rankTag or "",
-        level = level,
-        class = class,
-        flags = flags,
-        extraText = extraText or "",
-        titleText = titleText,
-        rawLine = tostring(pre.rawLine or line or ""),
-    }
-
-    return entry
-end
-
 local function _normalizeNameForLegacy(s)
     if type(s) ~= "string" then return nil end
 
@@ -469,6 +448,50 @@ local function _normalizeNameForLegacy(s)
     end
 
     return name
+end
+
+local function _parseWhoLineToEntry(line)
+    -- Primary: bracketed WHO format: "[rank] Name ...."
+    local pre = _parseRankTagAndRest(line)
+    if pre then
+        local name, extraText = _parseNameAndExtra(pre.rest)
+        if not name then
+            return nil
+        end
+
+        local level, class = _parseLevelClass(pre.rankTag or "")
+
+        local flags = _detectFlags(extraText)
+        local titleText = _deriveTitleText(extraText)
+
+        return {
+            name = name,
+            rankTag = pre.rankTag or "",
+            level = level,
+            class = class,
+            flags = flags,
+            extraText = extraText or "",
+            titleText = titleText,
+            rawLine = tostring(pre.rawLine or line or ""),
+        }
+    end
+
+    -- Fallback: non-bracket WHO formats. Extract a legacy name token and keep minimal metadata.
+    local n = _normalizeNameForLegacy(tostring(line or ""))
+    if not n then
+        return nil
+    end
+
+    return {
+        name = n,
+        rankTag = "",
+        level = nil,
+        class = nil,
+        flags = {},
+        extraText = "",
+        titleText = nil,
+        rawLine = tostring(line or ""),
+    }
 end
 
 local function _asPlayersMap(players)
@@ -630,14 +653,12 @@ local function _quoteLuaString(s)
 end
 
 local function _getProfileDirBestEffort()
-    -- Mudlet provides getProfilePath() in most builds.
     if type(getProfilePath) == "function" then
         local ok, v = pcall(getProfilePath)
         if ok and type(v) == "string" and v ~= "" then
             return v
         end
     end
-    -- Fallback: Mudlet home dir (not perfect, but better than nothing)
     if type(getMudletHomeDir) == "function" then
         local ok, v = pcall(getMudletHomeDir)
         if ok and type(v) == "string" and v ~= "" then
@@ -681,7 +702,6 @@ local function _persistSerialize(snapshot, autoCaptureEnabled)
     lines[#lines + 1] = "    source=" .. _quoteLuaString(tostring(snapshot.source or "persist")) .. ","
     lines[#lines + 1] = "    byName={"
 
-    -- Persist only byName entries (authoritative set). This is enough for RoomEntities gating.
     for i = 1, #keys do
         local k = tostring(keys[i])
         local e = by[k]
@@ -694,7 +714,6 @@ local function _persistSerialize(snapshot, autoCaptureEnabled)
                 lines[#lines + 1] = "        level=" .. tostring(tonumber(e.level) or "nil") .. ","
                 lines[#lines + 1] = "        class=" ..
                     (e.class ~= nil and _quoteLuaString(tostring(e.class)) or "nil") .. ","
-                -- flags array
                 if type(e.flags) == "table" then
                     local f = {}
                     for fi = 1, #e.flags do
@@ -777,12 +796,10 @@ local function _persistLoadBestEffort()
         return false
     end
 
-    -- Restore autoCaptureEnabled (default true if missing)
     if data.autoCaptureEnabled ~= nil then
         _state.autoCaptureEnabled = (data.autoCaptureEnabled == true)
     end
 
-    -- Build canonical snapshot
     local ts = tonumber(snap.ts) or os.time()
     local src = tostring(snap.source or "persist:load")
     local byName = {}
@@ -810,7 +827,6 @@ local function _persistLoadBestEffort()
 
     _persist.lastLoadErr = nil
 
-    -- Apply and emit once so consumers can reclassify.
     local delta = { added = _countMap(byName), removed = 0, changed = 0, total = _countMap(byName), mode = "persist:load" }
     local function _applyNewSnapshot(newSnap, opts, d)
         opts = (type(opts) == "table") and opts or {}
@@ -931,7 +947,7 @@ function M.getState()
         snapshot = _copySnapshot(_state.snapshot),
         persist = {
             enabled = (_persist.enabled == true),
-            path = _persistPathBestEffort(),
+            path = _persistLoadBestEffort and _persistPathBestEffort() or _persistPathBestEffort(),
             lastLoadErr = _persist.lastLoadErr,
             lastSaveErr = _persist.lastSaveErr,
         },
@@ -1122,7 +1138,6 @@ function M.ingestWhoLines(lines, opts)
         return false, "lines must be table"
     end
 
-    -- Gate: if watcher OFF, ignore auto-capture ingests (orphan triggers safe)
     local src = tostring(opts.source or "")
     if (_state.autoCaptureEnabled ~= true) and src:match("^dwwho:auto") then
         return true, nil
@@ -1156,7 +1171,8 @@ function M.ingestWhoLines(lines, opts)
         end
     end
 
-    local beforeByName = (type(_state.snapshot.byName) == "table") and _state.snapshot.byName or {}
+    local beforeSnap = (type(_state.snapshot) == "table") and _state.snapshot or { ts = nil, source = nil, byName = {} }
+    local beforeByName = (type(beforeSnap.byName) == "table") and beforeSnap.byName or {}
     local nextByName = {}
 
     if mode == "merge" then
@@ -1172,7 +1188,7 @@ function M.ingestWhoLines(lines, opts)
 
     local nextRawLines = rawLines
     if mode == "merge" then
-        local prev = (type(_state.snapshot.rawLines) == "table") and _state.snapshot.rawLines or {}
+        local prev = (type(beforeSnap.rawLines) == "table") and beforeSnap.rawLines or {}
         nextRawLines = _copyArray(prev)
         for i = 1, #rawLines do
             nextRawLines[#nextRawLines + 1] = rawLines[i]
@@ -1187,7 +1203,15 @@ function M.ingestWhoLines(lines, opts)
 
     _state.rawCount = parsedCount
 
-    if d.added > 0 or d.removed > 0 or d.changed > 0 then
+    local hasDelta = (d.added > 0 or d.removed > 0 or d.changed > 0)
+
+    -- v2026-02-26B: even if hasDelta=false, emit when this was a real WHO capture
+    -- and either this is the first capture, source changed, or forceEmit requested.
+    local beforeTsNil = (beforeSnap.ts == nil)
+    local sourceChanged = (tostring(beforeSnap.source or "") ~= tostring(src or ""))
+    local capturedSomeOutput = (#rawLines > 0)
+
+    if hasDelta or (opts.forceEmit == true) or (capturedSomeOutput and (beforeTsNil or sourceChanged)) then
         return _applyNewSnapshot(snap, { source = src, rawCount = parsedCount }, d)
     end
 
@@ -1218,7 +1242,6 @@ function M.ingestWhoText(text, opts)
     return M.ingestWhoLines(lines, opts)
 end
 
--- Load persisted snapshot (best-effort) at module load.
 pcall(_persistLoadBestEffort)
 
 return M

@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-25E
+-- Version     : v2026-02-26B
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-25E"
+M.VERSION = "v2026-02-26B"
 
 local SUITES = {
     -- Default suite (safe baseline)
@@ -57,6 +57,77 @@ local SUITES = {
             "dwwho fixture basic",
             "dwwho list",
             "dwwho status",
+        },
+    },
+
+    -- NEW: new-profile prerequisites (WHO watcher default-on via loader.init)
+    new_profile_prereq = {
+        title = "new_profile_prereq",
+        description =
+        "New profile prereq: loader.init should load dwwho module (watcher autostart), so manual 'who' populates WhoStore without needing 'dwwho watch on'.",
+        delay = 0.45,
+        steps = {
+            {
+                cmd =
+                'lua do package.loaded["dwkit.loader.init"]=nil; local L=require("dwkit.loader.init"); local kit=L.init(); print(string.format("[dwverify-prereq] init OK bootReadyEmitted=%s dwwhoLoadErr=%s", tostring(kit and kit._bootReadyEmitted), tostring(kit and kit._dwwhoLoadError))) end',
+                note = "Init DWKit (single-line). Expect dwwhoLoadErr=nil (or empty) on a healthy install.",
+            },
+            { cmd = "dwwho watch status", note = "Expect enabled=true without running dwwho watch on." },
+            { cmd = "who",                delay = 0.90,                                                note = "Manual WHO should be captured as dwwho:auto (watcher default-on)." },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.whostore_service"); local st=S.getState(); if st.lastUpdatedTs==nil then error("Expected WhoStore lastUpdatedTs after manual who") end; if tostring(st.source)~="dwwho:auto" then error("Expected WhoStore source dwwho:auto after manual who; got "..tostring(st.source)) end; print(string.format("[dwverify-prereq] PASS WhoStore source=%s lastUpdatedTs=%s autoCaptureEnabled=%s", tostring(st.source), tostring(st.lastUpdatedTs), tostring(st.autoCaptureEnabled))) end',
+                note = "ASSERT: manual who ingested as dwwho:auto.",
+            },
+        },
+    },
+
+    -- NEW: prompt passive learning + drift acceptance (no auto-sending prompt)
+    prompt_passive_learn = {
+        title = "prompt_passive_learn",
+        description =
+        "PromptDetector passive learning: resetAll (clears stored prompt spec), then feed rendered prompt sequences 3x to satisfy drift threshold; assert configured=true and sequence match works. SAFE; no gameplay sends.",
+        delay = 0.35,
+        steps = {
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.prompt_detector_service"); P.resetAll(); local st=P.getStatus(); print(string.format("[dwverify-prompt] reset configured=%s source=%s renderedSig=%s baselineRegexCount=%s", tostring(st.configured), tostring(st.source), tostring(st.renderedSig), tostring(st.baselineRegexCount))) end',
+                note = "Reset PromptDetector to an unconfigured baseline.",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.prompt_detector_service"); local seq={"<812hp 100mp 83mv>"}; local c1,r1=P.noteRenderedPromptSequence(seq,{source="dwverify:rendered"}); local c2,r2=P.noteRenderedPromptSequence(seq,{source="dwverify:rendered"}); local c3,r3=P.noteRenderedPromptSequence(seq,{source="dwverify:rendered"}); print(string.format("[dwverify-prompt] rendered note changed1=%s r1=%s changed2=%s r2=%s changed3=%s r3=%s", tostring(c1), tostring(r1), tostring(c2), tostring(r2), tostring(c3), tostring(r3))) end',
+                note = "Feed the same rendered prompt sequence 3 times (meets acceptAfter=3).",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.prompt_detector_service"); local st=P.getStatus(); if st.configured~=true then error("Expected configured=true after rendered learn") end; if tostring(st.renderedSig or "")=="" then error("Expected renderedSig non-empty after rendered learn") end; if tonumber(st.baselineRegexCount or 0) < 2 then error("Expected baselineRegexCount>=2 (baseline heuristics always-on); got "..tostring(st.baselineRegexCount)) end; local ok=P.isPromptSequence({P.normalizeLine("noise line"), P.normalizeLine("<812hp 100mp 83mv>")}); if ok~=true then error("Expected isPromptSequence true for tail ending with learned prompt") end; print(string.format("[dwverify-prompt] PASS configured=%s renderedSig=%s baselineRegexCount=%s", tostring(st.configured), tostring(st.renderedSig), tostring(st.baselineRegexCount))) end',
+                note = "ASSERT: configured=true and prompt sequence detection works on a tail buffer.",
+            },
+        },
+    },
+
+    -- NEW: rendered learn must NOT break other live prompt formats (e.g. Opp/Tank + Hp/Mp/Mv>)
+    roomfeed_prompt_mixed_after_rendered_learn = {
+        title = "roomfeed_prompt_mixed_after_rendered_learn",
+        description =
+        "Regression: learn rendered '<...>' prompt, then run look and ASSERT roomfeed finalizes (lastOkTs non-nil). This catches the case where rendered learning breaks other prompt styles. SAFE; only gameplay send is 'look'.",
+        delay = 0.40,
+        steps = {
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.prompt_detector_service"); P.resetAll(); local seq={"<812hp 100mp 83mv>"}; P.noteRenderedPromptSequence(seq,{source="dwverify:rendered"}); P.noteRenderedPromptSequence(seq,{source="dwverify:rendered"}); local c3,r3=P.noteRenderedPromptSequence(seq,{source="dwverify:rendered"}); local st=P.getStatus(); print(string.format("[dwverify-mixed] learned changed3=%s r3=%s configured=%s renderedSig=%s baselineRegexCount=%s", tostring(c3), tostring(r3), tostring(st.configured), tostring(st.renderedSig), tostring(st.baselineRegexCount))) end',
+                note =
+                "Precondition: seed rendered prompt learn (acceptAfter=3). Baseline heuristics must remain active.",
+            },
+            { cmd = "dwroom watch off", note = "Ensure clean start: remove passive capture trigger." },
+            { cmd = "dwroom watch on",  note = "Install roomfeed passive capture trigger." },
+            { cmd = "look",             delay = 1.80,                                                note = "Trigger look output and wait for prompt finalize (regardless of live prompt style)." },
+            {
+                cmd =
+                'lua do local C=require("dwkit.capture.roomfeed_capture"); local s=C.getDebugState(); if s.lastOkTs==nil then error("Expected lastOkTs non-nil after look finalize; stillCapturing="..tostring(s.snapCapturing).." hasExits="..tostring(s.snapHasExits).." bufLen="..tostring(s.snapBufLen).." tailLen="..tostring(s.promptTailLen).." lastLine="..tostring(s.lastLineSeenClean).." abort="..tostring(s.lastAbortReason)) end; if tostring(s.lastAbortReason or "")=="abort:max_lines" then error("Unexpected abort:max_lines; prompt finalize did not trigger") end; print(string.format("[dwverify-mixed] PASS okTs=%s abort=%s bufLen=%s lastLine=%s", tostring(s.lastOkTs), tostring(s.lastAbortReason), tostring(s.snapBufLen), tostring(s.lastLineSeenClean))) end',
+                note = "ASSERT: roomfeed finalized (lastOkTs set) and did not abort.",
+            },
         },
     },
 
