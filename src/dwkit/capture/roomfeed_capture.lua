@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.capture.roomfeed_capture
 -- Owner       : Capture
--- Version     : v2026-02-25E
+-- Version     : v2026-02-26A
 -- Purpose     :
 --   - Passive capture of room output blocks (movement room header, look output)
 --     without GMCP and without sending any commands.
@@ -92,6 +92,13 @@
 --       * do NOT append prompt-line candidates into snapBuf
 --       * treat prompt-line candidates as prompt noise for header/title detection
 --
+-- Feb 2026 fix (v2026-02-26A):
+--   - Mixed prompt hardening:
+--       * PromptDetector may learn rendered "<...>" but live prompt may be different (e.g. Opp/Tank + Hp/Mp/Mv>).
+--       * PromptDetector v2026-02-26B keeps baseline prompt heuristics always-on, so isPromptSequence can still hit.
+--       * Additionally, on prompt-sequence finalize, we drop a likely "prompt prelude" line (short ":" layout)
+--         from snapBuf if it was captured as part of room output, to prevent polluting ingestion.
+--
 -- Public API  :
 --   - getVersion() -> string
 --   - isInstalled() -> boolean
@@ -100,7 +107,7 @@
 --   - status(opts?) -> table state  (also prints unless opts.quiet=true)
 --
 -- Compatibility (for dwroom.lua that is already applied):
---   - getDebugState() -> table (alias of status({quiet=true}) with extra keys)
+--   - getDebugState() -> table (alias of status({quiet=true})) with extra keys)
 --
 -- Verification/Test API (safe; no MUD sends):
 --   - _testIngestSnapshot(bufLinesRaw, opts?) -> boolean ok, string|nil err
@@ -119,7 +126,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-25E"
+M.VERSION = "v2026-02-26A"
 
 local function _nowTs()
     return os.time()
@@ -733,6 +740,25 @@ local function _ingestSnapshot(buf, ts, meta)
     end
 end
 
+-- Generic heuristic to identify a short "prompt prelude" line that should not be ingested
+-- as part of room snapshot content when a prompt sequence finalizes.
+local function _isLikelyPromptPreludeLine(lnClean)
+    local t = _trim(tostring(lnClean or ""))
+    if t == "" then return false end
+    if #t > 44 then return false end
+    if t:find("%.", 1, true) then return false end
+    if t:match("^%[") then return false end
+    if _isExitsLine(t) then return false end
+    if _isExitEntryLine(t) then return false end
+
+    -- Require a ":" marker, and either "/" (often a compact status layout) or trailing ":".
+    if t:find(":", 1, true) == nil then return false end
+    if t:find("/", 1, true) ~= nil then return true end
+    if t:sub(-1) == ":" then return true end
+
+    return false
+end
+
 local function _finalizeSnap()
     local buf = ROOT.snapBuf
     local hasExits = (ROOT.snapHasExits == true)
@@ -912,6 +938,15 @@ function M.install(opts)
                 end
 
                 if PromptSvc.isPromptSequence(ROOT.promptTailCleanBuf) then
+                    -- v2026-02-26A: drop likely prompt-prelude line if it got captured as snapshot content
+                    local lastRaw = (type(ROOT.snapBuf) == "table") and ROOT.snapBuf[#ROOT.snapBuf] or nil
+                    if type(lastRaw) == "string" and lastRaw ~= "" then
+                        local lastClean = _trim(_cleanLine(lastRaw))
+                        if _isLikelyPromptPreludeLine(lastClean) then
+                            table.remove(ROOT.snapBuf, #ROOT.snapBuf)
+                        end
+                    end
+
                     ROOT.promptTailCleanBuf = {}
                     _finalizeSnap()
                     return

@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-02-03C
+-- Version     : v2026-02-26A
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -295,7 +295,7 @@ function Loader.init()
             DWKit._whoStoreServiceLoadError = tostring(whoOrErr)
         end
 
-        -- PromptDetector (SAFE passive capture): learns from MUD 'prompt' output and provides
+        -- PromptDetector (SAFE passive capture): learns from rendered prompt output and provides
         -- prompt sequence detection for passive captures (eg roomfeed_capture finalize).
         local okPrompt, promptOrErr = pcall(require, "dwkit.services.prompt_detector_service")
         if okPrompt and type(promptOrErr) == "table" then
@@ -304,6 +304,22 @@ function Loader.init()
         else
             DWKit.services.promptDetectorService = nil
             DWKit._promptDetectorServiceLoadError = tostring(promptOrErr)
+        end
+
+        -- WHO watcher default-on (PASSIVE capture; no gameplay sends):
+        -- Ensure dwwho handler module is loaded during init so its watcher autostart runs
+        -- (manual `who` should populate WhoStore without requiring `dwwho watch on`).
+        do
+            local okDwwho, dwwhoOrErr = pcall(require, "dwkit.commands.dwwho")
+            if okDwwho and type(dwwhoOrErr) == "table" then
+                DWKit.commands = DWKit.commands or {}
+                DWKit.commands.dwwho = dwwhoOrErr
+                DWKit._dwwhoLoadError = nil
+            else
+                DWKit.commands = DWKit.commands or {}
+                DWKit.commands.dwwho = nil
+                DWKit._dwwhoLoadError = tostring(dwwhoOrErr)
+            end
         end
     end
 

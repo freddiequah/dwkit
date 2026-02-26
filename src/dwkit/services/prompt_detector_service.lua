@@ -1,13 +1,23 @@
 -- #########################################################################
 -- Module Name : dwkit.services.prompt_detector_service
 -- Owner       : Services
--- Version     : v2026-02-25I
+-- Version     : v2026-02-26B
 -- Purpose     :
 --   - Maintain per-profile prompt detection configuration for passive capture.
---   - Learn and persist the current MUD prompt spec when the user runs 'prompt'.
+--   - Learn and persist prompt config from:
+--       (A) 'prompt' command output ("Your prompt is currently: ...")  [manual]
+--       (B) rendered prompt sequences observed passively in normal output  [passive]
 --   - Provide prompt detection helpers for capture modules (eg roomfeed_capture).
 -- Does NOT:
 --   - Send any MUD commands (manual commands do that via command handlers).
+--
+-- Key behavior (v2026-02-26B):
+--   - Baseline prompt heuristics are ALWAYS active, even if renderedSig/spec is learned.
+--   - isPromptSequence() succeeds if ANY of:
+--       * promptSpec-derived multi-line sequence matches
+--       * rendered-learned multi-line sequence matches
+--       * single-line baseline prompt line matches (eg Hp/Mp/Mv> style)
+--   - This prevents a learned "<...>" signature from breaking other prompt styles.
 --
 -- Public API:
 --   - getStatus(opts?) -> table
@@ -17,17 +27,21 @@
 --   - isPromptLineCandidate(lineClean) -> boolean
 --   - isPromptSequence(tailLinesClean) -> boolean
 --   - notePromptSpecFromOutput(specText, meta) -> boolean changed, string reason|nil
+--   - noteRenderedPromptSequence(linesCleanOrRaw, meta) -> boolean changed, string reason|nil
 --   - addUserRegex(pat) -> boolean ok, string err|nil
 --   - setUserRegexes(list) -> boolean ok, string err|nil
 --   - clearUserRegexes() -> boolean ok
 --   - resetAll() -> boolean ok
+--
 -- Events Emitted:
 --   - (optional) DWKit:Service:PromptDetector:Updated (best-effort; not required by current consumers)
 -- Events Consumed:
 --   - None (passive triggers are internal; no bus subscription required)
 -- Persistence:
 --   - File: <profile>/dwkit_prompt_spec.lua
---   - Schema: promptSpec.v1 { ts, promptSpecRaw, userRegexes, derivedRegexes, lineCountMin, lineCountMax }
+--   - Schema: promptSpec.v1
+--       { ts, promptSpecRaw, userRegexes, derivedRegexes, lineCountMin, lineCountMax,
+--         renderedSig?, renderedSample? }  -- rendered* are optional extensions
 -- Automation Policy:
 --   - Passive capture only (trigger observes output; no timers; no sends).
 -- Dependencies:
@@ -35,7 +49,7 @@
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-02-25I"
+M.VERSION = "v2026-02-26B"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -47,10 +61,30 @@ local _state = {
         ts = nil,
         source = nil,
         promptSpecRaw = nil, -- string (may include newlines if wrapped)
+
+        -- Rendered prompt passive-learning (no 'prompt' command required):
+        renderedSig = nil,   -- string signature derived from rendered prompt sequence
+        renderedSample = {}, -- last accepted rendered prompt lines (normalized)
+
+        -- Primary bounds (for status/debug). Multi-profile matching uses its own bounds.
         lineCountMin = 0,
         lineCountMax = 0,
-        userRegexes = {},    -- list of lua patterns (strings)
-        derivedRegexes = {}, -- list of lua patterns (strings)
+
+        -- Bounds per profile:
+        specLineCountMin = 0,
+        specLineCountMax = 0,
+        renderedLineCount = 0,
+
+        -- User patterns (single-line candidates)
+        userRegexes = {},
+
+        -- Derived patterns:
+        --   derivedRegexes: from promptSpecRaw (ordered sequence)
+        --   renderedRegexes: from renderedSample (ordered sequence)
+        --   baselineRegexes: always-on heuristics (single-line)
+        derivedRegexes = {},
+        renderedRegexes = {},
+        baselineRegexes = {},
     },
 
     persist = {
@@ -65,6 +99,23 @@ local _state = {
         installed = false,
         triggerId = nil,
         lastErr = nil,
+    },
+
+    -- Passive rendered-prompt drift detector (no gameplay sends):
+    renderedWatch = {
+        enabled = true,
+        installed = false,
+        triggerId = nil,
+        lastErr = nil,
+
+        tailMax = 10,
+        tail = {},
+
+        pendingSig = nil,
+        pendingCount = 0,
+        acceptAfter = 3, -- require N matching sequences before accepting drift
+        lastSeenSig = nil,
+        lastSeenTs = nil,
     },
 }
 
@@ -85,7 +136,6 @@ end
 
 local function _collapseSpaces(s)
     s = tostring(s or "")
-    -- collapse internal runs of whitespace
     s = s:gsub("%s+", " ")
     return _trim(s)
 end
@@ -93,11 +143,8 @@ end
 local function _stripAnsi(s)
     s = tostring(s or "")
     s = s:gsub("\r", "")
-    -- OSC sequences: ESC ] ... BEL
     s = s:gsub("\27%][^\7]*\7", "")
-    -- CSI sequences: ESC [ ... letter
     s = s:gsub("\27%[[0-9;]*[%a]", "")
-    -- bare ESC
     s = s:gsub("\27", "")
     return s
 end
@@ -108,8 +155,6 @@ local function _isWindows()
 end
 
 local function _escapeLuaPatternForGsubLiteral(s)
-    -- Escape pattern magic so gsub treats s as literal.
-    -- magic: ( ) . % + - * ? [ ^ $
     s = tostring(s or "")
     s = s:gsub("%%", "%%%%")
     s = s:gsub("%(", "%%(")
@@ -138,7 +183,6 @@ local function _normalizeProfileDir(dir)
     dir = tostring(dir or "")
     if dir == "" then return dir end
 
-    -- Normalize slashes (Mudlet often uses / even on Windows; keep /)
     dir = dir:gsub("\\", "/")
 
     local profile = nil
@@ -149,7 +193,6 @@ local function _normalizeProfileDir(dir)
         end
     end
 
-    -- Collapse any repeated /profiles/<name>/profiles/<name> sequences (repeat until stable)
     if profile and profile ~= "" then
         local needle = "/profiles/" .. profile .. "/profiles/" .. profile
         local repl = "/profiles/" .. profile
@@ -161,9 +204,7 @@ local function _normalizeProfileDir(dir)
         end
     end
 
-    -- Trim trailing slash
     dir = dir:gsub("/+$", "")
-
     return dir
 end
 
@@ -196,7 +237,7 @@ local function _getPersistPathBestEffort()
     end
     dir = _normalizeProfileDir(dir)
     local path = tostring(dir) .. "/" .. tostring(_state.persist.fileName)
-    path = _normalizeProfileDir(path) -- defensive: also collapses dup profiles if present
+    path = _normalizeProfileDir(path)
     return path, nil
 end
 
@@ -232,7 +273,6 @@ local function _ensureDirBestEffort(dir)
     dir = dir:gsub("\\", "/")
     dir = dir:gsub("/+$", "")
 
-    -- Try LuaFileSystem if present
     local okL, lfs = pcall(require, "lfs")
     if okL and type(lfs) == "table" and type(lfs.mkdir) == "function" then
         local function exists(p)
@@ -247,10 +287,9 @@ local function _ensureDirBestEffort(dir)
         local prefix = ""
         local remainder = dir
 
-        -- Windows drive style: C:/...
         if remainder:match("^%a%:/") then
-            prefix = remainder:sub(1, 3) -- "C:/"
-            remainder = remainder:sub(4) -- after "C:/"
+            prefix = remainder:sub(1, 3)
+            remainder = remainder:sub(4)
         elseif remainder:sub(1, 1) == "/" then
             prefix = "/"
             remainder = remainder:sub(2)
@@ -277,7 +316,6 @@ local function _ensureDirBestEffort(dir)
         return false, "lfs mkdir failed"
     end
 
-    -- Fallback to os.execute
     local cmd = nil
     if _isWindows() then
         cmd = 'mkdir "' .. dir:gsub("/", "\\") .. '"'
@@ -302,7 +340,6 @@ local function _persistSaveBestEffort(meta)
         return false, _state.persist.lastSaveErr
     end
 
-    -- Ensure parent directory exists (best-effort)
     local parent = path:match("^(.*)/[^/]+$")
     if parent and parent ~= "" then
         local okDir, dirErr = _ensureDirBestEffort(parent)
@@ -320,6 +357,17 @@ local function _persistSaveBestEffort(meta)
     lines[#lines + 1] = "  ts = " .. tostring(p.ts or "nil") .. ","
     lines[#lines + 1] = "  source = " .. _quoteLuaString(p.source or "") .. ","
     lines[#lines + 1] = "  promptSpecRaw = " .. _quoteLuaString(p.promptSpecRaw or "") .. ","
+    lines[#lines + 1] = "  renderedSig = " .. _quoteLuaString(p.renderedSig or "") .. ","
+
+    do
+        local rs = (type(p.renderedSample) == "table") and p.renderedSample or {}
+        lines[#lines + 1] = "  renderedSample = {"
+        for i = 1, #rs do
+            lines[#lines + 1] = "    " .. _quoteLuaString(rs[i] or "") .. ","
+        end
+        lines[#lines + 1] = "  },"
+    end
+
     lines[#lines + 1] = "  lineCountMin = " .. tostring(p.lineCountMin or 0) .. ","
     lines[#lines + 1] = "  lineCountMax = " .. tostring(p.lineCountMax or 0) .. ","
 
@@ -334,6 +382,8 @@ local function _persistSaveBestEffort(meta)
 
     _serializeList("userRegexes", p.userRegexes)
     _serializeList("derivedRegexes", p.derivedRegexes)
+
+    -- NOTE: baseline/rendered regexes are derived; we don't persist them to keep schema stable.
 
     lines[#lines + 1] = "}"
     lines[#lines + 1] = ""
@@ -368,7 +418,6 @@ local function _persistLoadBestEffort()
     end)
 
     if not ok then
-        -- first-run is OK (file missing); only record real parse errors
         local msg = tostring(data or "")
         if msg:find("No such file", 1, true) or msg:find("cannot open", 1, true) then
             _state.persist.lastLoadErr = nil
@@ -395,6 +444,11 @@ local function _persistLoadBestEffort()
     p.source = tostring(data.source or "")
     local raw = tostring(data.promptSpecRaw or "")
     p.promptSpecRaw = (raw ~= "") and raw or nil
+
+    local rsig = tostring(data.renderedSig or "")
+    p.renderedSig = (rsig ~= "") and rsig or nil
+    p.renderedSample = (type(data.renderedSample) == "table") and data.renderedSample or {}
+
     p.lineCountMin = tonumber(data.lineCountMin or 0) or 0
     p.lineCountMax = tonumber(data.lineCountMax or 0) or 0
     p.userRegexes = (type(data.userRegexes) == "table") and data.userRegexes or {}
@@ -406,7 +460,6 @@ end
 
 local function _escapeLuaPatternLiteral(s)
     s = tostring(s or "")
-    -- Escape Lua pattern magic characters: ( ) . % + - * ? [ ^ $
     s = s:gsub("%%", "%%%%")
     s = s:gsub("%(", "%%(")
     s = s:gsub("%)", "%%)")
@@ -423,19 +476,14 @@ local function _escapeLuaPatternLiteral(s)
 end
 
 local function _removePromptColorCodes(spec)
-    -- Deathwish prompt color codes are &<letter> and &n etc. They do not appear literally in rendered prompt.
     spec = tostring(spec or "")
     spec = spec:gsub("&[%a]", "")
     return spec
 end
 
 local function _stripConditionals(spec)
-    -- Remove %C<arg> and %C end markers for pattern derivation (best-effort).
-    -- Keep the inner literal/text; conditionals will be handled via min/max line matching.
     spec = tostring(spec or "")
-    -- remove %C<arg>
-    spec = spec:gsub("%%C[%a]", "%%C") -- normalize
-    -- remove all %C tokens (both start and end)
+    spec = spec:gsub("%%C[%a]", "%%C")
     spec = spec:gsub("%%C", "")
     return spec
 end
@@ -450,7 +498,6 @@ local function _deriveLineCountBoundsFromSpec(specRaw)
     local maxLines = rCount + 1
 
     if hasConditional and rCount > 0 then
-        -- If %r might be conditional, allow fewer lines (best-effort).
         minLines = 1
         maxLines = rCount + 1
     end
@@ -463,18 +510,12 @@ local function _patternForPromptSpecLine(lineSpec)
     spec = _removePromptColorCodes(spec)
     spec = _stripConditionals(spec)
 
-    -- Escape literal text first
     spec = _escapeLuaPatternLiteral(spec)
 
-    -- Replace known prompt codes with broad matches.
-    -- IMPORTANT:
-    --   string.gsub replacement strings treat %1..%9 as capture references.
-    --   Therefore, any literal '%' we want in the RESULTING pattern must be escaped as '%%' here.
     local function rep(code, patReplacement)
         spec = spec:gsub("%%%%" .. code, patReplacement)
     end
 
-    -- Numeric-ish (result patterns must contain %d etc; escape % in replacement strings)
     rep("h", "(%%d+)")
     rep("H", "(%%d+)")
     rep("m", "(%%d+)")
@@ -487,90 +528,163 @@ local function _patternForPromptSpecLine(lineSpec)
     rep("X", "(%%d+)")
     rep("g", "(%%d+)")
 
-    -- Time codes (loose)
     rep("z", ".*")
     rep("D", ".*")
 
-    -- Combat/assist fields are free-form
     rep("o", ".*")
     rep("t", ".*")
     rep("T", ".*")
 
-    -- Newline marker removed by split; keep loose if any remain
     rep("r", ".*")
 
-    -- Any remaining %<letter> treat loosely
     spec = spec:gsub("%%%%[%a]", ".*")
 
-    -- Collapse spaces in pattern to allow flexible whitespace.
-    -- IMPORTANT: replacement must be '%%s*' so result contains '%s*' in the pattern.
     spec = spec:gsub("%s+", "%%s*")
 
     return "^%s*" .. spec .. "%s*$"
 end
 
-local function _rebuildDerivedRegexes(reason)
+local function _patternFromRenderedLine(lineClean)
+    local s = tostring(lineClean or "")
+    s = s:gsub("\r", "")
+    s = _trim(s)
+    if s == "" then return nil end
+
+    s = _escapeLuaPatternLiteral(s)
+    s = s:gsub("%d+", "%%d+")
+    s = s:gsub("%s+", "%%s*")
+
+    return "^%s*" .. s .. "%s*$"
+end
+
+local function _renderedSigFromLines(linesClean)
+    linesClean = (type(linesClean) == "table") and linesClean or {}
+    local parts = {}
+    for i = 1, #linesClean do
+        local ln = _collapseSpaces(_trim(tostring(linesClean[i] or "")))
+        if ln ~= "" then
+            ln = ln:gsub("%d+", "<N>")
+            ln = ln:gsub("%s+", " ")
+            parts[#parts + 1] = ln
+        end
+    end
+    if #parts == 0 then return "" end
+    return table.concat(parts, " | ")
+end
+
+local function _rebuildBaselineRegexes()
+    local p = _state.promptSpec
+    p.baselineRegexes = {}
+
+    -- Baseline prompt heuristics (always on):
+    --  - <...> prompts (common)
+    --  - Hp/Mp/Mv> style prompts (includes digits + parenthesized max, flexible text before it)
+    p.baselineRegexes[#p.baselineRegexes + 1] = "^%s*%b<>%s*$"
+    p.baselineRegexes[#p.baselineRegexes + 1] = "^%s*.*%d+%(%d+%)Hp%s+%d+%(%d+%)Mp%s+%d+%(%d+%)Mv>%s*$"
+end
+
+local function _rebuildSpecDerivedRegexes()
     local p = _state.promptSpec
     p.derivedRegexes = {}
+    p.specLineCountMin = 0
+    p.specLineCountMax = 0
 
-    -- If prompt spec known, derive patterns from it (possibly multi-line)
-    if type(p.promptSpecRaw) == "string" and p.promptSpecRaw ~= "" then
-        local spec = p.promptSpecRaw
-        spec = spec:gsub("\r", "")
-        -- Use the spec string (may include wrapped newlines); we only care about %r tokens
-        local minL, maxL = _deriveLineCountBoundsFromSpec(spec)
-        p.lineCountMin = minL
-        p.lineCountMax = maxL
-
-        local collapsed = spec:gsub("\n", " ")
-        local parts = {}
-        local last = 1
-
-        -- FIX v2026-02-25H:
-        -- We are using plain=true, so we must search for literal "%r" (not "%%r").
-        local needle = "%r"
-
-        while true do
-            local s1, e1 = collapsed:find(needle, last, true)
-            if not s1 then
-                parts[#parts + 1] = collapsed:sub(last)
-                break
-            end
-            parts[#parts + 1] = collapsed:sub(last, s1 - 1)
-            last = e1 + 1
-        end
-
-        for i = 1, #parts do
-            local pat = _patternForPromptSpecLine(_trim(parts[i]))
-            if pat and pat ~= "" then
-                p.derivedRegexes[#p.derivedRegexes + 1] = pat
-            end
-        end
-
-        if #p.derivedRegexes == 0 then
-            p.derivedRegexes = {}
-        end
+    if type(p.promptSpecRaw) ~= "string" or p.promptSpecRaw == "" then
         return
     end
 
-    -- Fallback heuristics (broad) for unknown prompt
-    -- Covers:
-    --   <...hp...mp...mv...>
-    --   Opp: ... 514(514)Hp ... Mv>
+    local spec = p.promptSpecRaw:gsub("\r", "")
+    local minL, maxL = _deriveLineCountBoundsFromSpec(spec)
+    p.specLineCountMin = minL
+    p.specLineCountMax = maxL
+
+    local collapsed = spec:gsub("\n", " ")
+    local parts = {}
+    local last = 1
+    local needle = "%r"
+
+    while true do
+        local s1, e1 = collapsed:find(needle, last, true)
+        if not s1 then
+            parts[#parts + 1] = collapsed:sub(last)
+            break
+        end
+        parts[#parts + 1] = collapsed:sub(last, s1 - 1)
+        last = e1 + 1
+    end
+
+    for i = 1, #parts do
+        local pat = _patternForPromptSpecLine(_trim(parts[i]))
+        if pat and pat ~= "" then
+            p.derivedRegexes[#p.derivedRegexes + 1] = pat
+        end
+    end
+
+    if #p.derivedRegexes == 0 then
+        p.derivedRegexes = {}
+        p.specLineCountMin = 0
+        p.specLineCountMax = 0
+    end
+end
+
+local function _rebuildRenderedRegexes()
+    local p = _state.promptSpec
+    p.renderedRegexes = {}
+    p.renderedLineCount = 0
+
+    if type(p.renderedSig) ~= "string" or p.renderedSig == "" then
+        return
+    end
+    if type(p.renderedSample) ~= "table" or #p.renderedSample == 0 then
+        return
+    end
+
+    p.renderedLineCount = #p.renderedSample
+    for i = 1, #p.renderedSample do
+        local pat = _patternFromRenderedLine(p.renderedSample[i])
+        if pat and pat ~= "" then
+            p.renderedRegexes[#p.renderedRegexes + 1] = pat
+        end
+    end
+
+    if #p.renderedRegexes == 0 then
+        p.renderedRegexes = {}
+        p.renderedLineCount = 0
+    end
+end
+
+local function _recomputePrimaryBounds()
+    local p = _state.promptSpec
+
+    if type(p.promptSpecRaw) == "string" and p.promptSpecRaw ~= "" and #p.derivedRegexes > 0 then
+        p.lineCountMin = tonumber(p.specLineCountMin or 1) or 1
+        p.lineCountMax = tonumber(p.specLineCountMax or p.lineCountMin) or p.lineCountMin
+        return
+    end
+
+    if type(p.renderedSig) == "string" and p.renderedSig ~= "" and #p.renderedRegexes > 0 then
+        p.lineCountMin = tonumber(p.renderedLineCount or 1) or 1
+        p.lineCountMax = tonumber(p.renderedLineCount or p.lineCountMin) or p.lineCountMin
+        return
+    end
+
     p.lineCountMin = 1
     p.lineCountMax = 1
-    p.derivedRegexes[#p.derivedRegexes + 1] = "^%s*%b<>%s*$"
-    p.derivedRegexes[#p.derivedRegexes + 1] = "^%s*.*%d+%(%d+%)Hp%s+%d+%(%d+%)Mp%s+%d+%(%d+%)Mv>%s*$"
+end
 
+local function _rebuildDerivedRegexes(reason)
+    _rebuildBaselineRegexes()
+    _rebuildSpecDerivedRegexes()
+    _rebuildRenderedRegexes()
+    _recomputePrimaryBounds()
     if reason then
-        -- no output; reason kept for caller
+        -- no output
     end
 end
 
 local function _normalizeForCompare(specText)
     specText = tostring(specText or "")
     specText = specText:gsub("\r", "")
-    -- Preserve newlines only as separators, but normalize whitespace
     specText = specText:gsub("\n", " ")
     specText = _collapseSpaces(specText)
     return specText
@@ -587,7 +701,9 @@ function M.isConfigured()
     if type(p.promptSpecRaw) == "string" and p.promptSpecRaw ~= "" then
         return true
     end
-    -- Even if prompt spec unknown, we still have fallback derived regexes
+    if type(p.renderedSig) == "string" and p.renderedSig ~= "" then
+        return true
+    end
     return false
 end
 
@@ -605,6 +721,8 @@ local function _allRegexes()
 
     addAll(p.userRegexes)
     addAll(p.derivedRegexes)
+    addAll(p.renderedRegexes)
+    addAll(p.baselineRegexes)
 
     return out
 end
@@ -614,10 +732,19 @@ function M.getDebugRegexes()
     return {
         userRegexes = (type(p.userRegexes) == "table") and p.userRegexes or {},
         derivedRegexes = (type(p.derivedRegexes) == "table") and p.derivedRegexes or {},
+        renderedRegexes = (type(p.renderedRegexes) == "table") and p.renderedRegexes or {},
+        baselineRegexes = (type(p.baselineRegexes) == "table") and p.baselineRegexes or {},
         allRegexes = _allRegexes(),
+
         lineCountMin = tonumber(p.lineCountMin or 0) or 0,
         lineCountMax = tonumber(p.lineCountMax or 0) or 0,
+        specLineCountMin = tonumber(p.specLineCountMin or 0) or 0,
+        specLineCountMax = tonumber(p.specLineCountMax or 0) or 0,
+        renderedLineCount = tonumber(p.renderedLineCount or 0) or 0,
+
         promptSpecRaw = p.promptSpecRaw,
+        renderedSig = p.renderedSig,
+        renderedSample = (type(p.renderedSample) == "table") and p.renderedSample or {},
         source = p.source,
         ts = p.ts,
     }
@@ -627,7 +754,6 @@ function M.isPromptLineCandidate(lineClean)
     local ln = tostring(lineClean or "")
     if ln == "" then return false end
 
-    -- If it looks like the MUD 'Your prompt is currently:' line, do not treat as rendered prompt.
     if ln:find("Your prompt is currently:", 1, true) then
         return false
     end
@@ -646,34 +772,31 @@ function M.isPromptLineCandidate(lineClean)
     return false
 end
 
-function M.isPromptSequence(tailLinesClean)
+local function _matchesSequenceOrdered(tailLinesClean, regexes, minL, maxL)
     tailLinesClean = (type(tailLinesClean) == "table") and tailLinesClean or {}
-    local p = _state.promptSpec
+    regexes = (type(regexes) == "table") and regexes or {}
 
-    local minL = tonumber(p.lineCountMin or 0) or 0
-    local maxL = tonumber(p.lineCountMax or 0) or 0
+    if #regexes == 0 then
+        return nil
+    end
 
+    minL = tonumber(minL or 0) or 0
+    maxL = tonumber(maxL or 0) or 0
     if minL <= 0 then minL = 1 end
     if maxL <= 0 then maxL = 1 end
     if maxL < minL then maxL = minL end
+    if maxL > #regexes then maxL = #regexes end
+    if minL > #regexes then return nil end
 
-    local regs = _allRegexes()
-    if #regs == 0 then
-        _rebuildDerivedRegexes("sequence:empty_regexes")
-        regs = _allRegexes()
-    end
-
-    -- Sequence match: last N lines must match the first N regexes (best-effort).
-    -- For conditional prompts, accept any N within [minL, maxL] that matches suffix.
     local function matchesN(n)
         if n <= 0 then return false end
         if #tailLinesClean < n then return false end
-        if #regs < n then return false end
+        if #regexes < n then return false end
 
         local startIdx = #tailLinesClean - n + 1
         for i = 1, n do
             local ln = tostring(tailLinesClean[startIdx + i - 1] or "")
-            local pat = tostring(regs[i] or "")
+            local pat = tostring(regexes[i] or "")
             if pat == "" then return false end
             if ln:match(pat) == nil then
                 return false
@@ -684,11 +807,80 @@ function M.isPromptSequence(tailLinesClean)
 
     for n = maxL, minL, -1 do
         if matchesN(n) then
-            return true
+            return n
+        end
+    end
+
+    return nil
+end
+
+local function _matchesAnySingleLine(tailLinesClean, pats)
+    tailLinesClean = (type(tailLinesClean) == "table") and tailLinesClean or {}
+    pats = (type(pats) == "table") and pats or {}
+    if #tailLinesClean < 1 then return false end
+    local ln = tostring(tailLinesClean[#tailLinesClean] or "")
+    if ln == "" then return false end
+
+    for i = 1, #pats do
+        local pat = tostring(pats[i] or "")
+        if pat ~= "" then
+            local ok, m = pcall(function()
+                return (ln:match(pat) ~= nil)
+            end)
+            if ok and m then
+                return true
+            end
         end
     end
 
     return false
+end
+
+local function _matchPromptSequenceN(tailLinesClean)
+    local p = _state.promptSpec
+
+    -- Ensure regexes exist even if early boot
+    if type(p.baselineRegexes) ~= "table" or #p.baselineRegexes == 0 then
+        _rebuildDerivedRegexes("sequence:init_baseline")
+    end
+
+    -- A) Spec-derived multi-line sequence (strongest)
+    if type(p.promptSpecRaw) == "string" and p.promptSpecRaw ~= "" and type(p.derivedRegexes) == "table" and #p.derivedRegexes > 0 then
+        local nSpec = _matchesSequenceOrdered(tailLinesClean, p.derivedRegexes, p.specLineCountMin, p.specLineCountMax)
+        if nSpec then return nSpec end
+    end
+
+    -- B) Rendered-learned multi-line sequence
+    if type(p.renderedSig) == "string" and p.renderedSig ~= "" and type(p.renderedRegexes) == "table" and #p.renderedRegexes > 0 then
+        local nR = _matchesSequenceOrdered(tailLinesClean, p.renderedRegexes, p.renderedLineCount, p.renderedLineCount)
+        if nR then return nR end
+    end
+
+    -- C) Single-line fallback: last line matches baseline/user/spec/rendered prompt line candidates.
+    -- This is what allows "Opp/Tank" 2-line prompts to finalize on the Hp/Mp/Mv> line.
+    local singlePats = {}
+    local function add(list)
+        list = (type(list) == "table") and list or {}
+        for i = 1, #list do
+            local v = tostring(list[i] or "")
+            if v ~= "" then singlePats[#singlePats + 1] = v end
+        end
+    end
+    add(p.baselineRegexes)
+    add(p.userRegexes)
+    add(p.renderedRegexes)
+    add(p.derivedRegexes)
+
+    if _matchesAnySingleLine(tailLinesClean, singlePats) then
+        return 1
+    end
+
+    return nil
+end
+
+function M.isPromptSequence(tailLinesClean)
+    local n = _matchPromptSequenceN(tailLinesClean)
+    return (n ~= nil) and true or false
 end
 
 function M.addUserRegex(pat)
@@ -732,10 +924,25 @@ function M.resetAll()
     p.ts = nil
     p.source = nil
     p.promptSpecRaw = nil
+    p.renderedSig = nil
+    p.renderedSample = {}
+
     p.lineCountMin = 0
     p.lineCountMax = 0
+    p.specLineCountMin = 0
+    p.specLineCountMax = 0
+    p.renderedLineCount = 0
+
     p.userRegexes = {}
     p.derivedRegexes = {}
+    p.renderedRegexes = {}
+    p.baselineRegexes = {}
+
+    _state.renderedWatch.pendingSig = nil
+    _state.renderedWatch.pendingCount = 0
+    _state.renderedWatch.lastSeenSig = nil
+    _state.renderedWatch.lastSeenTs = nil
+
     _rebuildDerivedRegexes("resetAll")
     _persistSaveBestEffort({ source = "dwprompt:resetAll" })
     _emitUpdated({ source = "dwprompt:resetAll" })
@@ -764,7 +971,78 @@ function M.notePromptSpecFromOutput(specText, meta)
     p.ts = _nowTs()
     p.source = tostring(meta.source or "prompt_output")
 
+    _state.renderedWatch.pendingSig = nil
+    _state.renderedWatch.pendingCount = 0
+
     _rebuildDerivedRegexes("notePromptSpecFromOutput")
+
+    _persistSaveBestEffort({ source = p.source })
+    _emitUpdated({ source = p.source })
+
+    return true, "updated"
+end
+
+function M.noteRenderedPromptSequence(linesCleanOrRaw, meta)
+    meta = (type(meta) == "table") and meta or {}
+    linesCleanOrRaw = (type(linesCleanOrRaw) == "table") and linesCleanOrRaw or {}
+
+    local clean = {}
+    for i = 1, #linesCleanOrRaw do
+        local ln = tostring(linesCleanOrRaw[i] or "")
+        ln = M.normalizeLine(ln)
+        ln = _collapseSpaces(ln)
+        if ln ~= "" then
+            clean[#clean + 1] = ln
+        end
+    end
+
+    if #clean == 0 then
+        return false, "empty_rendered"
+    end
+
+    local sig = _renderedSigFromLines(clean)
+    sig = tostring(sig or "")
+    if sig == "" then
+        return false, "empty_sig"
+    end
+
+    local rw = _state.renderedWatch
+    rw.lastSeenSig = sig
+    rw.lastSeenTs = _nowTs()
+
+    local p = _state.promptSpec
+    local currentSig = tostring(p.renderedSig or "")
+
+    if currentSig ~= "" and currentSig == sig then
+        rw.pendingSig = nil
+        rw.pendingCount = 0
+        return false, "no_change"
+    end
+
+    if rw.pendingSig ~= sig then
+        rw.pendingSig = sig
+        rw.pendingCount = 1
+        return false, "pending(1)"
+    end
+
+    rw.pendingCount = (tonumber(rw.pendingCount or 0) or 0) + 1
+    local need = tonumber(rw.acceptAfter or 3) or 3
+    if need < 2 then need = 2 end
+    if need > 8 then need = 8 end
+
+    if rw.pendingCount < need then
+        return false, "pending(" .. tostring(rw.pendingCount) .. "/" .. tostring(need) .. ")"
+    end
+
+    p.renderedSig = sig
+    p.renderedSample = clean
+    p.ts = _nowTs()
+    p.source = tostring(meta.source or "rendered_output")
+
+    _rebuildDerivedRegexes("noteRenderedPromptSequence")
+
+    rw.pendingSig = nil
+    rw.pendingCount = 0
 
     _persistSaveBestEffort({ source = p.source })
     _emitUpdated({ source = p.source })
@@ -781,10 +1059,19 @@ function M.getStatus(opts)
         ts = p.ts,
         source = p.source,
         promptSpecRaw = p.promptSpecRaw,
+        renderedSig = p.renderedSig,
+        renderedSampleLines = (type(p.renderedSample) == "table") and #p.renderedSample or 0,
+
         lineCountMin = p.lineCountMin,
         lineCountMax = p.lineCountMax,
+        specLineCountMin = p.specLineCountMin,
+        specLineCountMax = p.specLineCountMax,
+        renderedLineCount = p.renderedLineCount,
+
         userRegexCount = (type(p.userRegexes) == "table") and #p.userRegexes or 0,
         derivedRegexCount = (type(p.derivedRegexes) == "table") and #p.derivedRegexes or 0,
+        renderedRegexCount = (type(p.renderedRegexes) == "table") and #p.renderedRegexes or 0,
+        baselineRegexCount = (type(p.baselineRegexes) == "table") and #p.baselineRegexes or 0,
 
         persist = {
             enabled = _state.persist.enabled,
@@ -799,20 +1086,31 @@ function M.getStatus(opts)
             triggerId = _state.watcher.triggerId,
             lastErr = _state.watcher.lastErr,
         },
+
+        renderedWatch = {
+            enabled = _state.renderedWatch.enabled,
+            installed = _state.renderedWatch.installed,
+            triggerId = _state.renderedWatch.triggerId,
+            lastErr = _state.renderedWatch.lastErr,
+            tailMax = _state.renderedWatch.tailMax,
+            pendingSig = _state.renderedWatch.pendingSig,
+            pendingCount = _state.renderedWatch.pendingCount,
+            acceptAfter = _state.renderedWatch.acceptAfter,
+            lastSeenSig = _state.renderedWatch.lastSeenSig,
+            lastSeenTs = _state.renderedWatch.lastSeenTs,
+        },
     }
 
     if opts.includeRegexes == true then
         out.userRegexes = (type(p.userRegexes) == "table") and p.userRegexes or {}
         out.derivedRegexes = (type(p.derivedRegexes) == "table") and p.derivedRegexes or {}
+        out.renderedRegexes = (type(p.renderedRegexes) == "table") and p.renderedRegexes or {}
+        out.baselineRegexes = (type(p.baselineRegexes) == "table") and p.baselineRegexes or {}
     end
 
     return out
 end
 
--- Passive watcher: learn prompt spec from MUD output when user runs 'prompt'.
--- IMPORTANT:
---   Use a broad line trigger + state machine (multi-line capable).
---   Do NOT rely on callback args (Mudlet provides line/matches globals).
 local function _installPromptSpecWatcher()
     if _state.watcher.installed == true then
         return true, nil
@@ -828,7 +1126,7 @@ local function _installPromptSpecWatcher()
     local bufLines = nil
     local capturing = false
     local capCount = 0
-    local CAP_MAX_LINES = 8
+    local CAP_MAX_LINES = 12
 
     _state.watcher.triggerId = tempRegexTrigger("^(.*)$", function()
         local raw = (type(_G.line) == "string") and _G.line or tostring(_G.line or "")
@@ -851,7 +1149,6 @@ local function _installPromptSpecWatcher()
             return
         end
 
-        -- capturing == true:
         capCount = capCount + 1
         if capCount > CAP_MAX_LINES then
             capturing = false
@@ -859,7 +1156,6 @@ local function _installPromptSpecWatcher()
             return
         end
 
-        -- Stop capture when the rendered prompt appears (do NOT include it in spec).
         if ln == "" or M.isPromptLineCandidate(ln) then
             local specText = ""
             if type(bufLines) == "table" and #bufLines > 0 then
@@ -881,7 +1177,6 @@ local function _installPromptSpecWatcher()
             return
         end
 
-        -- Continuation wrapped line: append
         if type(bufLines) ~= "table" then bufLines = {} end
         bufLines[#bufLines + 1] = ln
     end)
@@ -898,20 +1193,80 @@ local function _installPromptSpecWatcher()
     return true, nil
 end
 
-function M.init()
-    -- Load persisted state (best-effort)
-    _persistLoadBestEffort()
+local function _installRenderedPromptWatcher()
+    if _state.renderedWatch.installed == true then
+        return true, nil
+    end
+    if _state.renderedWatch.enabled ~= true then
+        return true, nil
+    end
+    if not _isFn("tempRegexTrigger") then
+        _state.renderedWatch.lastErr = "tempRegexTrigger unavailable"
+        return false, _state.renderedWatch.lastErr
+    end
 
-    -- Ensure derived regexes exist (even if prompt unknown)
-    _rebuildDerivedRegexes("init")
+    _state.renderedWatch.triggerId = tempRegexTrigger("^(.*)$", function()
+        local raw = (type(_G.line) == "string") and _G.line or tostring(_G.line or "")
+        local ln = M.normalizeLine(raw)
+        ln = _collapseSpaces(ln)
 
-    -- Install passive watcher
-    _installPromptSpecWatcher()
+        if ln == "" then
+            return
+        end
 
+        if ln:find("Your prompt is currently:", 1, true) then
+            return
+        end
+
+        local rw = _state.renderedWatch
+        rw.tail = (type(rw.tail) == "table") and rw.tail or {}
+        rw.tail[#rw.tail + 1] = ln
+
+        local maxN = tonumber(rw.tailMax or 10) or 10
+        if maxN < 4 then maxN = 4 end
+        if maxN > 24 then maxN = 24 end
+        while #rw.tail > maxN do
+            table.remove(rw.tail, 1)
+        end
+
+        if type(_state.promptSpec.baselineRegexes) ~= "table" or #_state.promptSpec.baselineRegexes == 0 then
+            _rebuildDerivedRegexes("renderedWatch:init_derived")
+        end
+
+        local n = _matchPromptSequenceN(rw.tail)
+        if not n then
+            return
+        end
+
+        local seq = {}
+        local startIdx = #rw.tail - n + 1
+        for i = 1, n do
+            seq[#seq + 1] = tostring(rw.tail[startIdx + i - 1] or "")
+        end
+
+        M.noteRenderedPromptSequence(seq, { source = "rendered_output" })
+    end)
+
+    if type(_state.renderedWatch.triggerId) ~= "number" then
+        _state.renderedWatch.lastErr = "failed to install tempRegexTrigger"
+        _state.renderedWatch.installed = false
+        _state.renderedWatch.triggerId = nil
+        return false, _state.renderedWatch.lastErr
+    end
+
+    _state.renderedWatch.installed = true
+    _state.renderedWatch.lastErr = nil
     return true, nil
 end
 
--- Init on require (safe best-effort; does not send any commands)
+function M.init()
+    _persistLoadBestEffort()
+    _rebuildDerivedRegexes("init")
+    _installPromptSpecWatcher()
+    _installRenderedPromptWatcher()
+    return true, nil
+end
+
 pcall(function() M.init() end)
 
 return M
