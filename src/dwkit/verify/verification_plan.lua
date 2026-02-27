@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-26F
+-- Version     : v2026-02-27A
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-26F"
+M.VERSION = "v2026-02-27A"
 
 local SUITES = {
     default = {
@@ -225,6 +225,36 @@ local SUITES = {
                 cmd =
                 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("presence_ui", true, {noSave=true}); gs.setVisible("presence_ui", true, {noSave=true}); local UI=require("dwkit.ui.presence_ui"); local ok,err=UI.apply({source="dwverify:presence_ui_roster"}); if ok==false then error("presence_ui.apply failed: "..tostring(err)) end; local s=UI.getState(); local lr=s.lastRender or {}; print(string.format("[dwverify-roster] presence_ui rows=%s my=%s myOnline=%s myOffline=%s other=%s", tostring(lr.rowCount), tostring(lr.myCount), tostring(lr.myOnlineCount), tostring(lr.myOfflineCount), tostring(lr.otherCount))) end',
                 note = "Show Presence UI and print counts (online/offline roster visible).",
+            },
+        },
+    },
+
+    roomentities_whostore_gate = {
+        title = "roomentities_whostore_gate",
+        description =
+        "RoomEntities WhoStore gate regression: seed WhoStore as players set-map, ingest titled room lines via roomfeed_capture._testIngestSnapshot (SAFE; no sends), and assert titled labels promote to players (not stuck in unknown).",
+        delay = 0.30,
+        steps = {
+            {
+                cmd =
+                'lua do local W=require("dwkit.services.whostore_service"); local ok1,err1=W.clear({source="dwverify:roomentities:whoclear"}); if ok1==false then error("WhoStore.clear failed: "..tostring(err1)) end; local ok2,err2=W.setState({players={Alpha=true,Beta=true}},{source="dwverify:roomentities:whoseed_players_set"}); if ok2==false then error("WhoStore.setState failed: "..tostring(err2)) end; local names=W.getAllNames(); print(string.format("[dwverify-roomentities] seeded WhoStore players-set names=%s count=%s", tostring(table.concat(names,",")), tostring(#names))) end',
+                note =
+                "Seed WhoStore using players set-map shape (this is the path that previously could not produce 'exact').",
+            },
+            {
+                cmd =
+                'lua do local R=require("dwkit.services.roomentities_service"); local ok,err=R.clear({source="dwverify:roomentities:clear",forceEmit=true}); if ok==false then error("RoomEntities.clear failed: "..tostring(err)) end; print("[dwverify-roomentities] cleared RoomEntities") end',
+                note = "Clear RoomEntities to a known baseline.",
+            },
+            {
+                cmd =
+                'lua do local C=require("dwkit.capture.roomfeed_capture"); local ok,err=C._testIngestSnapshot({"Some Room (#1) [ INDOORS ]","Alpha the adventurer is standing here.","Beta is standing here.","A small bulletin board designed for Quests is here.","Obvious exits:","North - Somewhere"},{hasExits=true,startKind="strong"}); if ok==false then error("roomfeed _testIngestSnapshot failed: "..tostring(err)) end; print("[dwverify-roomentities] ingested deterministic snapshot via roomfeed_capture") end',
+                note = "Ingest snapshot with titled + plain players and an object line.",
+            },
+            {
+                cmd =
+                'lua do local R=require("dwkit.services.roomentities_service"); local v=R.getSnapshotV2 and R.getSnapshotV2() or {}; local function cnt(t) local n=0; if type(t)=="table" then for _ in pairs(t) do n=n+1 end end; return n end; local function has(t,k) return (type(t)=="table" and t[k]~=nil) and true or false end; if cnt(v.players) < 2 then error("Expected at least 2 players in v2.players; got "..tostring(cnt(v.players))) end; if has(v.players,"Alpha the adventurer")~=true then error("Expected titled label in players: Alpha the adventurer") end; if has(v.players,"Beta")~=true then error("Expected Beta in players") end; if has(v.unknown,"A small bulletin board designed for Quests")~=true then error("Expected object line in unknown") end; print(string.format("[dwverify-roomentities] PASS v2.players=%s v2.unknown=%s", tostring(cnt(v.players)), tostring(cnt(v.unknown)))) end',
+                note = "ASSERT: titled label promotes to players; object remains unknown.",
             },
         },
     },
