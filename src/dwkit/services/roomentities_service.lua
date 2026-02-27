@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.roomentities_service
 -- Owner       : Services
--- Version     : v2026-02-26D
+-- Version     : v2026-02-27A
 -- Purpose     :
 --   - SAFE, profile-portable RoomEntitiesService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
@@ -30,11 +30,16 @@
 --
 -- NEW v2026-02-26D:
 --   - Add getSnapshotV2() helper for diagnostics compatibility (returns entitiesV2 copy).
+--
+-- FIX v2026-02-27A:
+--   - WhoStore state may expose online players as a set-map: wState.players = { ["Name"]=true }.
+--     That path must populate canonByLower so confidence gate can return "exact" (not only "candidate"),
+--     otherwise titled room labels (e.g., "Name the adventurer") can never promote to players.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-26D"
+M.VERSION = "v2026-02-27A"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -550,7 +555,8 @@ local function _extractKnownPlayersIndexFromWhoStoreState(wState)
     if type(wState.players) == "table" then
         for k, v in pairs(wState.players) do
             if v == true and type(k) == "string" and k ~= "" then
-                _indexAddLowerOnly(idx, k)
+                -- v2026-02-27A: MUST record canonByLower so confidence gate can return "exact".
+                _indexAdd(idx, k)
             end
         end
         return idx
