@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-02-25D
+-- Version     : v2026-02-27A
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -41,7 +41,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-25D"
+M.VERSION = "v2026-02-27A"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -616,6 +616,30 @@ local REG = {
                 "SAFE/manual only: prints guidance, does not run git or create tags.",
                 "Intended as a copy/paste friendly reminder for PR + tag discipline.",
                 "Typed alias implemented by dwkit.services.command_aliases.",
+            },
+        },
+
+        -- NEW: dwsetup (one-command bootstrap checklist)
+        dwsetup = {
+            command     = "dwsetup",
+            aliases     = {},
+            ownerModule = "dwkit.commands.dwsetup",
+            description =
+            "Runs a one-shot bootstrap checklist for fresh profiles (owned_profiles + WhoStore + next actions).",
+            syntax      = "dwsetup [status|help]",
+            examples    = {
+                "dwsetup",
+                "dwsetup status",
+                "dwsetup help",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Typed alias auto-generated from registry (dwkit.services.alias_factory).",
+                "Default run calls dwwho refresh once (approved pathway) then instructs you to type 'look' once (passive capture).",
+                "Does not guess or auto-seed owned_profiles; prints explicit example only.",
+                "Best-effort triggers Presence + RoomEntities refresh emissions so UIs re-render.",
             },
         },
     }

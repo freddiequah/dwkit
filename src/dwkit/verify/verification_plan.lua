@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-27A
+-- Version     : v2026-02-27B
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-27A"
+M.VERSION = "v2026-02-27B"
 
 local SUITES = {
     default = {
@@ -255,6 +255,21 @@ local SUITES = {
                 cmd =
                 'lua do local R=require("dwkit.services.roomentities_service"); local v=R.getSnapshotV2 and R.getSnapshotV2() or {}; local function cnt(t) local n=0; if type(t)=="table" then for _ in pairs(t) do n=n+1 end end; return n end; local function has(t,k) return (type(t)=="table" and t[k]~=nil) and true or false end; if cnt(v.players) < 2 then error("Expected at least 2 players in v2.players; got "..tostring(cnt(v.players))) end; if has(v.players,"Alpha the adventurer")~=true then error("Expected titled label in players: Alpha the adventurer") end; if has(v.players,"Beta")~=true then error("Expected Beta in players") end; if has(v.unknown,"A small bulletin board designed for Quests")~=true then error("Expected object line in unknown") end; print(string.format("[dwverify-roomentities] PASS v2.players=%s v2.unknown=%s", tostring(cnt(v.players)), tostring(cnt(v.unknown)))) end',
                 note = "ASSERT: titled label promotes to players; object remains unknown.",
+            },
+        },
+    },
+
+    setup_smoke = {
+        title = "setup_smoke",
+        description = "dwsetup smoke: status + full run (one who refresh); then manual look instruction",
+        delay = 0.35,
+        steps = {
+            { cmd = "dwsetup status", note = "Checklist only (no sends)." },
+            { cmd = "dwsetup",        note = "Runs dwwho refresh once and prints next steps." },
+            {
+                cmd =
+                'lua do print("[dwverify-setup] MANUAL: type look once now. This is required for RoomFeed/RoomEntities passive capture so Presence/RoomEntities UIs become correct.") end',
+                note = "Manual step reminder (dwsetup does not send look).",
             },
         },
     },
