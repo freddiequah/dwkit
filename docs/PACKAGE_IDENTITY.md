@@ -1,3 +1,4 @@
+# docs/PACKAGE_IDENTITY.md
 # Package Identity (Authoritative)
 
 ## Version

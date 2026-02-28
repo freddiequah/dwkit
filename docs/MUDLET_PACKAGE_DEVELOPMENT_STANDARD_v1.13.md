@@ -1,5 +1,6 @@
+# docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.13.md
 ============================================================
-FULL ANCHOR PACK — MUDLET KIT GOVERNANCE (STORE IN PROJECT)
+FULL ANCHOR PACK - MUDLET KIT GOVERNANCE (STORE IN PROJECT)
 UPDATED: + Mudlet Input Line Paste Safety (single-line lua do...end)
 UPDATED: + Command Surface Architecture Standard (Router + Handlers, Phase 2 triggers)
 UPDATED: + Automation Policy: Passive Capture vs Active Polling + Essential Default Automation (declared, visible, controllable)
@@ -16,7 +17,7 @@ Repo Hygiene: UTF-8 (NO BOM) + Versioned Git Hooks + LF enforcement
 
 GitHub Branch Protection (solo repo) + gh merge policy notes (Section N.1)
 
-AUTHORITATIVE INSTRUCTION — FOLLOW STRICTLY
+AUTHORITATIVE INSTRUCTION - FOLLOW STRICTLY
 
 This pack defines the mandatory development standard for this project.
 It overrides all prior assumptions, habits, defaults, or stylistic choices.
@@ -92,7 +93,7 @@ If any required identity fields or relevant contract sheets are missing:
 
 Implementation must pause for clarification (do not guess).
 
-PACKAGE IDENTITY (LOCKED — AUTHORITATIVE IN REPO)
+PACKAGE IDENTITY (LOCKED - AUTHORITATIVE IN REPO)
 
 Source of truth:
 
@@ -273,7 +274,7 @@ Console-first UI verification gate:
 - Added verification expectation: dwverify suite must assert invariants on a "fresh profile" and an "existing profile" (where practical).
 
 ==================================================
-SECTION A — BOOTSTRAP (ALWAYS APPLIES)
+SECTION A - BOOTSTRAP (ALWAYS APPLIES)
 
 COMPATIBILITY BASELINE (MANDATORY)
 
@@ -300,7 +301,7 @@ Cross-module interaction is allowed ONLY via documented APIs or events.
 
 No hardcoded profile names or absolute paths are permitted.
 
-Manual means manual — and no hidden automation.
+Manual means manual - and no hidden automation.
 
 UI modules are consumers only; they own no logic or persistence.
 
@@ -310,7 +311,7 @@ Every change must include test commands and expected results.
 
 Stability and contract preservation take priority over new features.
 
-AUTOMATION POLICY (LOCKED) — MANUAL VS PASSIVE CAPTURE VS ACTIVE POLLING (NO HIDDEN AUTOMATION)
+AUTOMATION POLICY (LOCKED) - MANUAL VS PASSIVE CAPTURE VS ACTIVE POLLING (NO HIDDEN AUTOMATION)
 
 Purpose:
 Support reliable data-driven UI (Presence_UI, future ActionPad, etc.) that needs fresh snapshots (who, score, etc.)
@@ -501,7 +502,7 @@ BOM scan (docs):
 PowerShell BOM scan loop over docs/*.md (checks EF BB BF).
 
 Mojibake scan (docs):
-Select-String -Path .\docs*.md -Pattern 'ÃƒÆ’Ã‚Â¢|ÃƒÆ’Ã†â€™|ÃƒÂ¯Ã‚Â¿Ã‚Â½' -SimpleMatch
+Select-String -Path .\docs*.md -Pattern 'ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢|ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢|ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¿Ãƒâ€šÃ‚Â½' -SimpleMatch
 Expected: no matches
 
 .gitattributes check (BOM + newline):
@@ -517,7 +518,7 @@ They are file rules, not commands.
 Always edit .gitattributes using an editor or Set-Content / WriteAllText.
 
 ==================================================
-SECTION B — CANONICAL PACKAGE IDENTITY (MANDATORY)
+SECTION B - CANONICAL PACKAGE IDENTITY (MANDATORY)
 
 Rules:
 
@@ -536,7 +537,7 @@ Source of truth:
 docs/PACKAGE_IDENTITY.md (repo authoritative)
 
 ==================================================
-SECTION C — FILE/FOLDER NAMING & LAYOUT (MANDATORY)
+SECTION C - FILE/FOLDER NAMING & LAYOUT (MANDATORY)
 
 Canonical layout (physical repo paths):
 
@@ -597,10 +598,10 @@ docs/Self_Test_Runner_v1.0.md
 
 docs/DOCS_SYNC_CHECKLIST.md
 
-docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.10.md (this file; versioned by content header)
+docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.13.md (this file; versioned by content header)
 
 ==================================================
-SECTION D — CORE DEVELOPMENT STANDARD
+SECTION D - CORE DEVELOPMENT STANDARD
 
 PURPOSE
 Ensure correctness, stability, predictability, and long-term maintainability under the Compatibility Baseline.
@@ -654,7 +655,7 @@ Events Consumed
 
 Persistence (path rule + schema version)
 
-Automation Policy (manual / opt-in / essential-default) — must align with Section A Automation Policy
+Automation Policy (manual / opt-in / essential-default) - must align with Section A Automation Policy
 If not applicable, state "None".
 
 EVENTS & DATA CONTRACTS
@@ -695,7 +696,7 @@ For any changed file, the assistant MUST return the FULL updated file content (n
 
 The assistant MUST NOT propose edits against partial/uncertain file content.
 
-If the assistant is not certain it has the latest file, it MUST request the full file content first and provide exact dump commands.
+If the assistant is not certain it has the latest file content, it MUST request the full file content first and provide exact dump commands.
 
 Bump version identifiers with meaningful suffixes.
 
@@ -714,7 +715,7 @@ Regression checklist
 If it cannot be tested, it is incomplete.
 
 ==================================================
-SECTION E — CENTRAL EVENT REGISTRY (SINGLE SOURCE OF TRUTH)
+SECTION E - CENTRAL EVENT REGISTRY (SINGLE SOURCE OF TRUTH)
 
 One Event Registry (module or doc).
 
@@ -737,7 +738,7 @@ consumers (if known)
 payload version/schema (if applicable)
 
 ==================================================
-SECTION F — LOAD ORDER & STARTUP BEHAVIOR (MANDATORY)
+SECTION F - LOAD ORDER & STARTUP BEHAVIOR (MANDATORY)
 
 Load order is a contract:
 
@@ -767,7 +768,7 @@ No Active Polling during load unless explicitly enabled by config (opt-in or ess
 and if autostart is supported, it MUST be visible + declared at startup (Section A Automation Policy).
 
 ==================================================
-SECTION G — NO CYCLIC DEPENDENCY POLICY
+SECTION G - NO CYCLIC DEPENDENCY POLICY
 
 Dependencies flow downward only:
 Core -> Persist/Config -> Bus -> Services -> UI
@@ -783,7 +784,7 @@ beyond registration boundary.
 If a cycle appears, redesign is required.
 
 ==================================================
-SECTION H — LOGGING & ERROR POLICY
+SECTION H - LOGGING & ERROR POLICY
 
 Consistent log prefix with PackageId/ModuleName.
 
@@ -797,7 +798,7 @@ Silent failures not allowed.
 LaunchPad wraps UI handler calls and emits namespaced error events.
 
 ==================================================
-SECTION I — CONFIG POLICY (ONE CONFIG SURFACE)
+SECTION I - CONFIG POLICY (ONE CONFIG SURFACE)
 
 One config surface (single owner module).
 
@@ -808,7 +809,7 @@ No random per-module config globals/files.
 Provide a status/dump method.
 
 ==================================================
-SECTION J — CROSS-PROFILE / BROADCAST BOUNDARY (OPTIONAL)
+SECTION J - CROSS-PROFILE / BROADCAST BOUNDARY (OPTIONAL)
 
 If cross-profile exists:
 
@@ -821,7 +822,7 @@ Payload includes version + sender identity.
 Disabled by default; must not break single-profile use.
 
 ==================================================
-SECTION K — UI STABILITY + LAUNCHPAD POLICY (REQUIRED)
+SECTION K - UI STABILITY + LAUNCHPAD POLICY (REQUIRED)
 
 Single UI control surface: LaunchPad.
 
@@ -831,7 +832,7 @@ UI modules are idempotent, reload-safe, dependency-safe, consumer-only.
 
 New UI is incomplete until controllable via LaunchPad and passes smoke tests.
 
-SECTION K.1 — UI ARCHITECTURE AND CONTRACTS (AUTHORITATIVE; DO NOT DRIFT)
+SECTION K.1 - UI ARCHITECTURE AND CONTRACTS (AUTHORITATIVE; DO NOT DRIFT)
 
 Core principle:
 UI modules must be consistent in frame + theme, and differ only by content contracts.
@@ -897,7 +898,7 @@ Verification (Console-first; No screenshots)
   UI apply() reads gui_settings for enabled/visible.
   Verification steps MUST set gui_settings (noSave) then call apply({}) and print visible state.
 
-SECTION K.2 — UI CROSS-PROFILE CONSISTENCY POLICY (LOCKED)
+SECTION K.2 - UI CROSS-PROFILE CONSISTENCY POLICY (LOCKED)
 
 Purpose:
 Mudlet profiles are separate sandboxes. DWKit supports per-profile UI workspace preferences,
@@ -951,7 +952,7 @@ dwverify ui_layout_invariants
 and/or a UI-specific suite: dwverify chat_ui_layout
 
 ==================================================
-SECTION L — GUI SETTINGS (PER-PROFILE) (REQUIRED)
+SECTION L - GUI SETTINGS (PER-PROFILE) (REQUIRED)
 
 Per-profile persistent settings under package-owned data dir.
 
@@ -964,7 +965,7 @@ LaunchPad must obey GUI Settings.
 No surprise windows by default (restore visible is opt-in).
 
 ==================================================
-SECTION M — TESTING ESCALATION (SELF-TEST RUNNER STANDARD)
+SECTION M - TESTING ESCALATION (SELF-TEST RUNNER STANDARD)
 
 Provide a safe self-test runner command (no gameplay commands unless explicitly opted in by config/policy).
 
@@ -984,7 +985,7 @@ the self-test runner may omit those checks until implemented, but MUST add them
 once the subsystem exists.
 
 ==================================================
-SECTION N — RELEASE / PACKAGING DISCIPLINE
+SECTION N - RELEASE / PACKAGING DISCIPLINE
 
 Release Checklist (mandatory for each release):
 
@@ -1022,7 +1023,7 @@ UI idempotence:
 
 Self-test runner PASS:
 
-Compatibility baseline verified (Mudlet/Lua string outputs):
+Compatibility baseline verified (Mudlet/Lua environment string outputs):
 
 Automation manager status (if present):
 - essential-default jobs declared at startup
@@ -1057,7 +1058,7 @@ Changes must land in main via PR (not direct push to main), unless explicitly ag
 
 Preferred workflow is gh CLI from PowerShell (Section N.1).
 
-SECTION N.1 — GITHUB PR WORKFLOW (POWERSHELL + GH CLI) (LOCKED)
+SECTION N.1 - GITHUB PR WORKFLOW (POWERSHELL + GH CLI) (LOCKED)
 
 Goal:
 Do PR creation, review, and merge from PowerShell using GitHub CLI ("gh"),
@@ -1271,7 +1272,7 @@ git rev-parse --verify '<tag>^{}'
 This rule avoids the "fatal: ambiguous argument 'xml'" style errors seen before.
 
 ==================================================
-SECTION O — DEPRECATION POLICY
+SECTION O - DEPRECATION POLICY
 
 Deprecate in vX, remove in vY (Y later than X).
 
@@ -1288,7 +1289,7 @@ Removal requires migration notes and internal consumers updated first.
 Immediate removal only in explicit breaking-change release.
 
 ==================================================
-SECTION P — DEFINITION OF DONE
+SECTION P - DEFINITION OF DONE
 
 A change is not "done" unless:
 
@@ -1313,7 +1314,7 @@ Mudlet verification gate satisfied:
 - PASS confirmed by user (or logs provided for diagnosis)
 
 ==================================================
-SECTION Q — MODULE CONTRACT SHEET TEMPLATE
+SECTION Q - MODULE CONTRACT SHEET TEMPLATE
 
 MODULE CONTRACT SHEET
 
@@ -1342,7 +1343,7 @@ Invariants:
 Test Commands:
 
 ==================================================
-SECTION R — VERIFICATION GATE + CONFIDENCE POLICY (NO BLIND PROGRESSION)
+SECTION R - VERIFICATION GATE + CONFIDENCE POLICY (NO BLIND PROGRESSION)
 
 Problem:
 Assistants may assume a change or new item works and proceed without proof.
@@ -1361,7 +1362,7 @@ Anything depending on Mudlet runtime, profile state, installed packages,
 triggers, load order, timers, or external systems is always "unverified"
 until the user runs validation steps and reports results.
 
-R.1 — Mandatory Mudlet Verification Runner (dwverify) (LOCKED)
+R.1 - Mandatory Mudlet Verification Runner (dwverify) (LOCKED)
 
 Goal:
 Make verification repeatable and one-command runnable inside Mudlet, instead of manual multi-step typing.
@@ -1400,7 +1401,7 @@ Safety and Automation Policy alignment:
 - It MUST NOT enable or create persistent polling jobs.
 - Any internal pacing timers used to sequence steps must self-cancel and must not schedule future runs.
 
-R.2 — Verification Steps Format (LOCKED)
+R.2 - Verification Steps Format (LOCKED)
 
 Verification steps MUST be explicit commands the user can run and observe.
 
@@ -1412,7 +1413,7 @@ A) DWKit commands/aliases (example: dwwho, dwwho refresh, dwservices status)
 B) Raw MUD commands when needed (example: who)
 C) Mudlet Lua commands ONLY if single-line (see R.3)
 
-R.3 — Single-line Lua Rule in Verification (LOCKED)
+R.3 - Single-line Lua Rule in Verification (LOCKED)
 
 Because multi-line Lua pasted/typed can be accidentally sent to the MUD (Huh?!?) and violates paste safety:
 
@@ -1430,7 +1431,7 @@ If multi-line Lua is required for a complex check:
 - implement it as a module function and call it via a single-line lua do ... end
 - OR run it in the Mudlet Lua Console (not as a step)
 
-R.4 — What the assistant MUST provide (every time)
+R.4 - What the assistant MUST provide (every time)
 
 Confidence Statement: HIGH / MEDIUM / LOW + short reason
 
@@ -1445,7 +1446,7 @@ Success/Fail Criteria: PASS + FAIL conditions
 
 Output Collection: what logs/output/screenshots user should paste back
 
-Regression Checks: 1–3 quick checks
+Regression Checks: 1-3 quick checks
 
 Proceeding Rule:
 
@@ -1457,7 +1458,7 @@ If user explicitly says "Proceed without verification", assistant may proceed,
 but must label subsequent work as "unverified chain".
 
 ==================================================
-SECTION W — HALLUCINATION-RISK HANDOFF (RESET RULE)
+SECTION W - HALLUCINATION-RISK HANDOFF (RESET RULE)
 
 Goal:
 When hallucination risk is high, stop, reset scope, and carry forward only
@@ -1503,9 +1504,9 @@ Note:
 A new chat does not replace verification. Section R still applies.
 
 ==================================================
-SECTION S — COMMAND & ALIAS REGISTRY (SINGLE SOURCE OF TRUTH)
+SECTION S - COMMAND & ALIAS REGISTRY (SINGLE SOURCE OF TRUTH)
 
-SECTION S.0 — COMMAND SURFACE ARCHITECTURE STANDARD (PHASE 1 -> PHASE 2)
+SECTION S.0 - COMMAND SURFACE ARCHITECTURE STANDARD (PHASE 1 -> PHASE 2)
 
 Problem:
 As DWKit grows, a single monolithic alias/command file becomes a "god module" that is hard to maintain, hard to test, and high risk to change.
@@ -1681,7 +1682,7 @@ deprecate version (vX)
 remove version (vY)
 
 ==================================================
-SECTION T — ITERATIVE DEVELOPMENT + CONTINUITY POLICY (REAL-WORLD MODE)
+SECTION T - ITERATIVE DEVELOPMENT + CONTINUITY POLICY (REAL-WORLD MODE)
 
 Reality:
 The user and assistant are not perfect. Complex kits require iteration across
@@ -1741,7 +1742,7 @@ A feature is not considered "done" until it has been verified PASS in the user's
 environment, and recorded in the "Verified Working" list.
 
 ==================================================
-SECTION U — CONSISTENCY LOCK (NO "NEW CHEF" DRIFT)
+SECTION U - CONSISTENCY LOCK (NO "NEW CHEF" DRIFT)
 
 Problem:
 Different chats can drift in style, standards, naming, and assumptions, causing
@@ -1804,7 +1805,7 @@ The user should treat it as non-compliant.
 The assistant must correct course immediately using the Anchor Pack.
 
 ==================================================
-SECTION V — CHAT HANDOFF PACK (PASTE INTO NEW CHAT)
+SECTION V - CHAT HANDOFF PACK (PASTE INTO NEW CHAT)
 
 New Chat Opener:
 

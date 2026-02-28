@@ -1,3 +1,4 @@
+# docs/RELEASE_CHECKLIST.md
 # Release Checklist (Required)
 
 This document defines the REQUIRED steps to ship a DWKit release.
@@ -30,6 +31,11 @@ Release Checklist (per release)
 - UI idempotence:
 - Self-test runner PASS:
 - Compatibility baseline verified (Mudlet/Lua string outputs):
+- Automation manager status (if present):
+  - essential-default jobs declared at startup
+  - status command shows expected enabled/disabled
+- Mudlet dwverify suites executed (record which suites):
+  - dwverify <suite> results (PASS/FAIL) captured
 - Cross-profile (if applicable):
 
 4) Migration notes included (if any schema/contract changes):
@@ -75,6 +81,8 @@ Completed Releases
 - UI idempotence: N/A (not introduced yet)
 - Self-test runner PASS: dwboot + dwversion validated; (self-test runner optional execution not required for this release)
 - Compatibility baseline verified: PASS (dwversion shows Lua 5.1, Mudlet 4.19.1)
+- Automation manager status: N/A (not introduced)
+- Mudlet dwverify suites executed: N/A (not introduced for this release)
 - Cross-profile: N/A (not introduced)
 
 4) Migration notes included:

@@ -1,3 +1,4 @@
+# docs/GOVERNANCE.md
 # Governance (Public Summary)
 
 dwkit is built as a personal, product-grade Mudlet kit with a strict internal development standard.
@@ -31,4 +32,4 @@ Start here:
 - docs/Development_Standard_Index.md
 
 Current standard version:
-- docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.10.md
+- docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.13.md
