@@ -1,3 +1,4 @@
+# docs/DOCS_SYNC_CHECKLIST.md
 # Docs Sync Checklist (Required)
 
 This document defines the REQUIRED docs-to-runtime sync checks for dwkit.
@@ -16,13 +17,24 @@ A docs-only PR is a change set where `git diff` shows ONLY `docs/*` changes.
 Minimum verification for docs-only PRs:
 1) Confirm scope is truly docs-only:
    - `git diff --stat` shows only `docs/*`
-2) Confirm no encoding corruption / mojibake:
-   - `Select-String -Path .\docs\*.md -Pattern '[^\x00-\x7F]'`
-     - Expected: no matches
-3) Confirm files remain copy/paste friendly:
+
+2) Confirm no encoding corruption:
+   - UTF-8 BOM scan (docs):
+     - PowerShell:
+       - `Get-ChildItem .\docs\*.md | ForEach-Object { $b=[System.IO.File]::ReadAllBytes($_.FullName); if($b.Length -ge 3 -and $b[0]-eq 0xEF -and $b[1]-eq 0xBB -and $b[2]-eq 0xBF){ Write-Host ("BOM FOUND: " + $_.FullName) } }`
+     - Expected: no output (no BOM found)
+
+3) Confirm no mojibake patterns (common UTF-8 decode corruption):
+   - Note: do NOT embed mojibake tokens directly into docs; it will trigger the scan itself.
+   - PowerShell (uses Unicode escapes so this file stays clean):
+     - `$patterns=@("`u00E2`u20AC`u2122","`u00E2`u20AC`u201D","`u00E2`u20AC`u201C","`u00C3","`u00C2","`u00EF`u00BB`u00BF"); foreach($p in $patterns){ Select-String -Path .\docs\*.md -Pattern $p -SimpleMatch }`
+   - Expected: no matches
+
+4) Confirm files remain copy/paste friendly:
    - Headings render normally (no hidden leading characters)
    - Code fences are properly closed (if present)
-4) If the docs change is a contract that must match runtime output (registry/spec docs),
+
+5) If the docs change is a contract that must match runtime output (registry/spec docs),
    the corresponding runtime sync checklist item below still applies (no drift rule).
 
 Notes:
@@ -133,4 +145,3 @@ A docs change is DONE only when:
 - The corresponding runtime surfaces display the same invocation variants/syntax/examples/notes (where applicable)
 - Any contract-affecting observable output matches the spec (where applicable)
 - The change set contains BOTH docs and runtime updates when required (no split PRs that create drift)
-

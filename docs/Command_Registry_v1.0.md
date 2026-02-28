@@ -1,7 +1,8 @@
+# docs/Command_Registry_v1.0.md
 # Command Registry
 
 ## Version
-v2.9
+v3.1
 
 ## Purpose
 This document is the canonical registry of all user-facing commands.
@@ -33,7 +34,8 @@ If a command is not registered here, it does not exist.
   A) Kit Commands (SAFE diagnostics, config, UI control, tests)
   B) Gameplay Command Wrappers (send commands to the MUD; must be explicitly labeled)
 - Current status:
-  - Gameplay Command Wrappers: NONE (as of v2.9)
+  - Gameplay Command Wrappers: PRESENT (as of v3.1)
+  - Current wrapper(s): dwprompt (manual; COMBAT-SAFE; sendsToGame=YES)
 - Any new gameplay wrapper MUST include the extra wrapper fields in the Command Template.
 
 ## Runtime Export (Docs Sync Helper) (SAFE)
@@ -53,27 +55,33 @@ Notes:
 These rules are enforced in runtime by the self-test runner in quiet mode (registry-only checks; no gameplay commands sent).
 
 ### SAFE command set (current expected set)
-- Expected SAFE commands (20):
+- Expected SAFE commands (26):
   - dwactions
   - dwboot
+  - dwchat
   - dwcommands
   - dwdiag
   - dwgui
-  - dwevent
-  - dwevents
-  - dweventlog
-  - dweventsub
-  - dweventtap
-  - dweventunsub
   - dwhelp
   - dwid
   - dwinfo
   - dwpresence
+  - dwrelease
+  - dwroom
   - dwscorestore
   - dwservices
+  - dwsetup
   - dwskills
   - dwtest
+  - dwui
   - dwversion
+  - dwevent
+  - dweventlog
+  - dwevents
+  - dweventsub
+  - dweventtap
+  - dweventunsub
+  - dwwho
 
 ### SAFE command contract (required fields)
 For each command in the SAFE set above, the command definition in dwkit.bus.command_registry MUST satisfy:
@@ -89,8 +97,8 @@ Notes:
 - dwtest quiet enforces this per-command contract and will FAIL if any are missing/incorrect.
 - dwcommands safe output MUST be consistent with registry filtering (SendsToGame == NO).
 
-### GAME wrapper drift-lock framework (even if empty today)
-The registry supports gameplay wrapper commands (SendsToGame == YES). Even if the GAME list is empty today, the framework rules are locked:
+### GAME wrapper drift-lock framework
+The registry supports gameplay wrapper commands (SendsToGame == YES).
 
 1) GAME list queryable:
 - dwcommands game MUST run and list the current registry-filtered GAME set (SendsToGame == YES)
@@ -130,16 +138,23 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 - dwboot
 - dwservices
 - dwpresence
+- dwwho
+- dwprompt
+- dwroom
 - dwactions
 - dwskills
 - dwscorestore
+- dwchat
+- dwui
+- dwrelease
+- dwsetup
 
 ## Command Details
 
 ### dwactions
 - Command: dwactions
 - Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
+- Owner Module: dwkit.commands.dwactions
 - Description: Prints ActionModelService snapshot (best-effort, SAFE).
 - Syntax: dwactions
 - Safety: SAFE
@@ -154,7 +169,7 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 ### dwboot
 - Command: dwboot
 - Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
+- Owner Module: dwkit.commands.dwboot
 - Description: Prints DWKit boot wiring/health status (SAFE diagnostics).
 - Syntax: dwboot
 - Safety: SAFE
@@ -167,10 +182,41 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
   - Reports which DWKit surfaces are attached and any loader/init load errors.
   - Does not emit gameplay commands.
 
+### dwchat
+- Command: dwchat
+- Aliases: (none)
+- Owner Module: dwkit.commands.dwchat
+- Description: Controls the DWKit Chat UI (chat_ui): open/hide/toggle/status, enable/disable, tabs, clear, and SAFE input toggles (send/input).
+- Syntax: dwchat [open|show|hide|close|toggle|status|enable|disable|tabs|tab <name>|clear|send on|off|input on|off]
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dwchat
+  - dwchat status
+  - dwchat hide
+  - dwchat toggle
+  - dwchat enable
+  - dwchat disable
+  - dwchat tabs
+  - dwchat tab SAY
+  - dwchat tab Other
+  - dwchat clear
+  - dwchat send on
+  - dwchat send off
+  - dwchat input off
+  - dwchat input on
+- Notes:
+  - Phase 1 deterministic command surface for chat_ui.
+  - Prefers ui_manager.applyOne("chat_ui") when available so dependency claims (chat_watch) are handled centrally.
+  - Visible is session-only by default (noSave=true). Enabled is persisted when explicitly opened/enabled.
+  - send on|off only flips chat_ui sendToMud flag; sending to MUD only occurs on explicit user Enter submit (still manual).
+  - input on|off is best-effort and depends on chat_ui exposing setter APIs.
+
 ### dwcommands
 - Command: dwcommands
 - Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
+- Owner Module: dwkit.commands.dwcommands
 - Description: Lists registered DWKit commands (ALL, SAFE, GAME) or prints Markdown export (SAFE).
 - Syntax: dwcommands [safe|game|md]
 - Safety: SAFE
@@ -191,7 +237,7 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 ### dwdiag
 - Command: dwdiag
 - Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
+- Owner Module: dwkit.commands.dwdiag
 - Description: Prints a one-shot diagnostic bundle (dwversion + dwboot + dwservices + event diag status).
 - Syntax: dwdiag
 - Safety: SAFE
@@ -200,38 +246,14 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 - Examples:
   - dwdiag
 - Notes:
-  - Implemented as a Mudlet alias (local only).
-  - Does not enable event tap or subscriptions.
-  - Intended for quick copy/paste troubleshooting bundles.
-
-
-### dwgui
-- Command: dwgui
-- Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
-- Description: Manage GUI settings flags (enabled/visible) per UI id (SAFE config only; no UI actions).
-- Syntax: dwgui [status|list|enable <uiId>|disable <uiId>|visible <uiId> on|off]
-- Safety: SAFE
-- Mode: manual
-- SendsToGame: NO
-- Examples:
-  - dwgui
-  - dwgui status
-  - dwgui list
-  - dwgui enable test_ui
-  - dwgui disable test_ui
-  - dwgui visible test_ui on
-  - dwgui visible test_ui off
-- Notes:
-  - Typed alias implemented by dwkit.services.command_aliases.
-  - Backed by DWKit.config.guiSettings (dwkit.config.gui_settings).
-  - This command only changes stored flags; it does NOT show/hide UI elements directly.
-  - Visible control requires visible persistence to be enabled in guiSettings; dwgui enables it on-demand for visible subcommands.
+  - Intended for copy/paste into issues or chat handovers.
+  - MUST remain SAFE and manual-only (no timers, no auto-tap enable).
+  - Implementation should call existing SAFE printers and keep output bounded.
 
 ### dwevent
 - Command: dwevent
 - Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
+- Owner Module: dwkit.commands.dwevent
 - Description: Shows detailed help for one DWKit event (SAFE).
 - Syntax: dwevent <EventName>
 - Safety: SAFE
@@ -247,7 +269,7 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 ### dweventlog
 - Command: dweventlog
 - Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
+- Owner Module: dwkit.commands.dweventlog
 - Description: Prints the bounded event diagnostics log (SAFE).
 - Syntax: dweventlog [n]
 - Safety: SAFE
@@ -264,7 +286,7 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 ### dwevents
 - Command: dwevents
 - Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
+- Owner Module: dwkit.commands.dwevents
 - Description: Lists registered DWKit events (SAFE) or prints Markdown export (SAFE).
 - Syntax: dwevents [md]
 - Safety: SAFE
@@ -281,7 +303,7 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 ### dweventsub
 - Command: dweventsub
 - Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
+- Owner Module: dwkit.commands.dweventsub
 - Description: Subscribes (SAFE) to one DWKit event and records occurrences into the bounded log (SAFE diagnostics).
 - Syntax: dweventsub <EventName>
 - Safety: SAFE
@@ -299,7 +321,7 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 ### dweventtap
 - Command: dweventtap
 - Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
+- Owner Module: dwkit.commands.dweventtap
 - Description: Controls a SAFE event bus tap (observe all events) and a bounded in-memory log (SAFE diagnostics).
 - Syntax: dweventtap [on|off|status|show|clear] [n]
 - Safety: SAFE
@@ -320,7 +342,7 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 ### dweventunsub
 - Command: dweventunsub
 - Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
+- Owner Module: dwkit.commands.dweventunsub
 - Description: Unsubscribes (SAFE) from one DWKit event or all subscriptions (SAFE diagnostics).
 - Syntax: dweventunsub <EventName|all>
 - Safety: SAFE
@@ -334,10 +356,33 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
   - Backed by DWKit.bus.eventBus.off(token).
   - Does not affect event tap; use dweventtap off for that.
 
+### dwgui
+- Command: dwgui
+- Aliases: (none)
+- Owner Module: dwkit.commands.dwgui
+- Description: Manage GUI settings flags (enabled/visible) per UI id (SAFE config only; no UI actions).
+- Syntax: dwgui [status|list|enable <uiId>|disable <uiId>|visible <uiId> on|off]
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dwgui
+  - dwgui status
+  - dwgui list
+  - dwgui enable test_ui
+  - dwgui disable test_ui
+  - dwgui visible test_ui on
+  - dwgui visible test_ui off
+- Notes:
+  - Typed alias implemented by dwkit.services.command_aliases.
+  - Backed by DWKit.config.guiSettings (dwkit.config.gui_settings).
+  - This command only changes stored flags; it does NOT show/hide UI elements directly.
+  - Visible control requires visible persistence to be enabled in guiSettings; dwgui enables it on-demand for visible subcommands.
+
 ### dwhelp
 - Command: dwhelp
 - Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
+- Owner Module: dwkit.commands.dwhelp
 - Description: Shows detailed help for one DWKit command.
 - Syntax: dwhelp <cmd>
 - Safety: SAFE
@@ -384,7 +429,7 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 ### dwpresence
 - Command: dwpresence
 - Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
+- Owner Module: dwkit.commands.dwpresence
 - Description: Prints PresenceService snapshot (best-effort, SAFE).
 - Syntax: dwpresence
 - Safety: SAFE
@@ -396,13 +441,66 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
   - Implemented as a Mudlet alias (local only).
   - Prefers PresenceService.getState() if available; otherwise prints available API keys.
 
+### dwprompt
+- Command: dwprompt
+- Aliases: (none)
+- Owner Module: dwkit.commands.dwprompt
+- Description: Prompt utilities: refresh captures current MUD prompt (supports multi-line) and updates PromptDetector stored prompt.
+- Syntax: dwprompt [status|refresh]
+- Safety: COMBAT-SAFE
+- Mode: manual
+- SendsToGame: YES
+- Examples:
+  - dwprompt
+  - dwprompt status
+  - dwprompt refresh
+- Notes:
+  - This is a manual gameplay wrapper (sendsToGame=true) used to seed PromptDetector so passive captures can detect custom prompts.
+  - Typed alias implemented by dwkit.services.command_aliases.
+  - If PromptDetector is unconfigured, roomfeed passive capture may fail to finalize (abort:max_lines) for non-<...> prompts.
+- underlyingGameCommand:
+  - prompt
+- sideEffects:
+  - Sends 'prompt' to the MUD and prints current prompt (may be multi-line). No gameplay state change expected.
+
+### dwrelease
+- Command: dwrelease
+- Aliases: (none)
+- Owner Module: dwkit.commands.dwrelease
+- Description: Prints a bounded release checklist + version pointers + tag workflow reminder (SAFE).
+- Syntax: dwrelease
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dwrelease
+- Notes:
+  - SAFE/manual only: prints guidance, does not run git or create tags.
+  - Intended as a copy/paste friendly reminder for PR + tag discipline.
+  - Typed alias implemented by dwkit.services.command_aliases.
+
+### dwroom
+- Command: dwroom
+- Aliases: (none)
+- Owner Module: dwkit.commands.dwroom
+- Description: Shows and manages RoomEntities state (SAFE diagnostics/fixtures/refresh; no gameplay commands).
+- Syntax: dwroom
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dwroom
+- Notes:
+  - Implemented as a Mudlet alias (local only).
+  - Backed by RoomEntitiesService (dwkit.services.roomentities_service) and SAFE helpers.
+  - Used for fixture/ingest/refresh workflows; no gameplay commands are sent.
+
 ### dwscorestore
 - Command: dwscorestore
 - Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
+- Owner Module: dwkit.commands.dwscorestore
 - Description: Shows and manages ScoreStoreService state + persistence (SAFE).
-- Syntax: dwscorestore [status|persist on|off|status|fixture [basic]|clear|wipe [disk]|reset [disk]]
-  (or: lua DWKit.services.scoreStoreService.printSummary())
+- Syntax: dwscorestore [status|persist on|off|status|fixture [basic]|clear|wipe [disk]|reset [disk]]  (or: lua DWKit.services.scoreStoreService.printSummary())
 - Safety: SAFE
 - Mode: manual
 - SendsToGame: NO
@@ -412,6 +510,7 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
   - dwscorestore persist status
   - dwscorestore fixture basic
   - lua DWKit.services.scoreStoreService.ingestFromText("SCORE TEST",{source="manual"})
+  - lua DWKit.services.scoreStoreService.printSummary()
 - Notes:
   - Backed by dwkit.services.score_store_service (ScoreStoreService).
   - Subcommands are implemented by dwkit.services.command_aliases and call ScoreStoreService methods (still SAFE; no gameplay commands sent).
@@ -421,7 +520,7 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 ### dwservices
 - Command: dwservices
 - Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
+- Owner Module: dwkit.commands.dwservices
 - Description: Lists attached DWKit services + versions + load errors (SAFE diagnostics).
 - Syntax: dwservices
 - Safety: SAFE
@@ -433,10 +532,29 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
   - Implemented as a Mudlet alias (local only).
   - Inspection only; no gameplay output; no automation.
 
+### dwsetup
+- Command: dwsetup
+- Aliases: (none)
+- Owner Module: dwkit.commands.dwsetup
+- Description: Runs a one-shot bootstrap checklist for fresh profiles (owned_profiles + WhoStore + next actions).
+- Syntax: dwsetup [status|help]
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dwsetup
+  - dwsetup status
+  - dwsetup help
+- Notes:
+  - Typed alias auto-generated from registry (dwkit.services.alias_factory).
+  - Default run calls dwwho refresh once (approved pathway) then instructs you to type 'look' once (passive capture).
+  - Does not guess or auto-seed owned_profiles; prints explicit example only.
+  - Best-effort triggers Presence + RoomEntities refresh emissions so UIs re-render.
+
 ### dwskills
 - Command: dwskills
 - Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
+- Owner Module: dwkit.commands.dwskills
 - Description: Prints SkillRegistryService snapshot (best-effort, SAFE).
 - Syntax: dwskills
 - Safety: SAFE
@@ -459,6 +577,7 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
 - SendsToGame: NO
 - Examples:
   - dwtest
+  - dwtest ui
   - lua DWKit.test.run()
   - lua local T=require("dwkit.tests.self_test_runner"); T.run({quiet=true})
 - Notes:
@@ -466,11 +585,28 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
   - Requires loader init to have run (so DWKit.test.run is attached).
   - If missing, check DWKit.test._selfTestLoadError.
   - Quiet mode MUST avoid full registry listing output and prefer count-only registry checks (no list spam).
+  - Upcoming scope: dwtest ui runs UI Safety Gate checks (validator wiring + contract compliance).
+
+### dwui
+- Command: dwui
+- Aliases: (none)
+- Owner Module: dwkit.commands.dwui
+- Description: Opens the UI Manager UI surface (ui_manager_ui).
+- Syntax: dwui  (or: dwui open)
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dwui
+  - dwui open
+- Notes:
+  - Typed alias implemented by dwkit.services.command_aliases.
+  - Ensures ui_manager_ui enabled=ON (persisted) and visible=ON (session-only) then applies via ui_manager if available.
 
 ### dwversion
 - Command: dwversion
 - Aliases: (none)
-- Owner Module: dwkit.services.command_aliases
+- Owner Module: dwkit.commands.dwversion
 - Description: Prints consolidated DWKit module versions + runtime baseline (SAFE diagnostics).
 - Syntax: dwversion
 - Safety: SAFE
@@ -482,6 +618,22 @@ For each command where SendsToGame == YES, the command definition MUST satisfy:
   - Typed alias implemented by dwkit.services.command_aliases.
   - Prints identity/runtimeBaseline/self_test_runner/command registry versions where available.
   - Also prints eventRegistry/eventBus versions when present.
+
+### dwwho
+- Command: dwwho
+- Aliases: (none)
+- Owner Module: dwkit.commands.dwwho
+- Description: Shows and manages WhoStore state (SAFE diagnostics and fixtures; no gameplay commands).
+- Syntax: dwwho
+- Safety: SAFE
+- Mode: manual
+- SendsToGame: NO
+- Examples:
+  - dwwho
+- Notes:
+  - Implemented as a Mudlet alias (local only).
+  - Backed by WhoStoreService (dwkit.services.whostore_service) and SAFE helpers.
+  - Intended for inspection, fixtures, and state debug; no automation.
 
 ## Command Template (copy/paste)
 - Command:

@@ -1,7 +1,7 @@
 # Event Registry
 
 ## Version
-v1.10
+v1.12
 
 ## Purpose
 This document is the canonical registry of all project events.
@@ -23,7 +23,7 @@ If an event is not registered here first, it does not exist.
   - src/dwkit/bus/event_registry.lua
 - Event bus skeleton (internal only):
   - src/dwkit/bus/event_bus.lua
-  - Enforces: events must be registered in the registry before subscription or emit.
+  - Enforces: events must be registered in the registry before subscription or emit (docs-first discipline).
 
 ## Runtime Export (Docs Sync Helper) (SAFE)
 The runtime can print a Markdown export derived from the same event registry data.
@@ -58,10 +58,10 @@ Notes:
 - Description:
   - Emitted when ActionModelService updates the action model (SAFE; data only).
 - PayloadSchema:
-  - changed: table (optional)
-  - model: table
-  - source: string (optional)
   - ts: number
+  - model: table
+  - changed: table (optional)
+  - source: string (optional)
 - Producers:
   - dwkit.services.action_model_service
 - Consumers:
@@ -74,10 +74,10 @@ Notes:
 - Description:
   - Emitted when PresenceService updates its state (SAFE; no gameplay sends).
 - PayloadSchema:
+  - ts: number
+  - state: table
   - delta: table (optional)
   - source: string (optional)
-  - state: table
-  - ts: number
 - Producers:
   - dwkit.services.presence_service
 - Consumers:
@@ -107,9 +107,9 @@ Notes:
 - Description:
   - Emitted when ScoreStoreService ingests a score-like text snapshot (SAFE; no gameplay sends).
 - PayloadSchema:
+  - ts: number
   - snapshot: table
   - source: string (optional)
-  - ts: number
 - Producers:
   - dwkit.services.score_store_service
 - Consumers:
@@ -123,10 +123,10 @@ Notes:
 - Description:
   - Emitted when SkillRegistryService updates skill/spell registry data (SAFE; data only).
 - PayloadSchema:
-  - changed: table (optional)
-  - registry: table
-  - source: string (optional)
   - ts: number
+  - registry: table
+  - changed: table (optional)
+  - source: string (optional)
 - Producers:
   - dwkit.services.skill_registry_service
 - Consumers:
@@ -137,21 +137,77 @@ Notes:
 
 ### DWKit:Service:WhoStore:Updated
 - Description:
-  - Emitted when WhoStoreService ingests WHO output and updates the WhoStore snapshot (SAFE; data only).
-- PayloadSchema (minimum; docs-first):
-  - snapshot: table (Snapshot)
-  - source: string (optional)
+  - Emitted when WhoStoreService updates its authoritative player-name set derived from WHO parsing (SAFE; no gameplay sends).
+- PayloadSchema:
   - ts: number
-  - delta: table (optional; {added, removed, changed, total, mode, rawCount?})
-  - state: table (optional; legacy compatibility view; non-contract)
+  - state: table
+  - delta: table (optional)
+  - source: string (optional)
 - Producers:
   - dwkit.services.whostore_service
 - Consumers:
-  - internal services + UI modules (consume snapshot via API or this event)
-  - verification suites (dwverify) / tests
+  - internal (roomentities_service/ui/tests/integrations)
 - Notes:
-  - SAFE internal event (no gameplay commands, no timers required).
-  - Contract: docs/WhoStore_Service_Contract_v1.0.md (v1.1)
+  - SAFE internal event (no gameplay commands).
+  - Manual-only: emitted only when service API is invoked.
+  - Primary consumer is RoomEntitiesService for best-effort player reclassification.
+
+### DWKit:Service:RoomFeedStatus:Updated
+- Description:
+  - Emitted when RoomFeedStatusService changes watch/health state (SAFE; no gameplay sends).
+- PayloadSchema:
+  - ts: number
+  - state: table
+  - delta: table (optional)
+  - source: string (optional)
+- Producers:
+  - dwkit.services.roomfeed_status_service
+- Consumers:
+  - internal (ui/tests/integrations)
+- Notes:
+  - SAFE internal event (no gameplay commands).
+  - Manual-only: emitted on watch on/off, capture OK/abort, and state transitions.
+  - Primary consumer is UI modules that need to show Room Watch Health.
+
+### DWKit:Service:ChatLog:Updated
+- Description:
+  - Emitted when ChatLogService appends/clears chat lines (SAFE; data only).
+- PayloadSchema:
+  - ts: number
+  - state: table
+  - delta: table (optional)
+  - source: string (optional)
+- Producers:
+  - dwkit.services.chat_log_service
+- Consumers:
+  - internal (chat_ui/tests/integrations)
+- Notes:
+  - SAFE internal event (no gameplay commands).
+  - Manual-only: emitted only when ChatLogService API is invoked.
+  - Primary consumer is dwkit.ui.chat_ui (event-driven refresh while visible).
+
+### DWKit:Service:CrossProfileComm:Updated
+- Description:
+  - Emitted when CrossProfileCommService peer state changes (HELLO/BYE/seen). SAFE; no gameplay sends; same-instance transport only.
+- PayloadSchema:
+  - ts: number
+  - state: table
+  - delta: table (optional)
+  - source: string (optional)
+- Producers:
+  - dwkit.services.cross_profile_comm_service
+- Consumers:
+  - internal (presence_service/ui/tests)
+- Notes:
+  - SAFE internal event (no gameplay commands).
+  - Manual-only: service is installed during loader.init and reacts to Mudlet lifecycle events best-effort.
 
 ## Notes
 - Registry and bus skeleton exist to enforce "docs-first" event introduction.
+
+## Changes
+v1.12
+- Synced docs to runtime event_registry.lua mirror:
+  - Bumped registry version to v1.12.
+  - Added events: DWKit:Service:RoomFeedStatus:Updated, DWKit:Service:ChatLog:Updated, DWKit:Service:CrossProfileComm:Updated.
+  - Updated DWKit:Service:WhoStore:Updated payload schema/notes to match code mirror (state/delta/source/ts).

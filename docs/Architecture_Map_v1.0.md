@@ -1,7 +1,8 @@
+# docs/Architecture_Map_v1.0.md
 # Architecture Map
 
 ## Version
-v1.4
+v1.5
 
 ## Purpose
 High-level map of the DWKit layout: what each folder is for, and what depends on what.
@@ -15,6 +16,7 @@ These documents define the current locked contracts and required sync rules:
 - docs/Self_Test_Runner_v1.0.md
 - docs/DOCS_SYNC_CHECKLIST.md
 - docs/GOVERNANCE.md
+- docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.13.md
 
 ## Canonical Identity (Authoritative)
 Source of truth:
@@ -37,6 +39,7 @@ Locked fields (current):
 - src/dwkit/integrations   (optional external integrations; degrade gracefully)
 - src/dwkit/tests          (self-test runner helpers)
 - src/dwkit/loader         (thin bootstrap scripts / entrypoints)
+- src/dwkit/verify         (dwverify runner engine + verification suites)
 
 ## Layers (No Cycles)
 Core -> Persist/Config -> Bus -> Services -> UI
@@ -73,36 +76,44 @@ Rules:
 - Event registry (SAFE, registry only):
   - src/dwkit/bus/event_registry.lua
   - Code mirror of docs/Event_Registry_v1.0.md.
-  - Current registered events (runtime-visible):
-    - DWKit:Boot:Ready
 
 - Event bus skeleton (SAFE, internal only):
   - src/dwkit/bus/event_bus.lua
   - In-process publish/subscribe.
   - Enforces: event MUST be registered in event_registry before use.
 
+- Command registry runtime surface (SAFE):
+  - src/dwkit/bus/command_registry.lua
+  - Runtime list/help derived from registry data (dwcommands/dwhelp).
+
 - Self-test runner (SAFE):
   - src/dwkit/tests/self_test_runner.lua
   - Smoke checks + prints compatibility baseline + canonical identity fields.
-  - Supports quiet mode for count-only registry checks (no list spam) per docs/Self_Test_Runner_v1.0.md.
+  - Supports quiet mode for registry-only checks (no list spam) per docs/Self_Test_Runner_v1.0.md.
 
-- Command registry runtime surface (SAFE):
-  - src/dwkit/bus/command_registry.lua
-  - Runtime list/help derived from registry data.
-  - Exposes registry version accessor (getRegistryVersion) for SAFE diagnostics.
-  - dwtest includes quiet invocation variant in runtime help output.
+- Verification runner (SAFE; manual batch sequence):
+  - src/dwkit/verify/verification.lua
+  - src/dwkit/verify/verification_plan.lua
+  - Provides dwverify <suite> as the Mudlet verification gate (manual, one-shot; must self-terminate).
 
-- Typed SAFE aliases:
+- Typed SAFE aliases (high level)
   - src/dwkit/services/command_aliases.lua
-  - dwcommands [safe|game]
-  - dwhelp <cmd>
-  - dwid
-  - dwinfo
+  - For authoritative list/details, see:
+    - docs/Command_Registry_v1.0.md
+    - dwcommands / dwhelp runtime surfaces
+
+  Examples of SAFE typed commands currently in use:
+  - dwcommands / dwhelp
+  - dwid / dwinfo / dwversion
+  - dwboot / dwservices / dwdiag
+  - dwevents / dwevent and event diagnostics (dweventtap/dweventsub/dweventunsub/dweventlog)
+  - dwgui
+  - dwactions / dwpresence / dwskills / dwscorestore
   - dwtest
-  - dwversion
-  - dwevents
-  - dwevent <EventName>
-  - dwboot
+  - dwverify
+
+Notes:
+- This Architecture Map is descriptive; the authoritative command list is docs/Command_Registry_v1.0.md and the runtime registry.
 
 ## Guardrails (Important)
 - Do NOT add events unless the event is registered first in docs/Event_Registry_v1.0.md and complies with EventPrefix (DWKit:).

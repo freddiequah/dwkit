@@ -1,7 +1,9 @@
+# docs/Self_Test_Runner_v1.0.md
 # Self-Test Runner (dwtest) - Specification
 
 ## Version
 v1.2
+
 ## Purpose
 This document defines the required output sections and PASS/FAIL criteria for the DWKit self-test runner.
 
@@ -15,6 +17,11 @@ This is a documentation-only spec. It does not define implementation details bey
 ## Safety Classification
 - SAFE: dwtest MUST NOT send gameplay commands to the MUD.
 - Manual-only: dwtest is run only when the user invokes it.
+
+## Relationship to dwverify (Verification Gate)
+- dwtest is a kit-level self-test runner for smoke checks and contract-visible output.
+- dwverify is the Mudlet verification runner for per-change suites (dwverify <suite>) and remains the default verification gate for code changes.
+- This document does not define dwverify behavior; it only defines dwtest observable output.
 
 ## Invocation (Manual)
 - Primary:
