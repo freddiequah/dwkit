@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-02-27B
+-- Version     : v2026-03-01A
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-27B"
+M.VERSION = "v2026-03-01A"
 
 local SUITES = {
     default = {
@@ -308,6 +308,50 @@ local SUITES = {
                 cmd =
                 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("chat_ui", true, {noSave=true}); gs.setVisible("chat_ui", true, {noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)=="table" and type(UM.applyOne)=="function" then local ok,err=UM.applyOne("chat_ui",{source="dwverify:ui_smoke"}); if ok==false then error("applyOne(chat_ui) failed: "..tostring(err)) end end; local UI=require("dwkit.ui.chat_ui"); local s=UI.getState(); local u=(s and s.unread and s.unread.Other) or 0; print(string.format("[dwverify-ui] chat_ui visible=%s activeTab=%s unreadOther=%s", tostring(s and s.visible), tostring(s and s.activeTab), tostring(u))); end',
                 note = "Show chat_ui and print state.",
+            },
+        },
+    },
+
+    command_registry_contract = {
+        title = "command_registry_contract",
+        description =
+        "Command registry contract: validateAll strict=true PASS; enum errors for safety/mode are derived; sendsToGame<->safety coupling errors derived; required fields when sendsToGame=true are derived. No gameplay sends.",
+        delay = 0.20,
+        steps = {
+            {
+                cmd =
+                'lua do local R=require("dwkit.bus.command_registry"); local ok,issues=R.validateAll({strict=true}); print(string.format("[dwverify-cr] validateAll ok=%s issues=%s", tostring(ok==true), tostring(type(issues)=="table" and #issues or "nil"))); if ok~=true then error("validateAll expected PASS") end end',
+                note = "validateAll strict=true should pass.",
+            },
+            {
+                cmd =
+                'lua do local R=require("dwkit.bus.command_registry"); local name="__cr_bad_safety_"..tostring(os.time()); local ok,err=R.register({command=name,aliases={},ownerModule="x",description="x",syntax="x",examples={"x"},safety="SAFE2",mode="manual",sendsToGame=false,notes={}}); local exp="invalid: safety must be SAFE|COMBAT-SAFE|NOT SAFE"; print(string.format("[dwverify-cr] bad safety ok=%s err=%s", tostring(ok==true), tostring(err))); if ok==true then error("Expected bad safety to fail") end; if tostring(err)~=exp then error("Expected: "..exp.." got: "..tostring(err)) end end',
+                note = "Derived safety enum error string (stable ordering).",
+            },
+            {
+                cmd =
+                'lua do local R=require("dwkit.bus.command_registry"); local name="__cr_bad_mode_"..tostring(os.time()); local ok,err=R.register({command=name,aliases={},ownerModule="x",description="x",syntax="x",examples={"x"},safety="SAFE",mode="AUTOX",sendsToGame=false,notes={}}); local exp="invalid: mode must be manual|opt-in|essential-default (legacy \'auto\' accepted)"; print(string.format("[dwverify-cr] bad mode ok=%s err=%s", tostring(ok==true), tostring(err))); if ok==true then error("Expected bad mode to fail") end; if tostring(err)~=exp then error("Expected: "..exp.." got: "..tostring(err)) end end',
+                note = "Derived mode enum error string (includes legacy note).",
+            },
+            {
+                cmd =
+                'lua do local R=require("dwkit.bus.command_registry"); local name="__cr_couple_true_"..tostring(os.time()); local ok,err=R.register({command=name,aliases={},ownerModule="x",description="x",syntax="x",examples={"x"},safety="SAFE",mode="manual",sendsToGame=true,underlyingGameCommand="x",sideEffects="x",notes={}}); local exp="invalid: safety must be COMBAT-SAFE|NOT SAFE when sendsToGame=true"; print(string.format("[dwverify-cr] coupling true ok=%s err=%s", tostring(ok==true), tostring(err))); if ok==true then error("Expected coupling (sendsToGame=true safety=SAFE) to fail") end; if tostring(err)~=exp then error("Expected: "..exp.." got: "..tostring(err)) end end',
+                note = "Derived sendsToGame=true safety coupling error (COMBAT-SAFE|NOT SAFE).",
+            },
+            {
+                cmd =
+                'lua do local R=require("dwkit.bus.command_registry"); local name="__cr_couple_false_"..tostring(os.time()); local ok,err=R.register({command=name,aliases={},ownerModule="x",description="x",syntax="x",examples={"x"},safety="COMBAT-SAFE",mode="manual",sendsToGame=false,notes={}}); local exp="invalid: safety must be SAFE when sendsToGame=false"; print(string.format("[dwverify-cr] coupling false ok=%s err=%s", tostring(ok==true), tostring(err))); if ok==true then error("Expected coupling (sendsToGame=false safety!=SAFE) to fail") end; if tostring(err)~=exp then error("Expected: "..exp.." got: "..tostring(err)) end end',
+                note = "Derived sendsToGame=false safety coupling error (SAFE only).",
+            },
+            {
+                cmd =
+                'lua do local R=require("dwkit.bus.command_registry"); local name="__cr_missing_ugc_"..tostring(os.time()); local ok,err=R.register({command=name,aliases={},ownerModule="x",description="x",syntax="x",examples={"x"},safety="COMBAT-SAFE",mode="manual",sendsToGame=true,sideEffects="x",notes={}}); local exp="missing/invalid: underlyingGameCommand (required when sendsToGame=true)"; print(string.format("[dwverify-cr] missing ugc ok=%s err=%s", tostring(ok==true), tostring(err))); if ok==true then error("Expected missing underlyingGameCommand to fail") end; if tostring(err)~=exp then error("Expected: "..exp.." got: "..tostring(err)) end end',
+                note = "Derived required-field error: underlyingGameCommand.",
+            },
+            {
+                cmd =
+                'lua do local R=require("dwkit.bus.command_registry"); local name="__cr_missing_se_"..tostring(os.time()); local ok,err=R.register({command=name,aliases={},ownerModule="x",description="x",syntax="x",examples={"x"},safety="COMBAT-SAFE",mode="manual",sendsToGame=true,underlyingGameCommand="x",notes={}}); local exp="missing/invalid: sideEffects (required when sendsToGame=true)"; print(string.format("[dwverify-cr] missing sideEffects ok=%s err=%s", tostring(ok==true), tostring(err))); if ok==true then error("Expected missing sideEffects to fail") end; if tostring(err)~=exp then error("Expected: "..exp.." got: "..tostring(err)) end end',
+                note = "Derived required-field error: sideEffects.",
             },
         },
     },
