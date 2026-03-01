@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-02-27A
+-- Version     : v2026-03-01D
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -41,7 +41,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-27A"
+M.VERSION = "v2026-03-01D"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -650,12 +650,144 @@ local REG = {
 -- -------------------------
 local function _isNonEmptyString(s) return type(s) == "string" and s ~= "" end
 
-local function _isAllowedSafety(s)
-    return s == "SAFE" or s == "COMBAT-SAFE" or s == "NOT SAFE"
+-- Generic enum helpers:
+-- - spec.allowed (array) is canonical and drives error string ordering
+-- - spec.legacy  (array) is accepted but noted as legacy in the error string
+local function _enumSetFromSpec(spec)
+    local set = {}
+    spec = (type(spec) == "table") and spec or {}
+
+    local function _add(list)
+        if type(list) ~= "table" then return end
+        for i = 1, #list do
+            local v = list[i]
+            if type(v) == "string" and v ~= "" then
+                set[v] = true
+            end
+        end
+    end
+
+    _add(spec.allowed)
+    _add(spec.legacy)
+    return set
 end
 
+local function _formatEnumError(fieldName, spec, legacyNoteSingleFmt)
+    fieldName = tostring(fieldName or "field")
+    spec = (type(spec) == "table") and spec or {}
+    local allowed = (type(spec.allowed) == "table") and spec.allowed or {}
+    local legacy = (type(spec.legacy) == "table") and spec.legacy or {}
+
+    local allowedStr = table.concat(allowed, "|")
+    if allowedStr == "" then allowedStr = "(none)" end
+
+    if #legacy > 0 then
+        if #legacy == 1 then
+            local fmt = legacyNoteSingleFmt or "(legacy '%s' accepted)"
+            return "invalid: " ..
+                fieldName .. " must be " .. allowedStr .. " " .. string.format(fmt, tostring(legacy[1]))
+        end
+        return "invalid: " ..
+            fieldName .. " must be " .. allowedStr .. " (legacy accepted: " .. table.concat(legacy, ", ") .. ")"
+    end
+
+    return "invalid: " .. fieldName .. " must be " .. allowedStr
+end
+
+local function _safetySpec()
+    return {
+        allowed = { "SAFE", "COMBAT-SAFE", "NOT SAFE" },
+        legacy = {},
+    }
+end
+
+local SAFETY_SPEC = _safetySpec()
+local SAFETY_SET = _enumSetFromSpec(SAFETY_SPEC)
+
+local function _isAllowedSafety(s)
+    if type(s) ~= "string" or s == "" then return false end
+    return SAFETY_SET[s] == true
+end
+
+-- Derive safety coupling rules from the safety spec so text cannot go stale.
+-- Policy:
+--   sendsToGame=false -> safety must be SAFE
+--   sendsToGame=true  -> safety must be one of SAFETY_SPEC.allowed excluding SAFE
+local function _allowedSafetyForSendsToGame(sendsToGame)
+    local allowed = (type(SAFETY_SPEC.allowed) == "table") and SAFETY_SPEC.allowed or {}
+
+    if sendsToGame == true then
+        local out = {}
+        for i = 1, #allowed do
+            local v = allowed[i]
+            if v ~= "SAFE" then
+                out[#out + 1] = v
+            end
+        end
+        return out
+    end
+
+    return { "SAFE" }
+end
+
+local function _formatSafetyCouplingError(sendsToGame)
+    local list = _allowedSafetyForSendsToGame(sendsToGame == true)
+    local allowedStr = table.concat(list, "|")
+    if allowedStr == "" then allowedStr = "(none)" end
+
+    if sendsToGame == true then
+        return "invalid: safety must be " .. allowedStr .. " when sendsToGame=true"
+    end
+    return "invalid: safety must be " .. allowedStr .. " when sendsToGame=false"
+end
+
+-- Derive required-fields (when sendsToGame=true) from a spec so text cannot go stale.
+-- Note:
+-- - Currently used for error string generation only; validation still checks fields explicitly.
+local function _requiredWhenSendsToGameSpec()
+    return {
+        required = { "underlyingGameCommand", "sideEffects" },
+    }
+end
+
+local REQUIRED_WHEN_SENDSTOGAME_SPEC = _requiredWhenSendsToGameSpec()
+
+local function _isRequiredWhenSendsToGame(fieldName)
+    fieldName = tostring(fieldName or "")
+    if fieldName == "" then return false end
+    local req = (type(REQUIRED_WHEN_SENDSTOGAME_SPEC.required) == "table") and REQUIRED_WHEN_SENDSTOGAME_SPEC.required or
+    {}
+    for i = 1, #req do
+        if tostring(req[i]) == fieldName then
+            return true
+        end
+    end
+    return false
+end
+
+local function _formatRequiredWhenSendsToGameError(fieldName)
+    fieldName = tostring(fieldName or "")
+    if fieldName == "" then fieldName = "(field)" end
+    return "missing/invalid: " .. fieldName .. " (required when sendsToGame=true)"
+end
+
+-- Anchor Pack mode policy:
+--   manual | opt-in | essential-default
+-- Back-compat:
+--   accept "auto" as an alias of "essential-default" (deprecated) so older defs don't fail.
+local function _modeSpec()
+    return {
+        allowed = { "manual", "opt-in", "essential-default" },
+        legacy = { "auto" }, -- deprecated alias of essential-default
+    }
+end
+
+local MODE_SPEC = _modeSpec()
+local MODE_SET = _enumSetFromSpec(MODE_SPEC)
+
 local function _isAllowedMode(s)
-    return s == "manual" or s == "opt-in" or s == "auto"
+    if type(s) ~= "string" or s == "" then return false end
+    return MODE_SET[s] == true
 end
 
 local function _validateDef(def, opts)
@@ -668,9 +800,13 @@ local function _validateDef(def, opts)
     if requireDescription and (not _isNonEmptyString(def.description)) then return false, "missing/invalid: description" end
     if not _isNonEmptyString(def.syntax) then return false, "missing/invalid: syntax" end
     if not _isNonEmptyString(def.safety) then return false, "missing/invalid: safety" end
-    if not _isAllowedSafety(def.safety) then return false, "invalid: safety must be SAFE|COMBAT-SAFE|NOT SAFE" end
+    if not _isAllowedSafety(def.safety) then
+        return false, _formatEnumError("safety", SAFETY_SPEC)
+    end
     if not _isNonEmptyString(def.mode) then return false, "missing/invalid: mode" end
-    if not _isAllowedMode(def.mode) then return false, "invalid: mode must be manual|opt-in|auto" end
+    if not _isAllowedMode(def.mode) then
+        return false, _formatEnumError("mode", MODE_SPEC, "(legacy '%s' accepted)")
+    end
 
     if type(def.aliases) ~= "table" then return false, "invalid: aliases must be a table" end
     if type(def.examples) ~= "table" then return false, "invalid: examples must be a table" end
@@ -679,17 +815,25 @@ local function _validateDef(def, opts)
 
     if def.sendsToGame then
         if def.safety == "SAFE" then
-            return false, "invalid: safety must be COMBAT-SAFE or NOT SAFE when sendsToGame=true"
+            return false, _formatSafetyCouplingError(true)
         end
         if not _isNonEmptyString(def.underlyingGameCommand) then
+            -- derived error string (field is part of REQUIRED_WHEN_SENDSTOGAME_SPEC)
+            if _isRequiredWhenSendsToGame("underlyingGameCommand") then
+                return false, _formatRequiredWhenSendsToGameError("underlyingGameCommand")
+            end
             return false, "missing/invalid: underlyingGameCommand (required when sendsToGame=true)"
         end
         if not _isNonEmptyString(def.sideEffects) then
+            -- derived error string (field is part of REQUIRED_WHEN_SENDSTOGAME_SPEC)
+            if _isRequiredWhenSendsToGame("sideEffects") then
+                return false, _formatRequiredWhenSendsToGameError("sideEffects")
+            end
             return false, "missing/invalid: sideEffects (required when sendsToGame=true)"
         end
     else
         if def.safety ~= "SAFE" then
-            return false, "invalid: safety must be SAFE when sendsToGame=false"
+            return false, _formatSafetyCouplingError(false)
         end
     end
 
