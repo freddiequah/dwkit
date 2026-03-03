@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-01A
+-- Version     : v2026-03-03A
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-01A"
+M.VERSION = "v2026-03-03A"
 
 local SUITES = {
     default = {
@@ -308,6 +308,30 @@ local SUITES = {
                 cmd =
                 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("chat_ui", true, {noSave=true}); gs.setVisible("chat_ui", true, {noSave=true}); local UM=require("dwkit.ui.ui_manager"); if type(UM)=="table" and type(UM.applyOne)=="function" then local ok,err=UM.applyOne("chat_ui",{source="dwverify:ui_smoke"}); if ok==false then error("applyOne(chat_ui) failed: "..tostring(err)) end end; local UI=require("dwkit.ui.chat_ui"); local s=UI.getState(); local u=(s and s.unread and s.unread.Other) or 0; print(string.format("[dwverify-ui] chat_ui visible=%s activeTab=%s unreadOther=%s", tostring(s and s.visible), tostring(s and s.activeTab), tostring(u))); end',
                 note = "Show chat_ui and print state.",
+            },
+        },
+    },
+
+    practicestore_smoke = {
+        title = "practicestore_smoke",
+        description =
+        "PracticeStore smoke: confirm service + capture installed; ingest fixture; then (manual) run practice once to validate passive capture ingestion.",
+        delay = 0.30,
+        steps = {
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.practice_store_service"); print(string.format("[dwverify-practice] service version=%s", tostring(S.getVersion()))) local C=require("dwkit.capture.practice_capture"); print(string.format("[dwverify-practice] capture version=%s", tostring(C.getVersion()))) end',
+                note = "Print PracticeStore + PracticeCapture versions (proof modules load).",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.practice_store_service"); local ok,err=S.ingestFixture("basic",{source="dwverify:fixture"}); print(string.format("[dwverify-practice] ingestFixture ok=%s err=%s", tostring(ok==true), tostring(err))); local snap=S.getSnapshot(); if type(snap)~="table" then error("Expected snapshot after ingestFixture") end; local p=snap.parsed or {}; local function cnt(m) local n=0; if type(m)=="table" then for _ in pairs(m) do n=n+1 end end; return n end; print(string.format("[dwverify-practice] parsed counts skills=%s spells=%s race=%s weapon=%s", tostring(cnt(p.skills)), tostring(cnt(p.spells)), tostring(cnt(p.raceSkills)), tostring(cnt(p.weaponProfs)))) end',
+                note = "Ingest fixture and assert snapshot exists + print parsed section counts.",
+            },
+            {
+                cmd =
+                'lua do print("[dwverify-practice] MANUAL: type practice now (in game). Expect passive capture to ingest and dwpracticestore to show updated snapshot. After you type practice, run: dwpracticestore status") end',
+                note = "Manual step reminder (we do not send practice).",
             },
         },
     },
