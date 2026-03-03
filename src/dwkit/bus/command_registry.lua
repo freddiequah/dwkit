@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-03-03A
+-- Version     : v2026-03-03B
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -41,7 +41,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-03A"
+M.VERSION = "v2026-03-03B"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -581,6 +581,31 @@ local REG = {
                 "Subcommands are implemented by dwkit.services.alias_factory auto SAFE alias generation and call PracticeStoreService methods (still SAFE; no gameplay commands sent).",
                 "Practice snapshots may be ingested via passive capture installed during loader.init (capture is SAFE; it only reacts to your practice output).",
                 "In case the alias is stale/cached, you can use the lua fallback above after loader init.",
+            },
+        },
+
+        -- NEW: RemoteExec (SAFE command surface; owned-only remote execution transport)
+        dwremoteexec = {
+            command     = "dwremoteexec",
+            aliases     = {},
+            ownerModule = "dwkit.commands.dwremoteexec",
+            description = "RemoteExec controls: status, allowlist management, and SAFE ping across owned profiles (same Mudlet instance).",
+            syntax      = "dwremoteexec [status|ping <targetProfile>|allow list|allow add <prefix>|allow clear]",
+            examples    = {
+                "dwremoteexec status",
+                "dwremoteexec ping Profile-B",
+                "dwremoteexec allow list",
+                "dwremoteexec allow add say ",
+                "dwremoteexec allow clear",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Backed by dwkit.services.remote_exec_service (RemoteExecService).",
+                "Owned-only enforcement uses owned_profiles values (profile labels).",
+                "Transport is same-instance only (raiseGlobalEvent).",
+                "SEND is allowlist-gated and default OFF (Objective B stays SAFE by default).",
             },
         },
 
