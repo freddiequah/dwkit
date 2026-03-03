@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-03-03A
+-- Version     : v2026-03-03B
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -298,6 +298,30 @@ function Loader.init()
                 DWKit.services.crossProfileCommService = nil
                 DWKit._crossProfileCommServiceLoadError = tostring(cpcOrErr)
                 DWKit._crossProfileCommServiceInstallError = "require failed"
+            end
+        end
+
+        -- NEW: RemoteExec (SAFE install: handler only; no sends; no timers)
+        do
+            local okR, rOrErr = pcall(require, "dwkit.services.remote_exec_service")
+            if okR and type(rOrErr) == "table" then
+                DWKit.services.remoteExecService = rOrErr
+                DWKit._remoteExecServiceLoadError = nil
+
+                if type(rOrErr.install) == "function" then
+                    local okInstall, errInstall = rOrErr.install({ quiet = true })
+                    if okInstall then
+                        DWKit._remoteExecServiceInstallError = nil
+                    else
+                        DWKit._remoteExecServiceInstallError = tostring(errInstall)
+                    end
+                else
+                    DWKit._remoteExecServiceInstallError = "install() missing"
+                end
+            else
+                DWKit.services.remoteExecService = nil
+                DWKit._remoteExecServiceLoadError = tostring(rOrErr)
+                DWKit._remoteExecServiceInstallError = "require failed"
             end
         end
 
