@@ -1,13 +1,13 @@
-# docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.14.md
+# docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.15.md
 ============================================================
 FULL ANCHOR PACK - MUDLET KIT GOVERNANCE (STORE IN PROJECT)
 UPDATED: + Mudlet Input Line Paste Safety (single-line lua do...end)
 UPDATED: + Command Surface Architecture Standard (Router + Handlers, Phase 2 triggers)
 UPDATED: + Automation Policy: Passive Capture vs Active Polling + Essential Default Automation (declared, visible, controllable)
 UPDATED: + Mudlet Verification Runner Standard: dwverify + verification.lua suites (scripted verification steps; Lua steps must be single-line)
-UPDATED: + Verification Plan Split: verification.lua (stable runner) + verification_plan.lua (per-change suites)
+UPDATED: + Verification Plan Split: verification.lua (stable runner engine) + verification_plan.lua (per-change suites)
 UPDATED: + UI Architecture Contracts: Shared Frame + Content Kits, and UI semantics (ActionPad/Presence_UI/RoomEntities_UI) + ui_smoke console verification
-UPDATED: + Full-File Return Rule hardening: batched multi-file delivery + large-file single delivery + per-batch version probe gate
+UPDATED: + Full-File Return Rule hardening: batched multi-file delivery + large-file single delivery + per-batch APPLY gate + final verification only after final batch
 UPDATED: + Mojibake cleanup: normalize punctuation/quotes to avoid UTF-8 decode artifacts in this standard.
 UPDATED (NEW): + UI Cross-Profile Consistency Policy (layout invariants vs per-profile workspace persistence)
 
@@ -47,10 +47,10 @@ FULL-FILE RETURN (BATCHED DELIVERY EXTENSION) (MANDATORY)
 
 Purpose:
 Keep Full-File Return strict and reliable, while avoiding overwhelm when many files are involved.
+Batched delivery reduces copy/paste risk and output overload, while keeping proof-of-apply strict.
 
 A) Batched delivery trigger (LOCKED)
 If a change touches 3 or more files, the assistant MUST split delivery into batches.
-Batches are gated: the assistant MUST NOT deliver Batch N+1 until the user confirms PASS for Batch N.
 
 B) Default batch size (LOCKED)
 Default batch size is 2 files per message.
@@ -68,17 +68,20 @@ Rule:
 If size is unknown:
 - When the assistant cannot reliably determine the line count, it MUST treat the file as large and deliver 1 file per message until proven otherwise.
 
-D) Per-batch verification gate: Version Probe (LOCKED)
-Every batch delivery MUST include verification commands that prove the delivered file(s) have been applied on the user's side.
+D) Per-batch APPLY gate: Version Probe (LOCKED)
+Batched delivery requires a proof-of-apply gate between batches.
+This gate is NOT full functional verification; it only proves the user applied the exact file versions delivered.
+
+Every batch delivery MUST include "Version Probe" commands that prove the delivered file(s) have been applied on the user's side.
 
 Per batch, the assistant MUST provide:
 1) A "Version Probe" command set that prints the version identifier for each delivered file in that batch.
 2) Optional (recommended) git commands that prove the working tree matches expectations for that batch.
 
-User confirmation requirement:
+User confirmation requirement (APPLY gate):
 - After applying Batch N, the user MUST reply with:
   - the pasted Version Probe output for that batch, and
-  - an explicit: PASS Batch N
+  - an explicit: APPLIED Batch N
 Only then may the assistant deliver the next batch.
 
 Version identifier rule:
@@ -90,6 +93,22 @@ If a file lacks a usable version identifier:
 - The assistant MUST either:
   a) add a minimal version identifier in the file header (only if consistent with that file type and scope), OR
   b) use git verification as the primary proof for that file.
+
+E) Final VERIFICATION gate (LOCKED)
+Full functional verification is performed ONLY ONCE, after ALL files for the change have been delivered.
+
+Rule:
+- Between batches: APPLY gate only (Version Probe + APPLIED Batch N).
+- After the final batch is applied: run the actual verification steps for the change (Mudlet dwverify suite and any required manual checks).
+
+User confirmation requirement (FINAL verification):
+- After applying the final batch and running verification, the user MUST reply with:
+  - the dwverify <suite> output (and any required logs), and
+  - an explicit: PASS Verification
+If verification fails, the user MUST paste the failing outputs for diagnosis.
+
+Note:
+This section modifies batching gates only. Section R (Verification Gate + Confidence Policy) remains authoritative for what counts as verified PASS.
 
 REFERENCE RULE (MANDATORY)
 
@@ -160,7 +179,7 @@ The Anchor Pack MUST match docs/PACKAGE_IDENTITY.md.
 If identity values ever change, docs/PACKAGE_IDENTITY.md MUST be version-bumped and the decision recorded there.
 
 ==================================================
-MUDLET PACKAGE DEVELOPMENT STANDARD v1.14 (FINALIZED)
+MUDLET PACKAGE DEVELOPMENT STANDARD v1.15 (FINALIZED)
 
 Baseline additions included:
 
@@ -214,10 +233,11 @@ NEW: UI Cross-Profile Consistency Policy:
 - Defines strict persistence boundaries for UI state (geometry only; never persist layout internals).
 - Adds verification expectations to prevent regressions (dwverify suite must assert invariants).
 
-NEW: Full-File Return hardening (v1.14):
+NEW: Full-File Return hardening (v1.15):
 - Batched multi-file delivery (3+ files)
 - Large-file override (>= 2000 lines => 1 file per message)
-- Per-batch Version Probe gate (user must confirm PASS Batch N with proof output)
+- Per-batch APPLY gate via Version Probe (user must confirm APPLIED Batch N with proof output)
+- Final VERIFICATION gate only once after all files delivered (user must confirm PASS Verification with dwverify outputs)
 
 ==================================================
 ANCHOR PACK ALIGNMENT RECORD
@@ -290,7 +310,7 @@ dwverify <suite>.
 
 Verification sequences live as named suites (preferred in verification_plan.lua).
 The runner (verification.lua) remains stable; per-change suite edits should land in verification_plan.lua whenever possible.
-Lua steps in suites MUST be single-line only (lua do ... end).
+Lua steps inside verification suites MUST be single-line only (lua do ... end).
 PowerShell verification remains manual and is still provided in chat, but does not replace Mudlet verification gate.
 
 2026-01-28: Added Verification Plan Split:
@@ -327,9 +347,10 @@ Console-first UI verification gate:
 - Added verification expectation: dwverify suite must assert invariants on a "fresh profile" and an "existing profile" (where practical).
 
 2026-03-03: Enhanced Full-File Return Workflow:
-- Added Batched Delivery Extension for 3+ files with hard gating per batch (PASS Batch N).
+- Added Batched Delivery Extension for 3+ files.
 - Added Large-file override: >= 2000 lines requires single-file delivery per message.
-- Added Per-batch Version Probe requirement to prove applied state before next batch is delivered.
+- Replaced per-batch PASS gate with per-batch APPLY gate (APPLIED Batch N) using Version Probe proof.
+- Added Final VERIFICATION gate only once after all files are delivered (PASS Verification with dwverify outputs).
 
 ==================================================
 SECTION A - BOOTSTRAP (ALWAYS APPLIES)
@@ -560,7 +581,7 @@ BOM scan (docs):
 PowerShell BOM scan loop over docs/*.md (checks EF BB BF).
 
 Mojibake scan (docs):
-Select-String -Path .\docs*.md -Pattern 'ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢|ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢|ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¯ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½' -SimpleMatch
+Select-String -Path .\docs*.md -Pattern 'ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢|ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬ ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â‚¬Å¾Ã‚Â¢|ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¯ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¿ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½' -SimpleMatch
 Expected: no matches
 
 .gitattributes check (BOM + newline):
@@ -656,7 +677,7 @@ docs/Self_Test_Runner_v1.0.md
 
 docs/DOCS_SYNC_CHECKLIST.md
 
-docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.14.md (this file; versioned by content header)
+docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.15.md (this file; versioned by content header)
 
 ==================================================
 SECTION D - CORE DEVELOPMENT STANDARD
@@ -1338,7 +1359,7 @@ Deprecations documented in changelog + contract sheet + event registry.
 
 Deprecated API/event keeps working or provides compatibility shim.
 
-Emit non-spam warning log when deprecated API is used.
+Emit non-spam warning log when deprecated API/event is used.
 
 Provide replacement in same release as deprecation.
 
@@ -1451,7 +1472,7 @@ dwverify [suite]
 
 5) PowerShell verification:
 - still provided in chat as manual steps
-- complements Mudlet verification but does not replace it
+- complements Mudlet verification but does not replace Mudlet verification gate
 
 Safety and Automation Policy alignment:
 - dwverify is a Manual batch sequence (Section A.1.1).
