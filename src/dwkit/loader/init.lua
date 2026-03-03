@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.loader.init
 -- Owner       : Loader
--- Version     : v2026-02-26C
+-- Version     : v2026-03-03A
 -- Purpose     :
 --   - Initialize PackageRootGlobal (DWKit) and attach core modules.
 --   - Manual use only. No automation, no gameplay output.
@@ -337,6 +337,16 @@ function Loader.init()
             DWKit._scoreStoreServiceLoadError = tostring(modOrErr4)
         end
 
+        -- NEW: PracticeStore (SAFE, manual-only service)
+        local okPr, modOrErr5 = pcall(require, "dwkit.services.practice_store_service")
+        if okPr and type(modOrErr5) == "table" then
+            DWKit.services.practiceStoreService = modOrErr5
+            DWKit._practiceStoreServiceLoadError = nil
+        else
+            DWKit.services.practiceStoreService = nil
+            DWKit._practiceStoreServiceLoadError = tostring(modOrErr5)
+        end
+
         -- WhoStore (SAFE). Canonical registry path for all consumers:
         --   ctx.getService("whoStoreService") -> kit.services.whoStoreService
         local okWho, whoOrErr = pcall(require, "dwkit.services.whostore_service")
@@ -396,6 +406,29 @@ function Loader.init()
         else
             DWKit.capture.scoreCapture = nil
             DWKit._scoreCaptureLoadError = tostring(capOrErr)
+        end
+    end
+
+    -- ---------------------------------------------------------------------
+    -- NEW: Install passive practice capture (SAFE). No send(), no timers.
+    -- Captures practice output when YOU run practice.
+    -- ---------------------------------------------------------------------
+    do
+        DWKit.capture = DWKit.capture or {}
+
+        local okCap, capOrErr = pcall(require, "dwkit.capture.practice_capture")
+        if okCap and type(capOrErr) == "table" and type(capOrErr.install) == "function" then
+            DWKit.capture.practiceCapture = capOrErr
+
+            local okInstall, installErr = capOrErr.install()
+            if okInstall then
+                DWKit._practiceCaptureLoadError = nil
+            else
+                DWKit._practiceCaptureLoadError = tostring(installErr)
+            end
+        else
+            DWKit.capture.practiceCapture = nil
+            DWKit._practiceCaptureLoadError = tostring(capOrErr)
         end
     end
 

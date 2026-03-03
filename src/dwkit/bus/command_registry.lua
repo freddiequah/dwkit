@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_registry
 -- Owner       : Bus
--- Version     : v2026-03-01D
+-- Version     : v2026-03-03A
 -- Purpose     :
 --   - Single source of truth for user-facing commands (kit + gameplay wrappers).
 --   - Provides SAFE runtime listing + help output derived from the same registry data.
@@ -41,7 +41,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-01D"
+M.VERSION = "v2026-03-03A"
 
 -- -------------------------
 -- Output helper (copy/paste friendly)
@@ -557,6 +557,33 @@ local REG = {
             },
         },
 
+        -- NEW: PracticeStore command surface (SAFE)
+        dwpracticestore = {
+            command     = "dwpracticestore",
+            aliases     = {},
+            ownerModule = "dwkit.commands.dwpracticestore",
+            description = "Shows and manages PracticeStoreService state + persistence (SAFE).",
+            syntax      =
+            "dwpracticestore [status|persist on|off|status|fixture [basic]|clear|wipe [disk]|reset [disk]]  (or: lua DWKit.services.practiceStoreService.printSummary())",
+            examples    = {
+                "dwpracticestore",
+                "dwpracticestore status",
+                "dwpracticestore persist status",
+                "dwpracticestore fixture basic",
+                "lua DWKit.services.practiceStoreService.ingestFromText(\"PRACTICE TEST\",{source=\"manual\"})",
+                "lua DWKit.services.practiceStoreService.printSummary()",
+            },
+            safety      = "SAFE",
+            mode        = "manual",
+            sendsToGame = false,
+            notes       = {
+                "Backed by dwkit.services.practice_store_service (PracticeStoreService).",
+                "Subcommands are implemented by dwkit.services.alias_factory auto SAFE alias generation and call PracticeStoreService methods (still SAFE; no gameplay commands sent).",
+                "Practice snapshots may be ingested via passive capture installed during loader.init (capture is SAFE; it only reacts to your practice output).",
+                "In case the alias is stale/cached, you can use the lua fallback above after loader init.",
+            },
+        },
+
         dwcommands = {
             command     = "dwcommands",
             aliases     = {},
@@ -756,7 +783,7 @@ local function _isRequiredWhenSendsToGame(fieldName)
     fieldName = tostring(fieldName or "")
     if fieldName == "" then return false end
     local req = (type(REQUIRED_WHEN_SENDSTOGAME_SPEC.required) == "table") and REQUIRED_WHEN_SENDSTOGAME_SPEC.required or
-    {}
+        {}
     for i = 1, #req do
         if tostring(req[i]) == fieldName then
             return true
