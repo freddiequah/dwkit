@@ -1,4 +1,4 @@
-# docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.13.md
+# docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.14.md
 ============================================================
 FULL ANCHOR PACK - MUDLET KIT GOVERNANCE (STORE IN PROJECT)
 UPDATED: + Mudlet Input Line Paste Safety (single-line lua do...end)
@@ -7,7 +7,7 @@ UPDATED: + Automation Policy: Passive Capture vs Active Polling + Essential Defa
 UPDATED: + Mudlet Verification Runner Standard: dwverify + verification.lua suites (scripted verification steps; Lua steps must be single-line)
 UPDATED: + Verification Plan Split: verification.lua (stable runner) + verification_plan.lua (per-change suites)
 UPDATED: + UI Architecture Contracts: Shared Frame + Content Kits, and UI semantics (ActionPad/Presence_UI/RoomEntities_UI) + ui_smoke console verification
-UPDATED: + Full-File Return Rule hardening: always return full files in one contiguous block; never split outputs; never truncate; preserve unrelated code.
+UPDATED: + Full-File Return Rule hardening: batched multi-file delivery + large-file single delivery + per-batch version probe gate
 UPDATED: + Mojibake cleanup: normalize punctuation/quotes to avoid UTF-8 decode artifacts in this standard.
 UPDATED (NEW): + UI Cross-Profile Consistency Policy (layout invariants vs per-profile workspace persistence)
 
@@ -37,12 +37,59 @@ When requesting code changes, the user will paste the full current file(s).
 The assistant MUST return the full updated file(s) in full (no patches/diffs).
 
 Hardening rules (MANDATORY):
-- No split delivery: Return each changed file as ONE complete, contiguous block (no PART 1/2). Only split if the user explicitly asks.
+- Full file only: Return each changed file as ONE complete, contiguous block (no PART 1/2 inside a file).
 - No truncation: Never omit or elide any lines from a changed file. If the file is large, still return it in full.
-- Preserve unrelated code: Implement only the requested change. Do NOT delete, rewrite, or 'simplify' unrelated functions/sections (e.g., keep a/b/c/d/e intact when adding f).
+- Preserve unrelated code: Implement only the requested change. Do NOT delete, rewrite, or "simplify" unrelated functions/sections (e.g., keep a/b/c/d/e intact when adding f).
 - Reverts follow the same rule: if reverting a file, return the full reverted file content in full.
+- If the assistant is unsure it has the latest file content, it MUST request the full file content first and provide the exact commands to collect it.
 
-If the assistant is unsure it has the latest file content, it MUST request the full file content first and provide the exact commands to collect it.
+FULL-FILE RETURN (BATCHED DELIVERY EXTENSION) (MANDATORY)
+
+Purpose:
+Keep Full-File Return strict and reliable, while avoiding overwhelm when many files are involved.
+
+A) Batched delivery trigger (LOCKED)
+If a change touches 3 or more files, the assistant MUST split delivery into batches.
+Batches are gated: the assistant MUST NOT deliver Batch N+1 until the user confirms PASS for Batch N.
+
+B) Default batch size (LOCKED)
+Default batch size is 2 files per message.
+Example: 5 files total delivers as: 2 files (Batch 1), 2 files (Batch 2), 1 file (Batch 3).
+
+C) Large-file override (LOCKED)
+If any file is large, the assistant MUST deliver only 1 file per message for that file.
+
+Large file definition:
+- 2000 lines or more (>= 2000 lines) in that file.
+
+Rule:
+- For any large file, deliver it as its own single-file batch (no bundling with other files).
+
+If size is unknown:
+- When the assistant cannot reliably determine the line count, it MUST treat the file as large and deliver 1 file per message until proven otherwise.
+
+D) Per-batch verification gate: Version Probe (LOCKED)
+Every batch delivery MUST include verification commands that prove the delivered file(s) have been applied on the user's side.
+
+Per batch, the assistant MUST provide:
+1) A "Version Probe" command set that prints the version identifier for each delivered file in that batch.
+2) Optional (recommended) git commands that prove the working tree matches expectations for that batch.
+
+User confirmation requirement:
+- After applying Batch N, the user MUST reply with:
+  - the pasted Version Probe output for that batch, and
+  - an explicit: PASS Batch N
+Only then may the assistant deliver the next batch.
+
+Version identifier rule:
+- For Lua modules, prefer a header field in the module comment block such as:
+  -- Version     : vYYYY-MM-DDX
+- For docs, the version is the file's own "MUDLET PACKAGE DEVELOPMENT STANDARD vX.YY" header and/or file name.
+
+If a file lacks a usable version identifier:
+- The assistant MUST either:
+  a) add a minimal version identifier in the file header (only if consistent with that file type and scope), OR
+  b) use git verification as the primary proof for that file.
 
 REFERENCE RULE (MANDATORY)
 
@@ -113,7 +160,7 @@ The Anchor Pack MUST match docs/PACKAGE_IDENTITY.md.
 If identity values ever change, docs/PACKAGE_IDENTITY.md MUST be version-bumped and the decision recorded there.
 
 ==================================================
-MUDLET PACKAGE DEVELOPMENT STANDARD v1.13 (FINALIZED)
+MUDLET PACKAGE DEVELOPMENT STANDARD v1.14 (FINALIZED)
 
 Baseline additions included:
 
@@ -166,6 +213,11 @@ NEW: UI Cross-Profile Consistency Policy:
 - Defines what MUST remain consistent across profiles (layout invariants) vs what may vary (workspace preferences).
 - Defines strict persistence boundaries for UI state (geometry only; never persist layout internals).
 - Adds verification expectations to prevent regressions (dwverify suite must assert invariants).
+
+NEW: Full-File Return hardening (v1.14):
+- Batched multi-file delivery (3+ files)
+- Large-file override (>= 2000 lines => 1 file per message)
+- Per-batch Version Probe gate (user must confirm PASS Batch N with proof output)
 
 ==================================================
 ANCHOR PACK ALIGNMENT RECORD
@@ -238,14 +290,15 @@ dwverify <suite>.
 
 Verification sequences live as named suites (preferred in verification_plan.lua).
 The runner (verification.lua) remains stable; per-change suite edits should land in verification_plan.lua whenever possible.
-Lua steps in suites MUST be single-line (lua do ... end).
+Lua steps in suites MUST be single-line only (lua do ... end).
 PowerShell verification remains manual and is still provided in chat, but does not replace Mudlet verification gate.
 
 2026-01-28: Added Verification Plan Split:
 
 The preferred split is:
 - verification.lua (stable runner engine)
-- verification_plan.lua (per-change suites)
+- verification_plan.lua (per-change suites; expected to change frequently)
+
 Per-change verification updates should land in verification_plan.lua whenever possible.
 
 2026-01-28: Added UI Architecture Contracts (Shared Frame + Content Kits) and UI semantics:
@@ -265,13 +318,18 @@ Console-first UI verification gate:
 
 2026-02-07: Standard maintenance updates:
 - Fixed mojibake/UTF-8 punctuation artifacts in this document.
-- Hardened Full-File Return Workflow: no split delivery, no truncation, preserve unrelated code; full-file reverts required.
+- Hardened Full-File Return Workflow: no truncation, preserve unrelated code; full-file reverts required.
 
 2026-02-11: Added UI Cross-Profile Consistency Policy:
 - Declared layout invariants that must never differ across profiles (no overlap, no dead gaps, deterministic padding/inset/tab geometry).
 - Declared which settings may differ across profiles (enabled/visible preference, window x/y/w/h geometry).
 - Declared persistence boundaries: geometry-only persistence for UI windows; never persist layout internals or derived metrics.
 - Added verification expectation: dwverify suite must assert invariants on a "fresh profile" and an "existing profile" (where practical).
+
+2026-03-03: Enhanced Full-File Return Workflow:
+- Added Batched Delivery Extension for 3+ files with hard gating per batch (PASS Batch N).
+- Added Large-file override: >= 2000 lines requires single-file delivery per message.
+- Added Per-batch Version Probe requirement to prove applied state before next batch is delivered.
 
 ==================================================
 SECTION A - BOOTSTRAP (ALWAYS APPLIES)
@@ -502,7 +560,7 @@ BOM scan (docs):
 PowerShell BOM scan loop over docs/*.md (checks EF BB BF).
 
 Mojibake scan (docs):
-Select-String -Path .\docs*.md -Pattern 'ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢|ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢|ÃƒÆ’Ã‚Â¯Ãƒâ€šÃ‚Â¿Ãƒâ€šÃ‚Â½' -SimpleMatch
+Select-String -Path .\docs*.md -Pattern 'ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¢|ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢|ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¯ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â½' -SimpleMatch
 Expected: no matches
 
 .gitattributes check (BOM + newline):
@@ -598,7 +656,7 @@ docs/Self_Test_Runner_v1.0.md
 
 docs/DOCS_SYNC_CHECKLIST.md
 
-docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.13.md (this file; versioned by content header)
+docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.14.md (this file; versioned by content header)
 
 ==================================================
 SECTION D - CORE DEVELOPMENT STANDARD
@@ -1620,7 +1678,7 @@ Additional required fields for Gameplay Command Wrappers:
 
 sendsToGame: YES
 
-underlyingGameCommand: <string> (e.g. "practice", "cast 'heal'", "score -l")
+underlyingGameCommand: <string> (e.g., "practice", "cast 'heal'", "score -l")
 
 sideEffects: <text> (mana use, spam output, changes state, etc.)
 
