@@ -1,16 +1,20 @@
 -- #########################################################################
 -- Module Name : dwkit.capture.practice_capture
 -- Owner       : Capture
--- Version     : v2026-03-03D
+-- Version     : v2026-03-03G
 -- Purpose     :
 --   - Passive capture of MUD "practice" output (no GMCP, no send()).
 --   - When a practice block is detected, capture lines until prompt/noise indicates end,
 --     then ingest raw block into DWKit.services.practiceStoreService.
 --
--- End-of-block Strategy (prompt-agnostic, no timers):
+-- End-of-block Strategy (prompt-aware via PromptDetectorService, no timers):
 --   - Start: detect practice headers / session line variants (skills/spells/race/weapon)
---   - End: after capture has started, finalize when a prompt/noise line appears
---          (Hp/Mp/Mv prompt or any line ending with '>') OR if runaway guard triggers.
+--   - End: after capture has started, finalize when:
+--       * "Opp:" line appears, OR
+--       * loose hp/mp/mv prompt line appears (case-insensitive; does not require '>'), OR
+--       * PromptDetectorService detects a prompt sequence from recent tail lines (supports multi-line and non-'>' prompts), OR
+--       * fallback: Hp/Mp/Mv> OR any line ending with '>' (only if PromptDetectorService unavailable), OR
+--       * runaway guard triggers.
 --
 -- Install behavior hardening:
 --   - tempRegexTrigger IDs persist across reloads, so if the module updates its start regex list,
@@ -41,11 +45,12 @@
 -- Persistence      : None (handled by PracticeStore service)
 -- Automation Policy: Passive capture only (no send(), no timers)
 -- Dependencies     : DWKit.services.practiceStoreService (must provide ingestFromText)
+--                +  (optional) DWKit.services.promptDetectorService for robust prompt end detection
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-03-03D"
+M.VERSION = "v2026-03-03G"
 
 local function _getRoot()
     local DW = (type(_G.DWKit) == "table") and _G.DWKit or nil
@@ -90,23 +95,32 @@ local function _mkGuardDefaults()
     return 350, 45000
 end
 
+local function _trim(s)
+    s = tostring(s or "")
+    return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function _collapseSpaces(s)
+    s = tostring(s or "")
+    s = s:gsub("%s+", " ")
+    return _trim(s)
+end
+
 local function _looksLikeHpMpMvPrompt(ln)
     if type(ln) ~= "string" then return false end
     return ln:match("^%d+%(%d+%)Hp%s+%d+%(%d+%)Mp%s+%d+%(%d+%)Mv>%s*$") ~= nil
 end
 
+local function _looksLikeLooseHpMpMvPrompt(ln)
+    if type(ln) ~= "string" then return false end
+    local s = _collapseSpaces(_trim(ln)):lower()
+    -- Works for prompts like "(i54) <812hp 100mp 83mv>" and variants that don't end with ">"
+    return s:match("%d+hp%s+%d+mp%s+%d+mv") ~= nil
+end
+
 local function _looksLikeAnglePrompt(ln)
     if type(ln) ~= "string" then return false end
     return ln:match(">%s*$") ~= nil
-end
-
--- NOTE: blank lines are NOT end markers (section separators exist in practice output).
-local function _isPromptNoiseLine(ln)
-    if type(ln) ~= "string" then return false end
-    if ln:match("^Opp:") then return true end
-    if _looksLikeHpMpMvPrompt(ln) then return true end
-    if _looksLikeAnglePrompt(ln) then return true end
-    return false
 end
 
 local function _getPracticeStore()
@@ -116,6 +130,22 @@ local function _getPracticeStore()
         return true, svc, nil
     end
     return false, nil, "practiceStoreService not available (DWKit.services.practiceStoreService.ingestFromText missing)"
+end
+
+local function _getPromptDetector()
+    local DW = (type(_G.DWKit) == "table") and _G.DWKit or nil
+    local svc = (DW and type(DW.services) == "table") and DW.services.promptDetectorService or nil
+    if type(svc) == "table" and type(svc.isPromptSequence) == "function" and type(svc.normalizeLine) == "function" then
+        return true, svc, nil
+    end
+
+    -- best-effort require (in case service isn't wired under DWKit.services in a given load order)
+    local okReq, mod = pcall(require, "dwkit.services.prompt_detector_service")
+    if okReq and type(mod) == "table" and type(mod.isPromptSequence) == "function" and type(mod.normalizeLine) == "function" then
+        return true, mod, nil
+    end
+
+    return false, nil, "promptDetectorService unavailable (missing isPromptSequence/normalizeLine)"
 end
 
 local function _safeKill(id)
@@ -152,6 +182,15 @@ local function _status()
         seenLines = root._seenLines,
         seenBytes = root._seenBytes,
 
+        -- prompt tail (for end detection)
+        tailMax = root._tailMax,
+        tailCount = (type(root._tailClean) == "table") and #root._tailClean or 0,
+
+        -- prompt detector diagnostics (best-effort)
+        lastPromptDetectOk = root._lastPromptDetectOk,
+        lastPromptDetectHit = root._lastPromptDetectHit,
+        lastPromptDetectErr = root._lastPromptDetectErr,
+
         lastCaptureTs = root._lastCaptureTs,
         lastIngestOk = root._lastIngestOk,
         lastIngestErr = root._lastIngestErr,
@@ -160,10 +199,10 @@ local function _status()
     }
 end
 
-local function _trimTrailingPromptNoise(buf)
+local function _trimTrailingBlankLines(buf)
     while #buf > 0 do
         local last = tostring(buf[#buf] or "")
-        if _isPromptNoiseLine(last) or last:match("^%s*$") then
+        if last:match("^%s*$") then
             table.remove(buf, #buf)
         else
             break
@@ -180,6 +219,7 @@ local function _abortCapture(root, reason, errMsg)
     root._lineTriggerId = nil
 
     root._buf = nil
+    root._tailClean = nil
     root._capturing = false
     root._lastCaptureTs = os.time()
 
@@ -199,11 +239,12 @@ local function _finalizeCapture(root, reason)
 
     local buf = root._buf or {}
     root._buf = nil
+    root._tailClean = nil
     root._capturing = false
     root._lastCaptureTs = os.time()
     root._lastEndReason = tostring(reason or "unknown")
 
-    _trimTrailingPromptNoise(buf)
+    _trimTrailingBlankLines(buf)
 
     local text = table.concat(buf, "\n")
     root._lastCapturedLen = #text
@@ -226,6 +267,86 @@ local function _finalizeCapture(root, reason)
     root._lastIngestErr = ingErr
 end
 
+local function _appendPromptTail(root, promptSvc, lnRaw)
+    if not root then return end
+    root._tailClean = (type(root._tailClean) == "table") and root._tailClean or {}
+    local tail = root._tailClean
+
+    local ln = tostring(lnRaw or "")
+    if promptSvc and type(promptSvc.normalizeLine) == "function" then
+        ln = promptSvc.normalizeLine(ln)
+    else
+        ln = ln:gsub("\r", "")
+        ln = _trim(ln)
+    end
+
+    -- Match PromptDetectorService watcher behavior: collapse spaces
+    ln = _collapseSpaces(ln)
+
+    if ln == "" then
+        return
+    end
+
+    tail[#tail + 1] = ln
+
+    local maxN = tonumber(root._tailMax or 0) or 0
+    if maxN <= 0 then maxN = 12 end
+    if maxN < 6 then maxN = 6 end
+    if maxN > 30 then maxN = 30 end
+    root._tailMax = maxN
+
+    while #tail > maxN do
+        table.remove(tail, 1)
+    end
+end
+
+local function _isPromptEndByDetector(root, promptSvc)
+    if not root or type(root._tailClean) ~= "table" then
+        return false
+    end
+    if not promptSvc or type(promptSvc.isPromptSequence) ~= "function" then
+        return false
+    end
+
+    local ok, hitOrErr = pcall(function()
+        return (promptSvc.isPromptSequence(root._tailClean) == true)
+    end)
+
+    root._lastPromptDetectOk = ok and true or false
+    if ok then
+        root._lastPromptDetectHit = hitOrErr and true or false
+        root._lastPromptDetectErr = nil
+        return (hitOrErr == true)
+    end
+
+    root._lastPromptDetectHit = false
+    root._lastPromptDetectErr = tostring(hitOrErr or "prompt detect error")
+    return false
+end
+
+-- NOTE: blank lines are NOT end markers (section separators exist in practice output).
+local function _isPromptNoiseLine(root, ln, promptSvcAvailable, promptSvc)
+    if type(ln) ~= "string" then return false end
+
+    if ln:match("^Opp:") then return true end
+
+    -- Always accept loose hp/mp/mv prompts (covers custom prompts like "(i54) <812hp 100mp 83mv>")
+    if _looksLikeLooseHpMpMvPrompt(ln) then return true end
+
+    -- If PromptDetectorService is available, rely on it for end-of-block.
+    if promptSvcAvailable == true then
+        if _isPromptEndByDetector(root, promptSvc) then
+            return true
+        end
+        return false
+    end
+
+    -- fallback heuristics only when prompt detector is unavailable
+    if _looksLikeHpMpMvPrompt(ln) then return true end
+    if _looksLikeAnglePrompt(ln) then return true end
+    return false
+end
+
 local function _beginCapture(firstLine)
     local root = _getRoot()
     if not root then return end
@@ -245,9 +366,17 @@ local function _beginCapture(firstLine)
     root._lastCapturedLen = nil
     root._lastEndReason = nil
 
+    root._lastPromptDetectOk = nil
+    root._lastPromptDetectHit = nil
+    root._lastPromptDetectErr = nil
+
     -- guard counters
     root._seenLines = 0
     root._seenBytes = 0
+
+    -- prompt tail buffer (for sequence detection)
+    root._tailClean = {}
+    root._tailMax = tonumber(root._tailMax or 12) or 12
 
     if _isFn("tempRegexTrigger") then
         root._lineTriggerId = tempRegexTrigger("^(.*)$", function()
@@ -257,6 +386,11 @@ local function _beginCapture(firstLine)
             if root._skipLineOnce == true then
                 root._skipLineOnce = false
                 if ln == tostring(root._startLine or "") then
+                    -- still track tail (safe)
+                    local okPD, pd = _getPromptDetector()
+                    if okPD then
+                        _appendPromptTail(root, pd, ln)
+                    end
                     return
                 end
             end
@@ -276,8 +410,16 @@ local function _beginCapture(firstLine)
                 return
             end
 
-            -- buffer everything EXCEPT prompt noise (avoid polluting)
-            if not _isPromptNoiseLine(ln) then
+            -- Prompt detector (best-effort)
+            local okPD, pd = _getPromptDetector()
+            if okPD then
+                _appendPromptTail(root, pd, ln)
+            end
+
+            local promptSvcAvailable = (okPD == true)
+
+            -- buffer everything EXCEPT prompt end lines (avoid polluting)
+            if not _isPromptNoiseLine(root, ln, promptSvcAvailable, pd) then
                 local buf = root._buf
                 if type(buf) == "table" then
                     buf[#buf + 1] = ln
@@ -285,7 +427,7 @@ local function _beginCapture(firstLine)
             end
 
             -- finalize only on real prompt/noise (NOT blank lines)
-            if _isPromptNoiseLine(ln) then
+            if _isPromptNoiseLine(root, ln, promptSvcAvailable, pd) then
                 _finalizeCapture(root, "promptnoise")
                 return
             end
@@ -293,6 +435,7 @@ local function _beginCapture(firstLine)
     else
         root._capturing = false
         root._buf = nil
+        root._tailClean = nil
         root._lastIngestOk = false
         root._lastIngestErr = "tempRegexTrigger not available"
     end
@@ -324,6 +467,7 @@ function M.uninstall()
 
     root._capturing = false
     root._buf = nil
+    root._tailClean = nil
     root._startLine = nil
     root._skipLineOnce = nil
 
@@ -332,8 +476,14 @@ function M.uninstall()
     root._seenLines = nil
     root._seenBytes = nil
 
+    root._tailMax = nil
+
     root._startRegexList = nil
     root._installedVersion = nil
+
+    root._lastPromptDetectOk = nil
+    root._lastPromptDetectHit = nil
+    root._lastPromptDetectErr = nil
 
     _setInstalled(false)
     return true, nil
@@ -359,6 +509,9 @@ function M.install(opts)
     local dLines, dBytes = _mkGuardDefaults()
     root._maxLines = (type(opts.maxLines) == "number" and opts.maxLines > 0) and math.floor(opts.maxLines) or dLines
     root._maxBytes = (type(opts.maxBytes) == "number" and opts.maxBytes > 0) and math.floor(opts.maxBytes) or dBytes
+
+    -- prompt tail size (SAFE; internal only)
+    root._tailMax = (type(opts.tailMax) == "number" and opts.tailMax > 0) and math.floor(opts.tailMax) or 12
 
     root._startTriggerIds = {}
 
