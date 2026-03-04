@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-04G
+-- Version     : v2026-03-04H
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-04G"
+M.VERSION = "v2026-03-04H"
 
 local SUITES = {
     default = {
@@ -159,6 +159,51 @@ local SUITES = {
             },
             { cmd = "dwskills",                 note = "Should print SkillRegistryService summary and list keys (SAFE)." },
             { cmd = "dwskills dump power heal", note = "Optional: dump one entry; should show normalized practiceKey + classKey." },
+        },
+    },
+
+    -- NEW: ActionPad gating foundation smoke (Bucket B)
+    actionpad_gating_smoke = {
+        title = "actionpad_gating_smoke",
+        description =
+        "ActionPad gating foundation smoke (Bucket B): verify PracticeStore.getLearnStatus and ScoreStore.getCore behave deterministically via fixtures and clear. No gameplay sends.",
+        delay = 0.25,
+        steps = {
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.practice_store_service"); local ok,err=P.ingestFixture("basic",{source="dwverify:actionpad_gating:practice_fixture"}); print(string.format("[dwverify-gating] practice ingestFixture ok=%s err=%s", tostring(ok==true), tostring(err))) if ok~=true then error("practice ingestFixture failed: "..tostring(err)) end end',
+                note = "PracticeStore: ingest fixture basic.",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.practice_store_service"); local st=P.getLearnStatus("spell","heal"); print(string.format("[dwverify-gating] practice heal learned=%s reason=%s tier=%s cost=%s", tostring(st.learned==true), tostring(st.reason), tostring(st.tier or "nil"), tostring(st.cost or "nil"))) if st.ok~=true then error("heal status ok~=true") end; if st.learned~=true then error("Expected heal learned=true") end; if tostring(st.reason)~="ok" then error("Expected heal reason=ok; got "..tostring(st.reason)) end end',
+                note = "ASSERT: spell heal learned=true reason=ok.",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.practice_store_service"); local st=P.getLearnStatus("skill","bash"); print(string.format("[dwverify-gating] practice bash learned=%s reason=%s tier=%s", tostring(st.learned==true), tostring(st.reason), tostring(st.tier or "nil"))) if st.ok~=true then error("bash status ok~=true") end; if st.learned~=false then error("Expected bash learned=false") end; if tostring(st.reason)~="not_learned" then error("Expected bash reason=not_learned; got "..tostring(st.reason)) end end',
+                note = "ASSERT: skill bash learned=false reason=not_learned.",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.practice_store_service"); local st=P.getLearnStatus("spell","power heal"); print(string.format("[dwverify-gating] practice power heal learned=%s reason=%s tier=%s cost=%s", tostring(st.learned==true), tostring(st.reason), tostring(st.tier or "nil"), tostring(st.cost or "nil"))) if st.ok~=true then error("power heal status ok~=true") end; if st.learned~=false then error("Expected power heal learned=false") end; if tostring(st.reason)~="not_learned" then error("Expected power heal reason=not_learned; got "..tostring(st.reason)) end end',
+                note = "ASSERT: spell power heal learned=false reason=not_learned.",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.practice_store_service"); local ok,err=P.clear({source="dwverify:actionpad_gating:practice_clear"}); if ok==false then error("practice clear failed: "..tostring(err)) end; local st=P.getLearnStatus("spell","heal"); print(string.format("[dwverify-gating] practice after clear reason=%s hasSnapshot=%s hasParsed=%s", tostring(st.reason), tostring(st.hasSnapshot), tostring(st.hasParsed))) if tostring(st.reason)~="unknown_stale" then error("Expected unknown_stale after clear; got "..tostring(st.reason)) end end',
+                note = "ASSERT: after PracticeStore.clear, learn status returns unknown_stale.",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.score_store_service"); local ok,err=S.ingestFixture("score_table_short",{source="dwverify:actionpad_gating:score_fixture"}); print(string.format("[dwverify-gating] score ingestFixture ok=%s err=%s", tostring(ok==true), tostring(err))) if ok~=true then error("score ingestFixture failed: "..tostring(err)) end; local core=S.getCore(); print(string.format("[dwverify-gating] score core reason=%s name=%s class=%s level=%s variant=%s", tostring(core.reason), tostring(core.name or "nil"), tostring(core.class or "nil"), tostring(core.level or "nil"), tostring(core.variant or "nil"))) if core.ok~=true then error("score core ok~=true") end; if tostring(core.reason)~="ok" then error("Expected score core reason=ok; got "..tostring(core.reason)) end; if tonumber(core.level or 0)~=48 then error("Expected level=48; got "..tostring(core.level)) end; if tostring(core.class or "")~="Warrior" then error("Expected class=Warrior; got "..tostring(core.class)) end; if tostring(core.name or "")~="Vzae" then error("Expected name=Vzae; got "..tostring(core.name)) end end',
+                note = "ASSERT: ScoreStore fixture parses core name/class/level and reason=ok.",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.score_store_service"); local ok,err=S.clear({source="dwverify:actionpad_gating:score_clear"}); if ok==false then error("score clear failed: "..tostring(err)) end; local core=S.getCore(); print(string.format("[dwverify-gating] score after clear reason=%s hasSnapshot=%s hasParsed=%s", tostring(core.reason), tostring(core.hasSnapshot), tostring(core.hasParsed))) if tostring(core.reason)~="unknown_stale" then error("Expected score unknown_stale after clear; got "..tostring(core.reason)) end; print("[dwverify-gating] PASS actionpad_gating_smoke") end',
+                note = "ASSERT: after ScoreStore.clear, core returns unknown_stale.",
+            },
         },
     },
 
