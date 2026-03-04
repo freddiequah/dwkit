@@ -2,9 +2,9 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.actionpad_ui
 -- Owner       : UI
--- Version     : v2026-03-04F
+-- Version     : v2026-03-04H
 -- Purpose     :
---   - ActionPad UI (MVP): online-only owned roster view with PLAN-only test buttons.
+--   - ActionPad UI (Bucket A): online-only owned roster view with real button groups (PLAN-only).
 --   - Consumes ActionPadService rowsOnlineOnly.
 --   - SAFE: does NOT send gameplay commands. Buttons only print computed plans.
 --   - Follows UI contracts: shared frame (ui_window + ui_theme) + content kits.
@@ -25,7 +25,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-04F"
+M.VERSION = "v2026-03-04H"
 M.UI_ID = "actionpad_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -50,7 +50,10 @@ local _state = {
         listRoot = nil,
         header = nil,
         status = nil,
-        rows = {},
+        global = {
+            feastBtn = nil,
+        },
+        rows = {}, -- array of row blocks { widgets = { ... } }
     },
 }
 
@@ -58,17 +61,41 @@ local function _safeDelete(w)
     pcall(function() U.safeDelete(w) end)
 end
 
+local function _safeEcho(label, text)
+    if type(label) == "table" and type(label.echo) == "function" then
+        pcall(function() label:echo(tostring(text or "")) end)
+    end
+end
+
 local function _clearRows()
     local rows = _state.widgets.rows or {}
     for i = 1, #rows do
-        local r = rows[i]
-        if type(r) == "table" then
-            _safeDelete(r.nameLabel)
-            _safeDelete(r.btnSay)
-            _safeDelete(r.btnHeal)
+        local block = rows[i]
+        local ws = (type(block) == "table") and block.widgets or nil
+        if type(ws) == "table" then
+            _safeDelete(ws.nameLabel)
+
+            if type(ws.ctrlBtns) == "table" then
+                for j = 1, #ws.ctrlBtns do _safeDelete(ws.ctrlBtns[j]) end
+            end
+            if type(ws.serviceBtns) == "table" then
+                for j = 1, #ws.serviceBtns do _safeDelete(ws.serviceBtns[j]) end
+            end
+            if type(ws.moveBtns) == "table" then
+                for j = 1, #ws.moveBtns do _safeDelete(ws.moveBtns[j]) end
+            end
+            if type(ws.combatBtns) == "table" then
+                for j = 1, #ws.combatBtns do _safeDelete(ws.combatBtns[j]) end
+            end
         end
     end
     _state.widgets.rows = {}
+end
+
+local function _clearGlobal()
+    local g = _state.widgets.global or {}
+    _safeDelete(g.feastBtn)
+    _state.widgets.global = { feastBtn = nil }
 end
 
 local function _ensureCreated()
@@ -85,8 +112,8 @@ local function _ensureCreated()
         title = "ActionPad",
         x = 450,
         y = 60,
-        width = 420,
-        height = 320,
+        width = 520,
+        height = 360,
         padding = 6,
         onClose = function(b)
             if type(b) == "table" and type(b.frame) == "table" then
@@ -125,7 +152,7 @@ local function _ensureCreated()
     }, listRoot)
 
     if type(header) == "table" then
-        pcall(function() header:echo(ListKit.toPreHtml("ActionPad (MVP) — online-only roster (PLAN only)")) end)
+        pcall(function() header:echo(ListKit.toPreHtml("ActionPad (Bucket A) - online-only roster (PLAN only)")) end)
         pcall(ListKit.applySectionHeaderStyle, header)
     end
 
@@ -158,26 +185,42 @@ local function _setStatusLine(text)
     end
 end
 
-local function _planSay(rowName)
+local function _hasOnlineName(rows, name)
+    name = tostring(name or "")
+    if name == "" then return false end
+    for i = 1, #rows do
+        local r = rows[i] or {}
+        if tostring(r.name or "") == name then
+            return true
+        end
+    end
+    return false
+end
+
+local function _planSelfExec(rowName, cmd, metaLabel)
     local okA, A = pcall(require, "dwkit.services.actionpad_service")
     if not okA or type(A) ~= "table" then
         return false, "ActionPadService missing"
     end
 
-    local plan, err = A.planSelfExec(tostring(rowName or ""), "say [DWKit] ActionPad test",
-        { source = "actionpad_ui:planSay" })
+    local plan, err = A.planSelfExec(tostring(rowName or ""), tostring(cmd or ""),
+        { source = "actionpad_ui:" .. tostring(metaLabel or "planSelf") })
     if not plan then
         return false, tostring(err or "planSelfExec failed")
     end
 
-    local line = string.format("[ActionPad] PLAN selfExec targetProfile=%s cmd=%s",
-        tostring(plan.targetProfile), tostring(plan.cmd))
+    local line = string.format("[ActionPad] PLAN SELF-EXEC (%s) row=%s execProfile=%s cmd=%s",
+        tostring(metaLabel or "self"),
+        tostring(rowName),
+        tostring(plan.targetProfile),
+        tostring(plan.cmd))
+
     print(line)
     _setStatusLine(line)
     return true, nil
 end
 
-local function _planHeal(healerName, targetName)
+local function _planAssistExec(healerName, targetName, cmdTemplate, metaLabel)
     local okA, A = pcall(require, "dwkit.services.actionpad_service")
     if not okA or type(A) ~= "table" then
         return false, "ActionPadService missing"
@@ -193,16 +236,99 @@ local function _planHeal(healerName, targetName)
         return false, "targetName missing"
     end
 
-    local plan, err = A.planAssistExec(healerName, targetName, "cast heal {target}", { source = "actionpad_ui:planHeal" })
+    local plan, err = A.planAssistExec(healerName, targetName, tostring(cmdTemplate or ""),
+        { source = "actionpad_ui:" .. tostring(metaLabel or "planAssist") })
     if not plan then
         return false, tostring(err or "planAssistExec failed")
     end
 
-    local line = string.format("[ActionPad] PLAN assistExec targetProfile=%s cmd=%s",
-        tostring(plan.targetProfile), tostring(plan.cmd))
+    local line = string.format("[ActionPad] PLAN ASSIST-EXEC (%s) healer=%s target=%s execProfile=%s cmd=%s",
+        tostring(metaLabel or "assist"),
+        tostring(healerName),
+        tostring(targetName),
+        tostring(plan.targetProfile),
+        tostring(plan.cmd))
+
     print(line)
     _setStatusLine(line)
     return true, nil
+end
+
+local function _planLocal(cmd, metaLabel)
+    local line = string.format("[ActionPad] PLAN LOCAL (%s) execProfile=<current> cmd=%s",
+        tostring(metaLabel or "local"),
+        tostring(cmd or ""))
+    print(line)
+    _setStatusLine(line)
+    return true, nil
+end
+
+local function _mkBtn(name, parent, x, y, w, h, label, enabled, onClick)
+    local btn = G.Label:new({
+        name = name,
+        x = tostring(x) .. "px",
+        y = tostring(y) .. "px",
+        width = tostring(w) .. "px",
+        height = tostring(h) .. "px",
+    }, parent)
+
+    if type(btn) ~= "table" then
+        return nil
+    end
+
+    pcall(function() btn:echo(tostring(label or "")) end)
+    pcall(ButtonKit.applyButtonStyle, btn, { enabled = (enabled == true), minHeightPx = h })
+    if type(onClick) == "function" then
+        pcall(ButtonKit.wireClick, btn, onClick)
+    end
+
+    return btn
+end
+
+local function _layoutRightButtons(parent, y, rowH, btnW, gap, specs, namePrefix)
+    local out = {}
+    local n = (type(specs) == "table") and #specs or 0
+    if n <= 0 then return out end
+
+    local totalW = (btnW * n) + (gap * (n - 1))
+    local startX = -totalW
+
+    for i = 1, n do
+        local s = specs[i] or {}
+        local x = startX + (i - 1) * (btnW + gap)
+        local btn = _mkBtn(
+            tostring(namePrefix) .. "_" .. tostring(i),
+            parent,
+            x,
+            y,
+            btnW,
+            rowH,
+            s.label,
+            (s.enabled ~= false),
+            s.onClick
+        )
+        out[#out + 1] = btn
+    end
+
+    return out
+end
+
+local function _renderGlobal(topY, rowH, gap, btnW)
+    _clearGlobal()
+
+    -- Global action: Feast (LOCAL plan only)
+    local specs = {
+        {
+            label = "FE",
+            enabled = true,
+            onClick = function()
+                _planLocal("yamcha", "Feast")
+            end,
+        },
+    }
+
+    local btns = _layoutRightButtons(_state.widgets.listRoot, topY, rowH, btnW, gap, specs, "DWKit_ActionPad_Global")
+    _state.widgets.global.feastBtn = btns[1]
 end
 
 local function _render()
@@ -217,10 +343,22 @@ local function _render()
     _clearRows()
 
     local padY = 6
-    local rowH = 26
-    local btnW = 54
     local gap = 4
+    local rowH = 26
+
+    local btnW = 38            -- compact
     local topY = 24 + padY + 2 -- below header
+
+    -- Global row (1 line)
+    _renderGlobal(topY, rowH, gap, btnW)
+
+    -- Roster blocks start after global row
+    local yCursor = topY + rowH + gap + 2
+
+    -- NOTE: Bucket A uses a fixed healer name "Healer" when present.
+    -- This is a stub until the pickedHealer/assistBy rule is finalized.
+    local healerName = "Healer"
+    local healerOnline = _hasOnlineName(rows, healerName)
 
     for i = 1, #rows do
         local r = rows[i] or {}
@@ -228,13 +366,19 @@ local function _render()
         local profileLabel = tostring(r.profileLabel or "?")
         local here = (r.here == true)
 
-        local y = topY + (i - 1) * (rowH + gap)
+        -- Block has 4 lines: CTRL, SERVICE, MOVE, COMBAT
+        local blockTop = yCursor
+        local line1Y = blockTop
+        local line2Y = blockTop + (rowH + gap)
+        local line3Y = blockTop + (rowH + gap) * 2
+        local line4Y = blockTop + (rowH + gap) * 3
 
+        -- Name label sits on CTRL line, left side
         local nameLabel = G.Label:new({
             name = "DWKit_ActionPad_RowName_" .. tostring(i),
             x = "0px",
-            y = tostring(y) .. "px",
-            width = string.format("-%dpx", (btnW * 2) + (gap * 2)),
+            y = tostring(line1Y) .. "px",
+            width = string.format("-%dpx", (btnW * 4) + (gap * 3)), -- leave space, even though we right-align buttons
             height = tostring(rowH) .. "px",
         }, _state.widgets.listRoot)
 
@@ -244,82 +388,232 @@ local function _render()
             pcall(ListKit.applyRowTextStyle, nameLabel)
         end
 
-        local btnSay = G.Label:new({
-            name = "DWKit_ActionPad_BtnSay_" .. tostring(i),
-            x = string.format("-%dpx", (btnW * 2) + gap),
-            y = tostring(y) .. "px",
-            width = tostring(btnW) .. "px",
-            height = tostring(rowH) .. "px",
-        }, _state.widgets.listRoot)
-
-        if type(btnSay) == "table" then
-            pcall(function() btnSay:echo("SAY") end)
-            pcall(ButtonKit.applyButtonStyle, btnSay, { enabled = true, minHeightPx = rowH })
-            pcall(ButtonKit.wireClick, btnSay, function()
-                local ok, err = _planSay(name)
-                if not ok then
-                    local line = "[ActionPad] SAY plan failed: " .. tostring(err)
-                    print(line)
-                    _setStatusLine(line)
+        -- CTRL: FMe / FSelf / GrpAll / Flee (SELF-EXEC plan)
+        local ctrlSpecs = {
+            {
+                label = "FM",
+                enabled = true,
+                onClick = function()
+                    local ok, err = _planSelfExec(name, "[TODO] follow-me", "FMe")
+                    if not ok then _setStatusLine("[ActionPad] FMe plan failed: " .. tostring(err)) end
                 end
-            end)
-        end
-
-        -- NOTE: MVP uses a fixed healer name "Healer" when present.
-        -- This is a stub until the pickedHealer/assistBy rule is finalized.
-        local healerName = "Healer"
-        local btnHeal = G.Label:new({
-            name = "DWKit_ActionPad_BtnHeal_" .. tostring(i),
-            x = string.format("-%dpx", btnW),
-            y = tostring(y) .. "px",
-            width = tostring(btnW) .. "px",
-            height = tostring(rowH) .. "px",
-        }, _state.widgets.listRoot)
-
-        if type(btnHeal) == "table" then
-            pcall(function() btnHeal:echo("HEAL") end)
-
-            local enabled = false
-            for j = 1, #rows do
-                local rr = rows[j] or {}
-                if tostring(rr.name or "") == healerName then
-                    enabled = true
-                    break
+            },
+            {
+                label = "FS",
+                enabled = true,
+                onClick = function()
+                    local ok, err = _planSelfExec(name, "[TODO] follow-self", "FSelf")
+                    if not ok then _setStatusLine("[ActionPad] FSelf plan failed: " .. tostring(err)) end
                 end
-            end
-
-            pcall(ButtonKit.applyButtonStyle, btnHeal, { enabled = enabled, minHeightPx = rowH })
-            pcall(ButtonKit.wireClick, btnHeal, function()
-                if enabled ~= true then
-                    local line = "[ActionPad] HEAL disabled: healer not online (stub)"
-                    print(line)
-                    _setStatusLine(line)
-                    return
+            },
+            {
+                label = "GA",
+                enabled = true,
+                onClick = function()
+                    local ok, err = _planSelfExec(name, "[TODO] group-all", "GrpAll")
+                    if not ok then _setStatusLine("[ActionPad] GrpAll plan failed: " .. tostring(err)) end
                 end
-
-                local ok, err = _planHeal(healerName, name)
-                if not ok then
-                    local line = "[ActionPad] HEAL plan failed: " .. tostring(err)
-                    print(line)
-                    _setStatusLine(line)
+            },
+            {
+                label = "FL",
+                enabled = true,
+                onClick = function()
+                    local ok, err = _planSelfExec(name, "[TODO] flee", "Flee")
+                    if not ok then _setStatusLine("[ActionPad] Flee plan failed: " .. tostring(err)) end
                 end
-            end)
-        end
+            },
+        }
+        local ctrlBtns = _layoutRightButtons(_state.widgets.listRoot, line1Y, rowH, btnW, gap, ctrlSpecs,
+            "DWKit_ActionPad_Ctrl_" .. tostring(i))
+
+        -- SERVICE: Buff / Feed / Heal / PHeal / Rst / Rej (ASSIST-EXEC plan)
+        local serviceEnabled = healerOnline
+        local serviceSpecs = {
+            {
+                label = "BU",
+                enabled = serviceEnabled,
+                onClick = function()
+                    if not serviceEnabled then
+                        _setStatusLine("[ActionPad] Buff disabled: healer not online (stub)")
+                        return
+                    end
+                    local ok, err = _planAssistExec(healerName, name, "cast bless {target}", "Buff")
+                    if not ok then _setStatusLine("[ActionPad] Buff plan failed: " .. tostring(err)) end
+                end
+            },
+            {
+                label = "FD",
+                enabled = serviceEnabled,
+                onClick = function()
+                    if not serviceEnabled then
+                        _setStatusLine("[ActionPad] Feed disabled: healer not online (stub)")
+                        return
+                    end
+                    local ok, err = _planAssistExec(healerName, name, "[TODO] feed {target}", "Feed")
+                    if not ok then _setStatusLine("[ActionPad] Feed plan failed: " .. tostring(err)) end
+                end
+            },
+            {
+                label = "HL",
+                enabled = serviceEnabled,
+                onClick = function()
+                    if not serviceEnabled then
+                        _setStatusLine("[ActionPad] Heal disabled: healer not online (stub)")
+                        return
+                    end
+                    local ok, err = _planAssistExec(healerName, name, "cast heal {target}", "Heal")
+                    if not ok then _setStatusLine("[ActionPad] Heal plan failed: " .. tostring(err)) end
+                end
+            },
+            {
+                label = "PH",
+                enabled = serviceEnabled,
+                onClick = function()
+                    if not serviceEnabled then
+                        _setStatusLine("[ActionPad] PHeal disabled: healer not online (stub)")
+                        return
+                    end
+                    local ok, err = _planAssistExec(healerName, name, "cast 'power heal' {target}", "PHeal")
+                    if not ok then _setStatusLine("[ActionPad] PHeal plan failed: " .. tostring(err)) end
+                end
+            },
+            {
+                label = "RS",
+                enabled = serviceEnabled,
+                onClick = function()
+                    if not serviceEnabled then
+                        _setStatusLine("[ActionPad] Rst disabled: healer not online (stub)")
+                        return
+                    end
+                    local ok, err = _planAssistExec(healerName, name, "cast refresh {target}", "Rst")
+                    if not ok then _setStatusLine("[ActionPad] Rst plan failed: " .. tostring(err)) end
+                end
+            },
+            {
+                label = "RJ",
+                enabled = serviceEnabled,
+                onClick = function()
+                    if not serviceEnabled then
+                        _setStatusLine("[ActionPad] Rej disabled: healer not online (stub)")
+                        return
+                    end
+                    local ok, err = _planAssistExec(healerName, name, "[TODO] rej {target}", "Rej")
+                    if not ok then _setStatusLine("[ActionPad] Rej plan failed: " .. tostring(err)) end
+                end
+            },
+        }
+        local serviceBtns = _layoutRightButtons(_state.widgets.listRoot, line2Y, rowH, btnW, gap, serviceSpecs,
+            "DWKit_ActionPad_Service_" .. tostring(i))
+
+        -- MOVE: Summon / Relocate (SELF-EXEC plan)
+        local moveSpecs = {
+            {
+                label = "SU",
+                enabled = true,
+                onClick = function()
+                    local ok, err = _planSelfExec(name, "[TODO] summon", "Summon")
+                    if not ok then _setStatusLine("[ActionPad] Summon plan failed: " .. tostring(err)) end
+                end
+            },
+            {
+                label = "RE",
+                enabled = true,
+                onClick = function()
+                    local ok, err = _planSelfExec(name, "[TODO] relocate", "Relocate")
+                    if not ok then _setStatusLine("[ActionPad] Relocate plan failed: " .. tostring(err)) end
+                end
+            },
+        }
+        local moveBtns = _layoutRightButtons(_state.widgets.listRoot, line3Y, rowH, btnW, gap, moveSpecs,
+            "DWKit_ActionPad_Move_" .. tostring(i))
+
+        -- COMBAT: Assist / Kick / Bash / Pummel / Circle / Guard / Rescue (SELF-EXEC plan)
+        local combatSpecs = {
+            {
+                label = "AS",
+                enabled = true,
+                onClick = function()
+                    local ok, err = _planSelfExec(name, "[TODO] assist", "Assist")
+                    if not ok then _setStatusLine("[ActionPad] Assist plan failed: " .. tostring(err)) end
+                end
+            },
+            {
+                label = "KI",
+                enabled = true,
+                onClick = function()
+                    local ok, err = _planSelfExec(name, "[TODO] kick", "Kick")
+                    if not ok then _setStatusLine("[ActionPad] Kick plan failed: " .. tostring(err)) end
+                end
+            },
+            {
+                label = "BA",
+                enabled = true,
+                onClick = function()
+                    local ok, err = _planSelfExec(name, "[TODO] bash", "Bash")
+                    if not ok then _setStatusLine("[ActionPad] Bash plan failed: " .. tostring(err)) end
+                end
+            },
+            {
+                label = "PU",
+                enabled = true,
+                onClick = function()
+                    local ok, err = _planSelfExec(name, "[TODO] pummel", "Pummel")
+                    if not ok then _setStatusLine("[ActionPad] Pummel plan failed: " .. tostring(err)) end
+                end
+            },
+            {
+                label = "CI",
+                enabled = true,
+                onClick = function()
+                    local ok, err = _planSelfExec(name, "[TODO] circle", "Circle")
+                    if not ok then _setStatusLine("[ActionPad] Circle plan failed: " .. tostring(err)) end
+                end
+            },
+            {
+                label = "GU",
+                enabled = true,
+                onClick = function()
+                    local ok, err = _planSelfExec(name, "[TODO] guard", "Guard")
+                    if not ok then _setStatusLine("[ActionPad] Guard plan failed: " .. tostring(err)) end
+                end
+            },
+            {
+                label = "RC",
+                enabled = true,
+                onClick = function()
+                    local ok, err = _planSelfExec(name, "[TODO] rescue", "Rescue")
+                    if not ok then _setStatusLine("[ActionPad] Rescue plan failed: " .. tostring(err)) end
+                end
+            },
+        }
+        local combatBtns = _layoutRightButtons(_state.widgets.listRoot, line4Y, rowH, btnW, gap, combatSpecs,
+            "DWKit_ActionPad_Combat_" .. tostring(i))
 
         _state.widgets.rows[#_state.widgets.rows + 1] = {
             name = name,
-            nameLabel = nameLabel,
-            btnSay = btnSay,
-            btnHeal = btnHeal,
+            widgets = {
+                nameLabel = nameLabel,
+                ctrlBtns = ctrlBtns,
+                serviceBtns = serviceBtns,
+                moveBtns = moveBtns,
+                combatBtns = combatBtns,
+            },
         }
+
+        yCursor = blockTop + (rowH + gap) * 4 + gap + 2
     end
 
     _state.lastRender = {
         ts = os.time(),
         rowsCount = #rows,
+        blocksCount = #rows,
+        healerName = healerName,
+        healerOnline = healerOnline,
     }
 
-    _setStatusLine(string.format("Rendered %d online rows. (PLAN only)", #rows))
+    local hInfo = healerOnline and ("healer=" .. healerName .. " ONLINE") or
+    ("healer=" .. healerName .. " OFFLINE (service disabled)")
+    _setStatusLine(string.format("Rendered %d online rows. %s. (PLAN only)", #rows, hInfo))
     return true, nil
 end
 
@@ -364,6 +658,7 @@ end
 local function _dispose()
     _unsubscribe()
     _clearRows()
+    _clearGlobal()
 
     if _state.widgets.bundle and type(_state.widgets.bundle.frame) == "table" then
         pcall(function() U.safeHide(_state.widgets.bundle.frame) end)
