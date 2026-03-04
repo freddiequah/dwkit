@@ -1,15 +1,27 @@
 -- #########################################################################
 -- Module Name : dwkit.services.skill_registry_service
 -- Owner       : Services
--- Version     : v2026-01-09A
+-- Version     : v2026-03-04C
 -- Purpose     :
 --   - SAFE SkillRegistryService (data only).
 --   - Owns skill/spell registry (data-driven), emits updates.
+--   - Provides class normalization + schema validation for ActionPad needs.
+--   - Provides lookups by practiceKey and alias, plus list helpers.
 --   - No UI, no persistence, no timers, no send().
 --
 -- Public API  :
 --   - getVersion() -> string
 --   - getRegistry() -> table copy
+--   - getDef(key) -> table|nil
+--   - getKeysSorted() -> table (array of keys)
+--   - normalizeClassKey(raw) -> string|nil classKey, string|nil err
+--   - normalizePracticeKey(raw) -> string|nil practiceKey, string|nil err
+--   - validateDef(def, opts?) -> boolean ok, string|nil err
+--   - validateAll(opts?) -> boolean ok, table issues
+--   - resolveByPracticeKey(practiceKey) -> table|nil
+--   - resolveByAlias(alias) -> table|nil
+--   - listByClass(classKey, kind?) -> table (array of defs)
+--   - listByKind(kind) -> table (array of defs)
 --   - setRegistry(registry, opts?) -> boolean ok, string|nil err
 --   - upsert(key, def, opts?) -> boolean ok, string|nil err
 --   - remove(key, opts?) -> boolean ok, string|nil err
@@ -21,19 +33,274 @@
 -- Dependencies     : dwkit.core.identity, dwkit.bus.event_bus
 -- #########################################################################
 
-local M          = {}
+local M                = {}
 
-M.VERSION        = "v2026-01-09A"
+M.VERSION              = "v2026-03-04C"
 
-local ID         = require("dwkit.core.identity")
-local BUS        = require("dwkit.bus.event_bus")
+local ID               = require("dwkit.core.identity")
+local BUS              = require("dwkit.bus.event_bus")
 
-local EV_UPDATED = tostring(ID.eventPrefix or "DWKit:") .. "Service:SkillRegistry:Updated"
+local EV_UPDATED       = tostring(ID.eventPrefix or "DWKit:") .. "Service:SkillRegistry:Updated"
 
-local STATE      = {
+-- Locked class keys (ActionPad agreement)
+local CLASS_KEYS       = {
+    ["cleric"] = true,
+    ["thief"] = true,
+    ["warrior"] = true,
+    ["mage"] = true,
+    ["paladin"] = true,
+    ["anti-paladin"] = true,
+    ["ranger"] = true,
+    ["monk"] = true,
+    ["bard"] = true,
+    ["pirate"] = true,
+}
+
+-- Alias mapping: compact form (lower, strip spaces + hyphen) -> canonical classKey
+local CLASS_ALIASES    = {
+    ["cleric"] = "cleric",
+    ["thief"] = "thief",
+    ["warrior"] = "warrior",
+    ["mage"] = "mage",
+    ["paladin"] = "paladin",
+    ["antipaladin"] = "anti-paladin",
+    ["antipal"] = "anti-paladin",
+    ["apal"] = "anti-paladin",
+    ["ranger"] = "ranger",
+    ["monk"] = "monk",
+    ["bard"] = "bard",
+    ["pirate"] = "pirate",
+}
+
+-- Canonical kinds (ActionPad agreement)
+local KIND_KEYS        = {
+    ["skill"] = true,
+    ["spell"] = true,
+    ["race"] = true,
+    ["weapon"] = true,
+}
+
+-- Legacy kind mapping (backward compatible with earlier seeds)
+local LEGACY_KIND_MAP  = {
+    ["race-skill"] = "race",
+    ["weapon-prof"] = "weapon",
+}
+
+-- Expanded baseline registry (starter set; not exhaustive)
+-- NOTE: practiceKey must match PracticeStore normalization (lowercase + collapsed spaces).
+local DEFAULT_REGISTRY = {
+    -- Cleric core service / utility
+    heal = {
+        id = "heal",
+        displayName = "Heal",
+        practiceKey = "heal",
+        classKey = "cleric",
+        kind = "spell",
+        minLevel = 1,
+        tags = { "service" },
+        notes = "Baseline cleric heal spell.",
+    },
+    ["power heal"] = {
+        id = "power heal",
+        displayName = "Power Heal",
+        practiceKey = "power heal",
+        classKey = "cleric",
+        kind = "spell",
+        minLevel = 1,
+        tags = { "service" },
+        aliases = { "pheal", "powerheal" },
+        notes = "Exact minLevel may be refined later.",
+    },
+    refresh = {
+        id = "refresh",
+        displayName = "Refresh",
+        practiceKey = "refresh",
+        classKey = "cleric",
+        kind = "spell",
+        minLevel = 1,
+        tags = { "service" },
+        notes = "Common cleric service spell (baseline).",
+    },
+    bless = {
+        id = "bless",
+        displayName = "Bless",
+        practiceKey = "bless",
+        classKey = "cleric",
+        kind = "spell",
+        minLevel = 1,
+        tags = { "buff" },
+    },
+    calm = {
+        id = "calm",
+        displayName = "Calm",
+        practiceKey = "calm",
+        classKey = "cleric",
+        kind = "spell",
+        minLevel = 1,
+        tags = { "utility" },
+    },
+
+    -- Warrior combat core
+    kick = {
+        id = "kick",
+        displayName = "Kick",
+        practiceKey = "kick",
+        classKey = "warrior",
+        kind = "skill",
+        minLevel = 1,
+        tags = { "combat" },
+    },
+    bash = {
+        id = "bash",
+        displayName = "Bash",
+        practiceKey = "bash",
+        classKey = "warrior",
+        kind = "skill",
+        minLevel = 1,
+        tags = { "combat", "fightOnly" },
+    },
+    assist = {
+        id = "assist",
+        displayName = "Assist",
+        practiceKey = "assist",
+        classKey = "warrior",
+        kind = "skill",
+        minLevel = 1,
+        tags = { "combat", "fightOnly" },
+    },
+    rescue = {
+        id = "rescue",
+        displayName = "Rescue",
+        practiceKey = "rescue",
+        classKey = "warrior",
+        kind = "skill",
+        minLevel = 1,
+        tags = { "combat", "fightOnly" },
+        notes = "ActionPad will gate fightOnly by state later.",
+    },
+    pummel = {
+        id = "pummel",
+        displayName = "Pummel",
+        practiceKey = "pummel",
+        classKey = "warrior",
+        kind = "skill",
+        minLevel = 1,
+        tags = { "combat", "fightOnly" },
+        notes = "Baseline warrior example (minLevel may be refined later).",
+    },
+
+    -- Thief combat baseline
+    circle = {
+        id = "circle",
+        displayName = "Circle",
+        practiceKey = "circle",
+        classKey = "thief",
+        kind = "skill",
+        minLevel = 1,
+        tags = { "combat", "fightOnly" },
+    },
+
+    -- Paladin / Anti-Paladin baseline examples (seed-level; not exhaustive)
+    guard = {
+        id = "guard",
+        displayName = "Guard",
+        practiceKey = "guard",
+        classKey = "paladin",
+        kind = "skill",
+        minLevel = 1,
+        tags = { "combat" },
+    },
+    ["anti-paladin example"] = {
+        id = "anti-paladin example",
+        displayName = "Anti-Paladin Example",
+        practiceKey = "anti-paladin example",
+        classKey = "anti-paladin",
+        kind = "skill",
+        minLevel = 1,
+        tags = { "seed" },
+        notes = "Seed used only to assert hyphen-preserving classKey handling.",
+    },
+
+    -- Remort-only class examples (structure only)
+    ["ranger example"] = {
+        id = "ranger example",
+        displayName = "Ranger Example",
+        practiceKey = "ranger example",
+        classKey = "ranger",
+        kind = "skill",
+        minLevel = 1,
+        tags = { "seed", "remort" },
+    },
+    ["monk example"] = {
+        id = "monk example",
+        displayName = "Monk Example",
+        practiceKey = "monk example",
+        classKey = "monk",
+        kind = "skill",
+        minLevel = 1,
+        tags = { "seed", "remort" },
+    },
+    ["bard example"] = {
+        id = "bard example",
+        displayName = "Bard Example",
+        practiceKey = "bard example",
+        classKey = "bard",
+        kind = "skill",
+        minLevel = 1,
+        tags = { "seed", "remort" },
+    },
+    ["pirate example"] = {
+        id = "pirate example",
+        displayName = "Pirate Example",
+        practiceKey = "pirate example",
+        classKey = "pirate",
+        kind = "skill",
+        minLevel = 1,
+        tags = { "seed", "remort" },
+    },
+
+    -- Race skills (examples)
+    ["race example"] = {
+        id = "race example",
+        displayName = "Race Example",
+        practiceKey = "race example",
+        classKey = "warrior",
+        kind = "race",
+        minLevel = 0,
+        tags = { "race", "seed" },
+        notes = "Race skills are not class-learned; classKey is used as grouping only (seed).",
+    },
+
+    -- Weapon proficiencies (examples)
+    ["sword"] = {
+        id = "sword",
+        displayName = "Sword",
+        practiceKey = "sword",
+        classKey = "warrior",
+        kind = "weapon",
+        minLevel = 0,
+        tags = { "weapon" },
+        notes = "Weapon prof example; classKey grouping is seed-level.",
+    },
+    ["dagger"] = {
+        id = "dagger",
+        displayName = "Dagger",
+        practiceKey = "dagger",
+        classKey = "thief",
+        kind = "weapon",
+        minLevel = 0,
+        tags = { "weapon" },
+    },
+}
+
+local STATE            = {
     registry = {}, -- key -> def table
     lastTs = nil,
     updates = 0,
+
+    -- indexes (rebuilt on changes; SAFE)
+    practiceIndex = {}, -- practiceKey -> key
+    aliasIndex = {},    -- alias(normalized) -> key
 }
 
 local function _shallowCopy(t)
@@ -54,6 +321,203 @@ local function _copyRegistry(r)
         end
     end
     return out
+end
+
+local function _trim(s)
+    s = tostring(s or "")
+    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+    return s
+end
+
+local function _lowerCollapseSpaces(s)
+    s = _trim(s):lower()
+    -- collapse internal whitespace
+    s = s:gsub("%s+", " ")
+    return s
+end
+
+local function _compactKey(s)
+    s = _lowerCollapseSpaces(s)
+    -- strip spaces + hyphens to support alias matching like "anti paladin" / "anti-paladin" / "antipaladin"
+    s = s:gsub("[%s%-]", "")
+    return s
+end
+
+function M.normalizeClassKey(raw)
+    if raw == nil then return nil, "normalizeClassKey(raw): raw is nil" end
+    local s = _trim(raw)
+    if s == "" then return nil, "normalizeClassKey(raw): raw is empty" end
+
+    local direct = _lowerCollapseSpaces(s)
+    -- preserve hyphen canonicalization for anti-paladin and allow "anti paladin"
+    if direct == "anti paladin" or direct == "anti-paladin" then
+        return "anti-paladin", nil
+    end
+
+    local compact = _compactKey(s)
+    local mapped = CLASS_ALIASES[compact]
+    if mapped ~= nil then
+        return mapped, nil
+    end
+
+    -- If it already looks like a canonical classKey, accept only if locked list allows it
+    local maybe = direct
+    if maybe == "anti paladin" then maybe = "anti-paladin" end
+    if CLASS_KEYS[maybe] == true then
+        return maybe, nil
+    end
+
+    return nil, "normalizeClassKey(raw): unknown class: " .. tostring(raw)
+end
+
+function M.normalizePracticeKey(raw)
+    if raw == nil then return nil, "normalizePracticeKey(raw): raw is nil" end
+    local s = _lowerCollapseSpaces(raw)
+    if s == "" then return nil, "normalizePracticeKey(raw): raw is empty" end
+    return s, nil
+end
+
+local function _isInt(n)
+    if type(n) ~= "number" then return false end
+    return n == math.floor(n)
+end
+
+local function _normalizeAliases(t)
+    if t == nil then return nil end
+    if type(t) ~= "table" then return nil end
+    local out = {}
+    local seen = {}
+    for i = 1, #t do
+        local vRaw = _trim(t[i])
+        if vRaw ~= "" then
+            local vNorm, _ = M.normalizePracticeKey(vRaw)
+            if vNorm and vNorm ~= "" and seen[vNorm] ~= true then
+                seen[vNorm] = true
+                out[#out + 1] = vNorm
+            end
+        end
+    end
+    if #out == 0 then return nil end
+    return out
+end
+
+local function _normalizeTags(t)
+    if t == nil then return {} end
+    if type(t) ~= "table" then return {} end
+    local out = {}
+    for i = 1, #t do
+        local v = _trim(t[i])
+        if v ~= "" then out[#out + 1] = v end
+    end
+    return out
+end
+
+local function _normalizeKind(kind)
+    kind = _trim(kind)
+    if kind == "" then return kind end
+    local k = _lowerCollapseSpaces(kind)
+    if LEGACY_KIND_MAP[k] ~= nil then
+        return LEGACY_KIND_MAP[k]
+    end
+    return k
+end
+
+function M.validateDef(def, opts)
+    opts = opts or {}
+    if type(def) ~= "table" then
+        return false, "validateDef(def): def must be a table"
+    end
+
+    if type(def.id) ~= "string" or _trim(def.id) == "" then
+        return false, "validateDef(def): missing/invalid required field: id"
+    end
+    if type(def.displayName) ~= "string" or _trim(def.displayName) == "" then
+        return false, "validateDef(def): missing/invalid required field: displayName"
+    end
+    if type(def.practiceKey) ~= "string" or _trim(def.practiceKey) == "" then
+        return false, "validateDef(def): missing/invalid required field: practiceKey"
+    end
+    if type(def.classKey) ~= "string" or _trim(def.classKey) == "" then
+        return false, "validateDef(def): missing/invalid required field: classKey"
+    end
+    if type(def.kind) ~= "string" or _trim(def.kind) == "" then
+        return false, "validateDef(def): missing/invalid required field: kind"
+    end
+
+    local kindNorm = _normalizeKind(def.kind)
+    if KIND_KEYS[kindNorm] ~= true then
+        return false, "validateDef(def): invalid kind: " .. tostring(def.kind)
+    end
+
+    if type(def.minLevel) ~= "number" or _isInt(def.minLevel) ~= true or def.minLevel < 0 then
+        return false, "validateDef(def): missing/invalid required field: minLevel (int >= 0)"
+    end
+    if type(def.tags) ~= "table" then
+        return false, "validateDef(def): missing/invalid required field: tags (array)"
+    end
+
+    local ck, ckErr = M.normalizeClassKey(def.classKey)
+    if not ck then
+        return false, "validateDef(def): classKey invalid: " .. tostring(ckErr)
+    end
+
+    local pk, pkErr = M.normalizePracticeKey(def.practiceKey)
+    if not pk then
+        return false, "validateDef(def): practiceKey invalid: " .. tostring(pkErr)
+    end
+
+    if opts.strictClassList == true and CLASS_KEYS[ck] ~= true then
+        return false, "validateDef(def): classKey not in locked class list: " .. tostring(ck)
+    end
+
+    return true, nil
+end
+
+local function _normalizeDef(def)
+    local out = _shallowCopy(def)
+
+    -- required normalization
+    local ck = out.classKey
+    local ckNorm, _ = M.normalizeClassKey(ck)
+    if ckNorm then out.classKey = ckNorm end
+
+    local pk = out.practiceKey
+    local pkNorm, _ = M.normalizePracticeKey(pk)
+    if pkNorm then out.practiceKey = pkNorm end
+
+    out.kind = _normalizeKind(out.kind)
+
+    out.aliases = _normalizeAliases(out.aliases)
+    out.tags = _normalizeTags(out.tags)
+
+    return out
+end
+
+local function _rebuildIndexes()
+    local p = {}
+    local a = {}
+
+    for key, def in pairs(STATE.registry) do
+        if type(key) == "string" and key ~= "" and type(def) == "table" then
+            local pk = tostring(def.practiceKey or "")
+            if pk ~= "" then
+                p[pk] = key
+            end
+
+            local aliases = def.aliases
+            if type(aliases) == "table" then
+                for i = 1, #aliases do
+                    local al = tostring(aliases[i] or "")
+                    if al ~= "" then
+                        a[al] = key
+                    end
+                end
+            end
+        end
+    end
+
+    STATE.practiceIndex = p
+    STATE.aliasIndex = a
 end
 
 local function _emit(changed, source)
@@ -80,13 +544,139 @@ function M.getRegistry()
     return _copyRegistry(STATE.registry)
 end
 
+function M.getDef(key)
+    if type(key) ~= "string" or key == "" then return nil end
+    local def = STATE.registry[key]
+    if type(def) ~= "table" then return nil end
+    return _shallowCopy(def)
+end
+
+function M.getKeysSorted()
+    local keys = {}
+    for k, _ in pairs(STATE.registry) do keys[#keys + 1] = k end
+    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    return keys
+end
+
+function M.resolveByPracticeKey(practiceKey)
+    local pk, err = M.normalizePracticeKey(practiceKey)
+    if not pk then return nil end
+
+    local key = STATE.practiceIndex[pk]
+    if not key then return nil end
+
+    return M.getDef(key)
+end
+
+function M.resolveByAlias(alias)
+    local a, err = M.normalizePracticeKey(alias)
+    if not a then return nil end
+
+    -- Allow direct practiceKey lookup first
+    local def = M.resolveByPracticeKey(a)
+    if def then return def end
+
+    local key = STATE.aliasIndex[a]
+    if not key then return nil end
+
+    return M.getDef(key)
+end
+
+function M.listByClass(classKey, kind)
+    local ck, err = M.normalizeClassKey(classKey)
+    if not ck then return {} end
+
+    local kindNorm = nil
+    if kind ~= nil then
+        kindNorm = _normalizeKind(kind)
+        if KIND_KEYS[kindNorm] ~= true then
+            return {}
+        end
+    end
+
+    local out = {}
+    for _, def in pairs(STATE.registry) do
+        if type(def) == "table" and tostring(def.classKey) == ck then
+            if kindNorm == nil or tostring(def.kind) == kindNorm then
+                out[#out + 1] = _shallowCopy(def)
+            end
+        end
+    end
+
+    table.sort(out, function(a, b)
+        return tostring(a.practiceKey or "") < tostring(b.practiceKey or "")
+    end)
+
+    return out
+end
+
+function M.listByKind(kind)
+    local kindNorm = _normalizeKind(kind)
+    if KIND_KEYS[kindNorm] ~= true then
+        return {}
+    end
+
+    local out = {}
+    for _, def in pairs(STATE.registry) do
+        if type(def) == "table" and tostring(def.kind) == kindNorm then
+            out[#out + 1] = _shallowCopy(def)
+        end
+    end
+
+    table.sort(out, function(a, b)
+        return tostring(a.practiceKey or "") < tostring(b.practiceKey or "")
+    end)
+
+    return out
+end
+
+function M.validateAll(opts)
+    opts = opts or {}
+    local strictClassList = (opts.strictClassList ~= false)
+
+    local issues = {}
+    for k, def in pairs(STATE.registry) do
+        if type(k) ~= "string" or k == "" then
+            issues[#issues + 1] = { key = tostring(k), error = "registry key must be non-empty string" }
+        elseif type(def) ~= "table" then
+            issues[#issues + 1] = { key = tostring(k), error = "def must be a table" }
+        else
+            local ok, err = M.validateDef(def, { strictClassList = strictClassList })
+            if not ok then
+                issues[#issues + 1] = { key = tostring(k), error = tostring(err) }
+            end
+        end
+    end
+
+    return (#issues == 0), issues
+end
+
 function M.setRegistry(registry, opts)
     opts = opts or {}
     if type(registry) ~= "table" then
         return false, "setRegistry(registry): registry must be a table"
     end
 
-    STATE.registry = _copyRegistry(registry)
+    -- Validate + normalize all entries (schema for ActionPad gating)
+    local nextReg = {}
+    for k, def in pairs(registry) do
+        if type(k) ~= "string" or k == "" then
+            return false, "setRegistry(registry): registry key must be non-empty string"
+        end
+        if type(def) ~= "table" then
+            return false, "setRegistry(registry): def must be table for key: " .. tostring(k)
+        end
+        local norm = _normalizeDef(def)
+        local okV, errV = M.validateDef(norm, { strictClassList = true })
+        if not okV then
+            return false, "setRegistry(registry): invalid def for key=" .. tostring(k) .. " err=" .. tostring(errV)
+        end
+        nextReg[k] = _shallowCopy(norm)
+    end
+
+    STATE.registry = nextReg
+    _rebuildIndexes()
+
     STATE.lastTs = os.time()
     STATE.updates = STATE.updates + 1
 
@@ -104,7 +694,15 @@ function M.upsert(key, def, opts)
         return false, "upsert(key, def): def must be a table"
     end
 
-    STATE.registry[key] = _shallowCopy(def)
+    local norm = _normalizeDef(def)
+    local okV, errV = M.validateDef(norm, { strictClassList = true })
+    if not okV then
+        return false, "upsert(key, def): invalid def err=" .. tostring(errV)
+    end
+
+    STATE.registry[key] = _shallowCopy(norm)
+    _rebuildIndexes()
+
     STATE.lastTs = os.time()
     STATE.updates = STATE.updates + 1
 
@@ -124,6 +722,8 @@ function M.remove(key, opts)
     end
 
     STATE.registry[key] = nil
+    _rebuildIndexes()
+
     STATE.lastTs = os.time()
     STATE.updates = STATE.updates + 1
 
@@ -145,6 +745,22 @@ function M.getStats()
         updates = STATE.updates,
         entries = n,
     }
+end
+
+-- Seed default registry at module load (SAFE, no emit; avoids surprise events on boot)
+do
+    local nextReg = {}
+    for k, def in pairs(DEFAULT_REGISTRY) do
+        if type(k) == "string" and k ~= "" and type(def) == "table" then
+            local norm = _normalizeDef(def)
+            local okV = M.validateDef(norm, { strictClassList = true })
+            if okV then
+                nextReg[k] = _shallowCopy(norm)
+            end
+        end
+    end
+    STATE.registry = nextReg
+    _rebuildIndexes()
 end
 
 return M

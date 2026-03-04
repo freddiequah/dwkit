@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.event_registry
 -- Owner       : Bus
--- Version     : v2026-02-26C
+-- Version     : v2026-03-04C
 -- Purpose     :
 --   - Canonical registry for all DWKit events (code mirror of docs/Event_Registry_v1.0.md).
 --   - No events are emitted here. Registry only.
@@ -34,7 +34,7 @@
 
 local M                             = {}
 
-M.VERSION                           = "v2026-02-26C"
+M.VERSION                           = "v2026-03-04C"
 
 local ID                            = require("dwkit.core.identity")
 
@@ -43,6 +43,7 @@ local PREFIX                        = tostring(ID.eventPrefix or "DWKit:")
 local EV_BOOT_READY                 = PREFIX .. "Boot:Ready"
 local EV_SVC_PRESENCE_UPDATED       = PREFIX .. "Service:Presence:Updated"
 local EV_SVC_ACTIONMODEL_UPDATED    = PREFIX .. "Service:ActionModel:Updated"
+local EV_SVC_ACTIONPAD_UPDATED      = PREFIX .. "Service:ActionPad:Updated"
 local EV_SVC_SKILLREG_UPDATED       = PREFIX .. "Service:SkillRegistry:Updated"
 local EV_SVC_SCORESTORE_UPDATED     = PREFIX .. "Service:ScoreStore:Updated"
 local EV_SVC_ROOMENTITIES_UPDATED   = PREFIX .. "Service:RoomEntities:Updated"
@@ -73,7 +74,7 @@ end
 -- - M.VERSION is the code module version tag (calendar style)
 -- -------------------------
 local REG = {
-  version = "v1.12",
+  version = "v1.13",
   moduleVersion = M.VERSION,
   events = {
     [EV_BOOT_READY] = {
@@ -135,6 +136,29 @@ local REG = {
       notes = {
         "SAFE internal event (no gameplay commands).",
         "Manual-only: emitted only when service API is invoked.",
+      },
+    },
+
+    [EV_SVC_ACTIONPAD_UPDATED] = {
+      name = EV_SVC_ACTIONPAD_UPDATED,
+      description = "Emitted when ActionPadService recomputes or updates its row model (SAFE; data only).",
+      payloadSchema = {
+        ts = "number",
+        state = "table (optional)",
+        rows = "table (optional)",
+        delta = "table (optional)",
+        source = "string (optional)",
+      },
+      producers = {
+        "dwkit.services.actionpad_service",
+      },
+      consumers = {
+        "internal (ui/tests/integrations)",
+      },
+      notes = {
+        "SAFE internal event (no gameplay commands).",
+        "Manual-only: emitted only when ActionPadService API is invoked (eg recompute).",
+        "Primary consumer is ActionPad UI modules (direct or via ui_manager dependency wiring).",
       },
     },
 

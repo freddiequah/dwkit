@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-04A
+-- Version     : v2026-03-04E
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-04A"
+M.VERSION = "v2026-03-04E"
 
 local SUITES = {
     default = {
@@ -116,6 +116,78 @@ local SUITES = {
                 cmd =
                 'lua do print("[dwverify-remoteexec] OPTIONAL MANUAL: open a second Mudlet profile whose profile label is in owned_profiles values, then run: dwremoteexec ping <thatProfileLabel> and watch for PING received on the target tab.") end',
                 note = "Optional real cross-profile delivery check (not required for PASS).",
+            },
+        },
+    },
+
+    -- SkillRegistry smoke (Objective: SkillRegistry expansion)
+    skill_registry_smoke = {
+        title = "skill_registry_smoke",
+        description =
+        "SkillRegistry smoke: assert expanded baseline, canonical kind set, alias lookup, class normalization, validateAll PASS, and seed keys exist. Also confirms dwskills prints without error.",
+        delay = 0.20,
+        steps = {
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.skill_registry_service"); print(string.format("[dwverify-skillreg] service version=%s", tostring(S.getVersion()))) local st=S.getStats(); print(string.format("[dwverify-skillreg] stats entries=%s updates=%s lastTs=%s", tostring(st.entries), tostring(st.updates), tostring(st.lastTs or "nil"))) end',
+                note = "Load service and print version + stats.",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.skill_registry_service"); local ok,issues=S.validateAll({strictClassList=true}); print(string.format("[dwverify-skillreg] validateAll ok=%s issues=%s", tostring(ok==true), tostring(type(issues)=="table" and #issues or "nil"))) if ok~=true then for i=1,math.min(10,#issues) do local it=issues[i]; print(string.format("[dwverify-skillreg] issue[%s] key=%s err=%s", tostring(i), tostring(it.key), tostring(it.error))) end; error("validateAll expected PASS") end; print("[dwverify-skillreg] PASS validateAll") end',
+                note = "ASSERT: validateAll(strictClassList=true) must PASS.",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.skill_registry_service"); local reg=S.getRegistry(); if type(reg)~="table" then error("Expected registry table") end; if type(reg["heal"])~="table" then error("Expected key heal present") end; if type(reg["power heal"])~="table" then error("Expected key power heal present") end; if type(reg["anti-paladin example"])~="table" then error("Expected key anti-paladin example present") end; local def=reg["anti-paladin example"]; if tostring(def.classKey)~="anti-paladin" then error("Expected classKey anti-paladin; got "..tostring(def.classKey)) end; print("[dwverify-skillreg] PASS seed keys + anti-paladin classKey") end',
+                note = "ASSERT: required keys exist; anti-paladin is hyphen-preserved.",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.skill_registry_service"); local def=S.resolveByPracticeKey("Power   Heal"); if not def then error("Expected resolveByPracticeKey Power Heal to find entry") end; if tostring(def.practiceKey)~="power heal" then error("Expected practiceKey power heal; got "..tostring(def.practiceKey)) end; local def2=S.resolveByAlias("PHEAL"); if not def2 then error("Expected resolveByAlias PHEAL to find entry") end; if tostring(def2.practiceKey)~="power heal" then error("Expected alias to resolve to power heal; got "..tostring(def2.practiceKey)) end; print("[dwverify-skillreg] PASS resolveByPracticeKey + resolveByAlias") end',
+                note = "ASSERT: practiceKey normalization and alias lookup work.",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.skill_registry_service"); local ck,err=S.normalizeClassKey("APAL"); if not ck then error("normalizeClassKey(APAL) failed: "..tostring(err)) end; if ck~="anti-paladin" then error("Expected anti-paladin; got "..tostring(ck)) end; local list=S.listByClass("anti paladin","skill"); if type(list)~="table" then error("Expected list table") end; if #list < 1 then error("Expected >=1 anti-paladin skill entry") end; print(string.format("[dwverify-skillreg] PASS class normalization + listByClass count=%s", tostring(#list))) end',
+                note = "ASSERT: class normalization preserves hyphen and listByClass works.",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.skill_registry_service"); local kinds={"skill","spell","race","weapon"}; for i=1,#kinds do local k=kinds[i]; local list=S.listByKind(k); if type(list)~="table" then error("Expected listByKind("..k..") returns table") end end; local st=S.getStats(); if tonumber(st.entries or 0) < 12 then error("Expected expanded baseline entries >= 12; got "..tostring(st.entries)) end; local s=S.listByKind("spell"); local sk=S.listByKind("skill"); local r=S.listByKind("race"); local w=S.listByKind("weapon"); if #s < 3 then error("Expected >=3 spells; got "..tostring(#s)) end; if #sk < 6 then error("Expected >=6 skills; got "..tostring(#sk)) end; if #r < 1 then error("Expected >=1 race entry; got "..tostring(#r)) end; if #w < 1 then error("Expected >=1 weapon entry; got "..tostring(#w)) end; print(string.format("[dwverify-skillreg] PASS coverage spells=%s skills=%s race=%s weapon=%s", tostring(#s), tostring(#sk), tostring(#r), tostring(#w))) end',
+                note = "ASSERT: minimum coverage counts per kind (starter baseline).",
+            },
+            { cmd = "dwskills",                 note = "Should print SkillRegistryService summary and list keys (SAFE)." },
+            { cmd = "dwskills dump power heal", note = "Optional: dump one entry; should show normalized practiceKey + classKey." },
+        },
+    },
+
+    -- NEW: ActionPadService smoke (Objective: ActionPadService MVP)
+    actionpad_service_smoke = {
+        title = "actionpad_service_smoke",
+        description =
+        "ActionPadService smoke: seed owned_profiles + seed PresenceService roster deterministically, then recompute ActionPadService and assert online-only rows. Also validates planning helpers (PLAN ONLY, no sends).",
+        delay = 0.25,
+        steps = {
+            {
+                cmd =
+                'lua do local O=require("dwkit.config.owned_profiles"); local ok,err=O.setMap({["Alpha"]="Profile-A",["Beta"]="Profile-B",["Healer"]="Profile-Heal"},{noSave=true}); if ok==false then error("owned_profiles.setMap failed: "..tostring(err)) end; local st=O.status(); print(string.format("[dwverify-actionpad] seeded owned_profiles count=%s", tostring(st.count))) end',
+                note = "Seed deterministic owned_profiles (session-only).",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.presence_service"); local ok,err=P.setState({myProfilesOnline={"Alpha (Profile-A) [ONLINE] [HERE]","Beta (Profile-B) [ONLINE]"},myProfilesOffline={"Healer (Profile-Heal) [OFFLINE]"},myProfilesHere={"Alpha (Profile-A) [ONLINE] [HERE]"},otherPlayersInRoom={"OtherGuy"},mapping={count=3},roomTs=os.time(),whoTs=os.time()},{source="dwverify:actionpad:seed_presence"}); if ok==false then error("PresenceService.setState failed: "..tostring(err)) end; print("[dwverify-actionpad] seeded PresenceService roster") end',
+                note = "Seed PresenceService roster (deterministic, SAFE).",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local ok,err=A.recompute({source="dwverify:actionpad:recompute"}); if ok==false then error("ActionPadService.recompute failed: "..tostring(err)) end; local rows=A.getRowsOnlineOnly(); print(string.format("[dwverify-actionpad] rowsOnline count=%s", tostring(#rows))) local function has(n,label,here) for i=1,#rows do local r=rows[i]; if tostring(r.name)==n and tostring(r.profileLabel)==label then if here==nil then return true end; return (r.here==here) end end return false end; if has("Alpha","Profile-A",true)~=true then error("Expected Alpha online here") end; if has("Beta","Profile-B",false)~=true then error("Expected Beta online") end; print("[dwverify-actionpad] PASS online-only rows derived") end',
+                note = "Recompute ActionPadService and assert expected online-only rows.",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local plan,err=A.planSelfExec("Alpha","say hi",{source="dwverify:actionpad:plan"}); if not plan then error("planSelfExec failed: "..tostring(err)) end; print(string.format("[dwverify-actionpad] planSelfExec target=%s cmd=%s", tostring(plan.targetProfile), tostring(plan.cmd))) local plan2,err2=A.planAssistExec("Healer","Alpha","cast heal {target}",{source="dwverify:actionpad:plan2"}); if not plan2 then error("planAssistExec failed: "..tostring(err2)) end; print(string.format("[dwverify-actionpad] planAssistExec target=%s cmd=%s", tostring(plan2.targetProfile), tostring(plan2.cmd))) print("[dwverify-actionpad] NOTE: plans are PLAN ONLY (no send).") end',
+                note = "Planning helpers only (no send).",
             },
         },
     },
