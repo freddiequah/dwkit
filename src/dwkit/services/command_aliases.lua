@@ -3,7 +3,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.command_aliases
 -- Owner       : Services
--- Version     : v2026-02-25A
+-- Version     : v2026-03-04B
 -- Purpose     :
 --   - Install SAFE Mudlet aliases for DWKit commands.
 --   - AUTO-GENERATES SAFE aliases from the Command Registry (best-effort).
@@ -95,7 +95,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-25A"
+M.VERSION = "v2026-03-04B"
 
 local AliasCtl = require("dwkit.services.alias_control")
 local CommandCtx = require("dwkit.services.command_ctx")
@@ -250,7 +250,8 @@ local function _installDwverifyAliases(created)
     end
 
     -- dwverify [suite]
-    local idRun = _mkAlias([[^dwverify(?:\s+(\w+))?$]], function()
+    -- Accept suite keys with underscores/hyphens (eg skill_registry_smoke)
+    local idRun = _mkAlias([[^dwverify(?:\s+([A-Za-z0-9_\-]+))?$]], function()
         local suite = (matches and matches[2]) or nil
         if type(suite) ~= "string" or suite == "" then suite = "default" end
 
@@ -260,7 +261,10 @@ local function _installDwverifyAliases(created)
             return
         end
 
-        V.run(suite)
+        local okRun, errRun = V.run(suite)
+        if okRun ~= true then
+            _err("[DWKit Alias] dwverify: run failed err=" .. tostring(errRun))
+        end
     end)
 
     if not idRun then
@@ -375,11 +379,24 @@ function M.install(opts)
         return false, STATE.lastError
     end
 
-    -- StepQ: alias_factory is required (fail-fast)
+    -- Always install dwverify first so verification is never blocked by SAFE alias generation failures.
+    local created = {}
+    do
+        local okV, vErr = _installDwverifyAliases(created)
+        if not okV then
+            STATE.lastError = tostring(vErr or "Failed to install dwverify aliases")
+            STATE.aliasIds = {}
+            return false, STATE.lastError
+        end
+    end
+
+    -- StepQ: alias_factory is required (fail-fast), but dwverify is already installed.
     local okF, F = _safeRequire("dwkit.services.alias_factory")
     if not okF or type(F) ~= "table" then
-        STATE.lastError = "alias_factory not available (required)"
-        STATE.aliasIds = {}
+        STATE.aliasIds = created
+        STATE.installed = true
+        STATE.lastError = "alias_factory not available (required); dwverify installed only"
+        _setGlobalAliasIds(created)
         return false, STATE.lastError
     end
 
@@ -421,29 +438,35 @@ function M.install(opts)
     end
 
     if type(safeNames) ~= "table" or #safeNames == 0 then
-        STATE.lastError = "No SAFE commands available (alias_factory returned empty)"
-        STATE.aliasIds = {}
+        STATE.aliasIds = created
+        STATE.installed = true
+        STATE.lastError = "No SAFE commands available (alias_factory returned empty); dwverify installed only"
+        _setGlobalAliasIds(created)
         return false, STATE.lastError
     end
 
     if type(F.installAutoSafeAliases) ~= "function" then
-        STATE.lastError = "alias_factory.installAutoSafeAliases missing (required)"
-        STATE.aliasIds = {}
+        STATE.aliasIds = created
+        STATE.installed = true
+        STATE.lastError = "alias_factory.installAutoSafeAliases missing (required); dwverify installed only"
+        _setGlobalAliasIds(created)
         return false, STATE.lastError
     end
 
     -- No special-cases now (including dwdiag)
     local special = {}
-    local created = F.installAutoSafeAliases(deps, kit, safeNames, special)
+    local createdSafe = F.installAutoSafeAliases(deps, kit, safeNames, special)
 
-    if type(created) ~= "table" then
-        STATE.lastError = "alias_factory did not return created aliases table"
-        STATE.aliasIds = {}
+    if type(createdSafe) ~= "table" then
+        STATE.aliasIds = created
+        STATE.installed = true
+        STATE.lastError = "alias_factory did not return created aliases table; dwverify installed only"
+        _setGlobalAliasIds(created)
         return false, STATE.lastError
     end
 
     local anyFail = false
-    for _, v in pairs(created) do
+    for _, v in pairs(createdSafe) do
         if v == nil then
             anyFail = true
             break
@@ -451,42 +474,28 @@ function M.install(opts)
     end
 
     if anyFail then
-        STATE.lastError = "Failed to create one or more aliases"
-        if type(killAlias) == "function" then
-            for _, xid in pairs(created) do
-                if xid then pcall(killAlias, xid) end
-            end
-        end
-        STATE.aliasIds = {}
+        -- Keep dwverify aliases; report failure for SAFE alias generation.
+        STATE.aliasIds = created
+        STATE.installed = true
+        STATE.lastError = "Failed to create one or more SAFE aliases; dwverify installed only"
+        _setGlobalAliasIds(created)
         return false, STATE.lastError
+    end
+
+    -- Merge SAFE aliases into created
+    for k, v in pairs(createdSafe) do
+        created[k] = v
     end
 
     -- Install dwprompt (manual GAME wrapper) so it never falls through to the MUD.
     do
         local okP, pErr = _installDwpromptAlias(created, kit)
         if not okP then
+            -- Keep dwverify + SAFE aliases, but report error.
+            STATE.aliasIds = created
+            STATE.installed = true
             STATE.lastError = tostring(pErr or "Failed to install dwprompt alias")
-            if type(killAlias) == "function" then
-                for _, xid in pairs(created) do
-                    if xid then pcall(killAlias, xid) end
-                end
-            end
-            STATE.aliasIds = {}
-            return false, STATE.lastError
-        end
-    end
-
-    -- Install dwverify aliases (manual verification runner)
-    do
-        local okV, vErr = _installDwverifyAliases(created)
-        if not okV then
-            STATE.lastError = tostring(vErr or "Failed to install dwverify aliases")
-            if type(killAlias) == "function" then
-                for _, xid in pairs(created) do
-                    if xid then pcall(killAlias, xid) end
-                end
-            end
-            STATE.aliasIds = {}
+            _setGlobalAliasIds(created)
             return false, STATE.lastError
         end
     end

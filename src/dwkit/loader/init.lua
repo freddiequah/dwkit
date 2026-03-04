@@ -393,6 +393,18 @@ function Loader.init()
             DWKit._promptDetectorServiceLoadError = tostring(promptOrErr)
         end
 
+        -- NEW: ActionPadService (SAFE, data only; no sends)
+        do
+            local okPad, padOrErr = pcall(require, "dwkit.services.actionpad_service")
+            if okPad and type(padOrErr) == "table" then
+                DWKit.services.actionPadService = padOrErr
+                DWKit._actionPadServiceLoadError = nil
+            else
+                DWKit.services.actionPadService = nil
+                DWKit._actionPadServiceLoadError = tostring(padOrErr)
+            end
+        end
+
         -- WHO watcher default-on (PASSIVE capture; no gameplay sends):
         -- Ensure dwwho handler module is loaded during init so its watcher autostart runs
         -- (manual `who` should populate WhoStore without requiring `dwwho watch on`).
