@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-03E
+-- Version     : v2026-03-04A
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-03E"
+M.VERSION = "v2026-03-04A"
 
 local SUITES = {
     default = {
@@ -87,7 +87,7 @@ local SUITES = {
     remoteexec_smoke = {
         title = "remoteexec_smoke",
         description =
-        "RemoteExec MVP smoke (owned-only, manual-triggered). Deterministic receiver simulation: install service, seed owned_profiles (noSave), then inject a receiver-side SEND (empty allowlist) using test helpers and assert send:not_allowlisted. This avoids relying on raiseGlobalEvent loopback which may not deliver to the same profile in some Mudlet builds.",
+        "RemoteExec MVP smoke (owned-only, manual-triggered). Deterministic receiver simulation: install service, ensure current profile label is treated as owned (noSave; merge into existing map), then inject a receiver-side SEND (empty allowlist) using test helpers and assert send:not_allowlisted. This avoids relying on raiseGlobalEvent loopback which may not deliver to the same profile in some Mudlet builds.",
         delay = 0.25,
         steps = {
             {
@@ -97,13 +97,15 @@ local SUITES = {
             },
             {
                 cmd =
-                'lua do local O=require("dwkit.config.owned_profiles"); local p=(type(getProfileName)=="function" and getProfileName()) or "unknown-profile"; local ok,err=O.setMap({["SelfChar"]=tostring(p)},{noSave=true}); if ok==false then error("owned_profiles.setMap failed: "..tostring(err)) end; local st=O.status(); print(string.format("[dwverify-remoteexec] seeded owned_profiles count=%s selfProfile=%s", tostring(st.count), tostring(p))) end',
-                note = "Seed owned_profiles (session-only) so current profile label is treated as owned (required for owned-only enforcement).",
+                'lua do local O=require("dwkit.config.owned_profiles"); local p=(type(getProfileName)=="function" and getProfileName()) or "unknown-profile"; local before=O.status(); local m=(type(O.getMap)=="function" and O.getMap()) or {}; local merged={}; if type(m)=="table" then for k,v in pairs(m) do merged[k]=v end end; merged["SelfChar"]=tostring(p); local ok,err=O.setMap(merged,{noSave=true}); if ok==false then error("owned_profiles.setMap failed: "..tostring(err)) end; local after=O.status(); print(string.format("[dwverify-remoteexec] ensured SelfChar owned (merge) beforeCount=%s afterCount=%s selfProfile=%s", tostring(before and before.count), tostring(after and after.count), tostring(p))) end',
+                note =
+                "Ensure current profile label is treated as owned (session-only) WITHOUT clobbering an existing owned_profiles map (merge best-effort).",
             },
             {
                 cmd =
                 'lua do local S=require("dwkit.services.remote_exec_service"); S.clearAllowlist(); local p=(type(getProfileName)=="function" and getProfileName()) or "unknown-profile"; local wire=S._testMakeWire(tostring(p),"SEND","say hello",{source="dwverify:remoteexec"}); local ok,err=S._testInjectWire(wire); print(string.format("[dwverify-remoteexec] injected SEND ok=%s err=%s (expect REJECT send:not_allowlisted)", tostring(ok==true), tostring(err))) end',
-                note = "Deterministic receiver simulation: inject SEND to self with empty allowlist; receiver must REJECT send:not_allowlisted.",
+                note =
+                "Deterministic receiver simulation: inject SEND to self with empty allowlist; receiver must REJECT send:not_allowlisted.",
             },
             {
                 cmd =
@@ -131,7 +133,7 @@ local SUITES = {
                 "Init DWKit (single-line). Expect dwwhoLoadErr=nil; CPC load/install errors should be nil on a healthy install.",
             },
             { cmd = "dwwho watch status", note = "Expect enabled=true without running dwwho watch on." },
-            { cmd = "who", delay = 0.90, note = "Manual WHO should be captured as dwwho:auto (watcher default-on)." },
+            { cmd = "who",                delay = 0.90,                                                note = "Manual WHO should be captured as dwwho:auto (watcher default-on)." },
             {
                 cmd =
                 'lua do local S=require("dwkit.services.whostore_service"); local st=S.getState(); if st.lastUpdatedTs==nil then error("Expected WhoStore lastUpdatedTs after manual who") end; if tostring(st.source)~="dwwho:auto" then error("Expected WhoStore source dwwho:auto after manual who; got "..tostring(st.source)) end; print(string.format("[dwverify-prereq] PASS WhoStore source=%s lastUpdatedTs=%s autoCaptureEnabled=%s", tostring(st.source), tostring(st.lastUpdatedTs), tostring(st.autoCaptureEnabled))) end',
@@ -183,7 +185,8 @@ local SUITES = {
             {
                 cmd =
                 'lua do local W=require("dwkit.services.whostore_service"); local ok1,err1=W.clear({source="dwverify:presence:whoclear"}); if ok1==false then error("WhoStore.clear failed: "..tostring(err1)) end; local ok2,err2=W.setState({players={FixturePlayer=true,OtherGuy=true}},{source="dwverify:presence:whoseed"}); if ok2==false then error("WhoStore.setState failed: "..tostring(err2)) end; local names=W.getAllNames(); print(string.format("[dwverify-presence] seeded WhoStore names=%s count=%s", tostring(table.concat(names,",")), tostring(#names))) end',
-                note = "Seed WhoStore deterministically with BOTH names (authoritative snapshot): FixturePlayer + OtherGuy (SAFE; no gameplay sends).",
+                note =
+                "Seed WhoStore deterministically with BOTH names (authoritative snapshot): FixturePlayer + OtherGuy (SAFE; no gameplay sends).",
             },
             {
                 cmd =
@@ -242,12 +245,14 @@ local SUITES = {
             {
                 cmd =
                 'lua do local P=require("dwkit.services.presence_service"); P.clear({source="dwverify:roster:presenceclear"}); local R=require("dwkit.services.roomentities_service"); R.clear({source="dwverify:roster:roomclear",forceEmit=true}); local C=require("dwkit.capture.roomfeed_capture"); local ok,err=C._testIngestSnapshot({"Some Room (#1) [ INDOORS ]","Alpha is here.","Beta the adventurer is standing here.","A large keg of Killians Irish Red is here.","OtherGuy is standing here.","Obvious exits:","North - Somewhere"},{hasExits=true,startKind="strong"}); if ok==false then error("roomfeed _testIngestSnapshot failed: "..tostring(err)) end; print("[dwverify-roster] ingested room snapshot with Alpha + Beta(titled) + OtherGuy + object") end',
-                note = "Room snapshot: Beta appears with title; object line present; Presence must match Beta by token and ignore object in Other players.",
+                note =
+                "Room snapshot: Beta appears with title; object line present; Presence must match Beta by token and ignore object in Other players.",
             },
             {
                 cmd =
                 'lua do local P=require("dwkit.services.presence_service"); local st=P.getState(); local on=st.myProfilesOnline or {}; local off=st.myProfilesOffline or {}; local ot=st.otherPlayersInRoom or {}; local function has(arr, needle) for i=1,#arr do if tostring(arr[i])==needle then return true end end return false end; if has(on,"Alpha (Profile-A) [ONLINE] [HERE]")~=true then error("Expected Alpha online+here tagged; got online="..tostring(table.concat(on," | "))) end; if has(on,"Beta (Profile-B) [ONLINE] [HERE]")~=true then error("Expected Beta ONLINE+HERE via CPC + titled room label; got online="..tostring(table.concat(on," | "))) end; local hasOther=false; for i=1,#ot do if tostring(ot[i])=="OtherGuy" then hasOther=true end end; if hasOther~=true then error("Expected OtherGuy in otherPlayersInRoom; got other="..tostring(table.concat(ot," | "))) end; local bad=false; for i=1,#ot do local v=tostring(ot[i] or ""); if v:lower():find("keg",1,true) then bad=true end end; if bad==true then error("Expected object to be filtered from otherPlayersInRoom; got other="..tostring(table.concat(ot," | "))) end; print(string.format("[dwverify-roster] PASS online=%s offline=%s other=%s", tostring(#on), tostring(#off), tostring(#ot))) end',
-                note = "ASSERT: Alpha/Beta recognized as owned (Beta via candidate token); OtherGuy appears; object filtered.",
+                note =
+                "ASSERT: Alpha/Beta recognized as owned (Beta via candidate token); OtherGuy appears; object filtered.",
             },
             {
                 cmd =
@@ -266,7 +271,8 @@ local SUITES = {
             {
                 cmd =
                 'lua do local W=require("dwkit.services.whostore_service"); local ok1,err1=W.clear({source="dwverify:roomentities:whoclear"}); if ok1==false then error("WhoStore.clear failed: "..tostring(err1)) end; local ok2,err2=W.setState({players={Alpha=true,Beta=true}},{source="dwverify:roomentities:whoseed_players_set"}); if ok2==false then error("WhoStore.setState failed: "..tostring(err2)) end; local names=W.getAllNames(); print(string.format("[dwverify-roomentities] seeded WhoStore players-set names=%s count=%s", tostring(table.concat(names,",")), tostring(#names))) end',
-                note = "Seed WhoStore using players set-map shape (this is the path that previously could not produce 'exact').",
+                note =
+                "Seed WhoStore using players set-map shape (this is the path that previously could not produce 'exact').",
             },
             {
                 cmd =
@@ -292,7 +298,7 @@ local SUITES = {
         delay = 0.35,
         steps = {
             { cmd = "dwsetup status", note = "Checklist only (no sends)." },
-            { cmd = "dwsetup", note = "Runs dwwho refresh once and prints next steps." },
+            { cmd = "dwsetup",        note = "Runs dwwho refresh once and prints next steps." },
             {
                 cmd =
                 'lua do print("[dwverify-setup] MANUAL: type look once now. This is required for RoomFeed/RoomEntities passive capture so Presence/RoomEntities UIs become correct.") end',

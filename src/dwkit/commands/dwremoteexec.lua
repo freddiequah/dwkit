@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwremoteexec
 -- Owner       : Commands
--- Version     : v2026-03-03A
+-- Version     : v2026-03-04A
 -- Purpose     :
 --   - SAFE command surface for RemoteExecService.
 --   - Status + allowlist management + SAFE ping test.
@@ -17,7 +17,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-03A"
+M.VERSION = "v2026-03-04A"
 
 local function _out(ctx, s)
     s = tostring(s or "")
@@ -61,6 +61,32 @@ local function _getServiceBestEffort(kit)
     return nil
 end
 
+local function _joinTokens(tokens, startIndex)
+    if type(tokens) ~= "table" then return "" end
+    startIndex = tonumber(startIndex) or 1
+    if startIndex < 1 then startIndex = 1 end
+    local out = {}
+    for i = startIndex, #tokens do
+        local v = tokens[i]
+        if v ~= nil and v ~= "" then
+            out[#out + 1] = tostring(v)
+        end
+    end
+    return table.concat(out, " ")
+end
+
+local function _stripOuterQuotes(s)
+    s = _trim(s)
+    if s == "" then return s end
+    local first = s:sub(1, 1)
+    local last = s:sub(-1)
+    if (first == '"' and last == '"') or (first == "'" and last == "'") then
+        s = s:sub(2, -2)
+        s = _trim(s)
+    end
+    return s
+end
+
 function M.getVersion()
     return tostring(M.VERSION)
 end
@@ -98,6 +124,7 @@ local function _printHelp(ctx)
     _out(ctx, "")
     _out(ctx, "Notes:")
     _out(ctx, "  - Owned-only enforcement uses owned_profiles values (profile labels).")
+    _out(ctx, "  - ping accepts profile labels with spaces (quotes optional).")
     _out(ctx, "  - SEND is allowlist-gated and default OFF (Objective B stays SAFE).")
 end
 
@@ -134,7 +161,8 @@ function M.dispatch(ctx, kit, tokens)
     end
 
     if t1 == "ping" then
-        local target = _trim(tokens[3] or "")
+        local raw = _joinTokens(tokens, 3)
+        local target = _stripOuterQuotes(raw)
         if target == "" then
             _err(ctx, "[DWKit RemoteExec] ping: targetProfile required")
             return false, "targetProfile required"
