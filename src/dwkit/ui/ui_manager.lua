@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.ui_manager
 -- Owner       : UI
--- Version     : v2026-02-24A
+-- Version     : v2026-03-04F
 -- Purpose     :
 --   - SAFE dispatcher for applying UI modules registered in gui_settings.
 --   - Provides manual-only "apply all" and "apply one" capability.
@@ -35,11 +35,15 @@
 --   v2026-02-24A:
 --     - NEW: presence_ui claims roomfeed_watch provider so Presence can populate even if
 --       roomentities_ui is disabled (Presence depends on RoomEntities snapshot data for this profile).
+--
+--   v2026-03-04F:
+--     - NEW: seed actionpad_ui into gui_settings defaults so it appears in UI Manager
+--       list on new profiles (default enabled=false, visible=false).
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-24A"
+M.VERSION = "v2026-03-04F"
 
 local function _rawOut(line)
     line = tostring(line or "")
@@ -912,6 +916,10 @@ M.KNOWN_UI_DEFAULTS = {
     -- NEW: ensure Chat Manager UI appears in UI Manager list on new profiles.
     -- Default OFF so it does not auto-run unless user enables it.
     chat_manager_ui = { enabled = false, visible = false },
+
+    -- NEW: ensure ActionPad UI appears in UI Manager list on new profiles.
+    -- Default OFF so it does not auto-run unless user enables it.
+    actionpad_ui = { enabled = false, visible = false },
 }
 
 function M.seedRegisteredDefaults(opts)

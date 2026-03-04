@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-04E
+-- Version     : v2026-03-04F
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-04E"
+M.VERSION = "v2026-03-04F"
 
 local SUITES = {
     default = {
@@ -188,6 +188,46 @@ local SUITES = {
                 cmd =
                 'lua do local A=require("dwkit.services.actionpad_service"); local plan,err=A.planSelfExec("Alpha","say hi",{source="dwverify:actionpad:plan"}); if not plan then error("planSelfExec failed: "..tostring(err)) end; print(string.format("[dwverify-actionpad] planSelfExec target=%s cmd=%s", tostring(plan.targetProfile), tostring(plan.cmd))) local plan2,err2=A.planAssistExec("Healer","Alpha","cast heal {target}",{source="dwverify:actionpad:plan2"}); if not plan2 then error("planAssistExec failed: "..tostring(err2)) end; print(string.format("[dwverify-actionpad] planAssistExec target=%s cmd=%s", tostring(plan2.targetProfile), tostring(plan2.cmd))) print("[dwverify-actionpad] NOTE: plans are PLAN ONLY (no send).") end',
                 note = "Planning helpers only (no send).",
+            },
+        },
+    },
+
+    -- NEW: ActionPad UI smoke (Objective: ActionPad UI MVP)
+    actionpad_ui_smoke = {
+        title = "actionpad_ui_smoke",
+        description =
+        "ActionPad UI smoke: deterministic seed (owned_profiles + PresenceService + ActionPadService.recompute), then enable+show actionpad_ui via gui_settings and apply(); print state; then hide via gui_settings and apply() again. Console-first (no screenshots). Buttons remain PLAN-only (no sends).",
+        delay = 0.25,
+        steps = {
+            {
+                cmd =
+                'lua do local O=require("dwkit.config.owned_profiles"); local ok,err=O.setMap({["Alpha"]="Profile-A",["Beta"]="Profile-B",["Healer"]="Profile-Heal"},{noSave=true}); if ok==false then error("owned_profiles.setMap failed: "..tostring(err)) end; local st=O.status(); print(string.format("[dwverify-actionpad-ui] seeded owned_profiles count=%s", tostring(st.count))) end',
+                note = "Seed deterministic owned_profiles (session-only).",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.presence_service"); local ok,err=P.setState({myProfilesOnline={"Alpha (Profile-A) [ONLINE] [HERE]","Beta (Profile-B) [ONLINE]"},myProfilesOffline={"Healer (Profile-Heal) [OFFLINE]"},myProfilesHere={"Alpha (Profile-A) [ONLINE] [HERE]"},otherPlayersInRoom={"OtherGuy"},mapping={count=3},roomTs=os.time(),whoTs=os.time()},{source="dwverify:actionpad_ui:seed_presence"}); if ok==false then error("PresenceService.setState failed: "..tostring(err)) end; print("[dwverify-actionpad-ui] seeded PresenceService roster") end',
+                note = "Seed PresenceService roster (deterministic, SAFE).",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local ok,err=A.recompute({source="dwverify:actionpad_ui:recompute"}); if ok==false then error("ActionPadService.recompute failed: "..tostring(err)) end; local rows=A.getRowsOnlineOnly(); print(string.format("[dwverify-actionpad-ui] ActionPadService rowsOnline count=%s (expect 2)", tostring(#rows))) if #rows~=2 then error("Expected ActionPadService rowsOnline=2; got "..tostring(#rows)) end end',
+                note = "Recompute ActionPadService; ASSERT online-only rows count=2.",
+            },
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("actionpad_ui", true, {noSave=true}); gs.setVisible("actionpad_ui", true, {noSave=true}); local UI=require("dwkit.ui.actionpad_ui"); local ok,err=UI.apply({source="dwverify:actionpad_ui_smoke:show"}); if ok==false then error("actionpad_ui.apply failed: "..tostring(err)) end; local s=UI.getState(); local lr=s.lastRender or {}; print(string.format("[dwverify-actionpad-ui] SHOW visible=%s enabled=%s runtimeVisible=%s rows=%s lastErr=%s", tostring(s.visible), tostring(s.enabled), tostring(s.runtimeVisible), tostring(lr.rowsCount or lr.rowCount or "nil"), tostring(s.lastError))) end',
+                note = "Enable+show ActionPad UI and print state (console-first).",
+            },
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("actionpad_ui", true, {noSave=true}); gs.setVisible("actionpad_ui", false, {noSave=true}); local UI=require("dwkit.ui.actionpad_ui"); local ok,err=UI.apply({source="dwverify:actionpad_ui_smoke:hide"}); if ok==false then error("actionpad_ui.apply(hide) failed: "..tostring(err)) end; local s=UI.getState(); print(string.format("[dwverify-actionpad-ui] HIDE visible=%s enabled=%s runtimeVisible=%s lastErr=%s", tostring(s.visible), tostring(s.enabled), tostring(s.runtimeVisible), tostring(s.lastError))) end',
+                note = "Hide ActionPad UI via gui_settings + apply() and print state.",
+            },
+            {
+                cmd =
+                'lua do print("[dwverify-actionpad-ui] VISUAL CHECK: ActionPad window appears, shows Alpha/Beta rows, and buttons are PLAN-only (no sends).") end',
+                note = "Human visual PASS/FAIL gate.",
             },
         },
     },
