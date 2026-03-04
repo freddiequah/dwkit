@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.score_store_service
 -- Owner       : Services
--- Version     : v2026-01-13I
+-- Version     : v2026-03-04H
 -- Purpose     :
 --   - Provide a SAFE, manual-only score text snapshot store (No-GMCP).
 --   - Ingest score-like text via explicit API calls (no send(), no timers).
@@ -12,6 +12,7 @@
 --       * score (table short)
 --       * score -l (table long)
 --       * score -r (report text)
+--   - Provide SAFE query helpers for ActionPad gating (level/class/name + unknown-stale).
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -36,6 +37,20 @@
 --   - ingestFixture(name?, meta?) -> boolean ok, string|nil err
 --   - selfTestPersistenceSmoke(opts?) -> boolean ok, string|nil err (SAFE; test-only)
 --
+--   -- Bucket B gating helpers (SAFE, data-only):
+--   - getCore() -> table core
+--       core fields:
+--         - ok:boolean
+--         - hasSnapshot:boolean
+--         - hasParsed:boolean
+--         - snapshotTs:number|nil
+--         - snapshotSource:string|nil
+--         - variant:string|nil
+--         - name:string|nil
+--         - class:string|nil
+--         - level:number|nil
+--         - reason:string|nil ("unknown_stale" | "ok")
+--
 -- Events Emitted :
 --   - DWKit:Service:ScoreStore:Updated
 --     payload: { ts=number, snapshot=table, source=string|nil }
@@ -54,7 +69,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-13I"
+M.VERSION = "v2026-03-04H"
 
 local ID = require("dwkit.core.identity")
 
@@ -454,8 +469,6 @@ local function _parseScoreFixtureKV(text)
 end
 
 local function _parseTableHeader(text, parsed)
-    -- Extract Name / Class / Sex / Level from the header row (table variants)
-    -- Example: | Name:              Vzae | Class:        Warrior | Sex: M    Level:   48 |
     local name = text:match("Name:%s*([^|]+)%|")
     if name then parsed.name = _trim(name) end
 
@@ -470,7 +483,6 @@ local function _parseTableHeader(text, parsed)
 end
 
 local function _parseTableCore(text, parsed)
-    -- Armor Class, Alignment, HitRoll, DamRoll, Deaths, Kills, Hometown, Gold, Bank, Exp, To Level
     local ac = text:match("Armor Class:%s*([%-%d]+)")
     if ac then parsed.armorClass = tonumber(ac) end
 
@@ -506,9 +518,7 @@ local function _parseTableCore(text, parsed)
 end
 
 local function _parseTableStats(text, parsed)
-    -- Str: 18/100  18/100 ; Int/Wis/Dex/Con/Cha simple
-    -- IMPORTANT: Many servers format columns with spacing; be permissive.
-    local strCur, strBase, strBase2 = text:match("Str:%s*(%d+/%d+)%s+(%d+/%d+)")
+    local strCur, strBase = text:match("Str:%s*(%d+/%d+)%s+(%d+/%d+)")
     if strCur and strBase then
         parsed.strCur = strCur
         parsed.strBase = strBase
@@ -531,7 +541,6 @@ local function _parseTableStats(text, parsed)
 end
 
 local function _parseTableVitals(text, parsed)
-    -- Hit: (716/716+13) Mana: (100/100+3) Move: (82/82+6)
     local hcur, hmax, hregen = text:match("Hit:%s*%((%d+)%s*/%s*(%d+)%s*%+%s*(%d+)%)")
     if hcur and hmax then
         parsed.hpCur = tonumber(hcur)
@@ -585,7 +594,6 @@ local function _parseTableLongExtras(text, parsed)
     local drunk = text:match("Drunk:%s*(%d+)")
     if drunk then parsed.drunk = tonumber(drunk) end
 
-    -- Saves vs line
     local p = text:match("Para:%s*(%d+)")
     local r = text:match("Rod:%s*(%d+)")
     local pe = text:match("Petri:%s*(%d+)")
@@ -602,32 +610,26 @@ local function _parseTableLongExtras(text, parsed)
 end
 
 local function _parseReport(text, parsed)
-    -- Name + title + level line
     local name, title, lvl = text:match("This ranks you as%s+([%w_%-]+)%s+([^%(]+)%s*%(%s*level%s+(%d+)%)")
     if name then parsed.name = _trim(name) end
     if title then parsed.title = _trim(title) end
     if lvl then parsed.level = tonumber(lvl) end
 
-    -- Class + race
     local cls, race = text:match("You are a%s+([%w_%-]+)%s+of the%s+([^%s]+)%s+race")
     if cls then parsed.class = _trim(cls) end
     if race then parsed.race = _trim(race) end
 
-    -- Sex + age
     local age = text:match("You are a%s+(%d+)%s+year%-old%s+([%w]+)")
     if age then parsed.age = tonumber(age) end
-    -- sex word like male/female
     local sexWord = text:match("You are a%s+%d+%s+year%-old%s+([%w]+)")
     if sexWord then parsed.sexWord = _trim(sexWord) end
 
-    -- Vitals
     local hcur, hmax, mcur, mmax, vcur, vmax =
         text:match("You have%s+(%d+)%((%d+)%)%s+hit,%s+(%d+)%((%d+)%)%s+mana%s+and%s+(%d+)%((%d+)%)%s+movement points")
     if hcur and hmax then parsed.hpCur, parsed.hpMax = tonumber(hcur), tonumber(hmax) end
     if mcur and mmax then parsed.manaCur, parsed.manaMax = tonumber(mcur), tonumber(mmax) end
     if vcur and vmax then parsed.moveCur, parsed.moveMax = tonumber(vcur), tonumber(vmax) end
 
-    -- Stats (current + original)
     local str = text:match("Current stats:%s+Str:%s+([%d/]+)")
     if str then parsed.strCur = _trim(str) end
     local strO = text:match("Original stats:%s+Str:%s+([%d/]+)")
@@ -644,49 +646,42 @@ local function _parseReport(text, parsed)
     local cha = text:match("Current stats:.-Cha:%s+(%d+)")
     if cha then parsed.cha = tonumber(cha) end
 
-    -- AC + alignment
     local ac = text:match("Your armor class is%s+([%-%d]+)")
     if ac then parsed.armorClass = tonumber(ac) end
     local align = text:match("alignment is%s+([%-%d]+)")
     if align then parsed.alignment = tonumber(align) end
 
-    -- Hitroll / damroll
     local hr = text:match("Your Hitroll is%s+([%-%d]+)")
     if hr then parsed.hitroll = tonumber(hr) end
     local dr = text:match("your Damroll is%s+([%-%d]+)")
     if not dr then dr = text:match("Your Damroll is%s+([%-%d]+)") end
     if dr then parsed.damroll = tonumber(dr) end
 
-    -- Regen factors
     local rh, rm, rv = text:match("regeneration factors are:%s+Hp:%s+(%d+)%s+Mp:%s+(%d+)%s+Mv:%s+(%d+)")
     if rh then parsed.regenHp = tonumber(rh) end
     if rm then parsed.regenMp = tonumber(rm) end
     if rv then parsed.regenMv = tonumber(rv) end
 
-    -- Exp + to level
     local exp = text:match("You have scored%s+([%d,]+)%s+experience points")
     if exp then parsed.exp = _toNumber(exp) end
     local toLevel = text:match("You need%s+([%d,]+)%s+experience points to reach your next level")
     if toLevel then parsed.toLevel = _toNumber(toLevel) end
 
-    -- Gold / bank
     local gold, bank = text:match("You have%s+([%d,]+)%s+gold coins on hand,%s+and%s+([%d,]+)%s+coins in the bank")
     if gold then parsed.gold = _toNumber(gold) end
     if bank then parsed.bank = _toNumber(bank) end
 
-    -- Played
     local played = text:match("You have been playing for%s+([^\n%.]+)")
     if played then parsed.played = _trim(played) end
 
-    -- Deaths/kills/dts/sacrifices
     local d, k, dt, sac = text:match(
-    "Deaths:%s*%[(%d+)%],%s*Kills:%s*%[(%d+)%],%s*DTs:%s*%[(%d+)%],%s*Sacrifices:%s*%[(%d+)%]")
+        "Deaths:%s*%[(%d+)%],%s*Kills:%s*%[(%d+)%],%s*DTs:%s*%[(%d+)%],%s*Sacrifices:%s*%[(%d+)%]"
+    )
     if d then parsed.deaths = tonumber(d) end
     if k then parsed.kills = tonumber(k) end
     if dt then parsed.deathtraps = tonumber(dt) end
     if sac then parsed.sacrifices = tonumber(sac) end
 
-    -- Saves
     local sp = text:match("Para:%s*%[(%d+)%]")
     local sr = text:match("Rod:%s*%[(%d+)%]")
     local spe = text:match("Petri:%s*%[(%d+)%]")
@@ -698,21 +693,17 @@ local function _parseReport(text, parsed)
     if sb then parsed.saveBreath = tonumber(sb) end
     if ss then parsed.saveSpell = tonumber(ss) end
 
-    -- Remorts
     local rem = text:match("remorted.-%s+(%d+)%s+times")
     if rem then parsed.remorts = tonumber(rem) end
 
-    -- QP / Honor
     local qp = text:match("You have%s+(%d+)%s+Quest Points")
     if qp then parsed.questPoints = tonumber(qp) end
     local hp = text:match("and%s+(%d+)%s+Honor Points")
     if hp then parsed.honorPoints = tonumber(hp) end
 
-    -- Hometown
     local ht = text:match("Your hometown is%s+([%w_%-]+)")
     if ht then parsed.hometown = _trim(ht) end
 
-    -- Position / hunger / thirst
     local pos = text:match("You are%s+([%w_%-]+)%.")
     if pos then parsed.position = _trim(pos) end
     if text:find("You are hungry", 1, true) then parsed.hungry = true end
@@ -724,7 +715,6 @@ local function _parseScoreText(text)
 
     local variant = _detectVariant(text)
 
-    -- Legacy KV fixture remains supported
     if text:find("[DWKit SCORE FIXTURE", 1, true) then
         local p = _parseScoreFixtureKV(text)
         if type(p) == "table" then
@@ -754,7 +744,6 @@ local function _parseScoreText(text)
         return (next(parsed) ~= nil) and parsed or nil
     end
 
-    -- Unknown format: return nil parsed (raw still stored)
     return nil
 end
 
@@ -775,14 +764,12 @@ local function _startupLoadIfEnabled()
         (msg:find("no data loaded", 1, true) ~= nil)
 
     if isMissing then
-        -- Missing file is normal on first run; do not disable persistence.
         _persist.lastLoadOk = true
         _persist.lastLoadErr = nil
         _persist.lastLoadTs = os.time()
         return
     end
 
-    -- For other errors: keep enabled=true, but record the error for diagnostics.
     _persist.lastLoadOk = false
     _persist.lastLoadErr = "startup load failed: " .. msg
     _persist.lastLoadTs = os.time()
@@ -856,7 +843,6 @@ function M.configurePersistence(opts)
             end
         end
 
-        -- NOTE: do not force a save here; we only write on manual ingest/clear/wipe.
         return true, nil
     end
 
@@ -903,7 +889,7 @@ function M.ingestFromText(text, meta)
         schemaVersion = SCHEMA_VERSION,
         ts = os.time(),
         source = source,
-        variant = variant, -- NEW: table_short | table_long | report | unknown | fixture_kv
+        variant = variant, -- table_short | table_long | report | unknown | fixture_kv
         raw = text,
         parsed = _parseScoreText(text),
     }
@@ -960,7 +946,6 @@ function M.wipe(meta)
                 return false, "wipe disk failed: " .. tostring(delErr)
             end
 
-            -- Mark as "ok" in the existing status fields (best-effort; delete is destructive but successful).
             _persist.lastSaveOk = true
             _persist.lastSaveErr = nil
             _persist.lastSaveTs = os.time()
@@ -973,11 +958,46 @@ function M.wipe(meta)
     return true, nil
 end
 
+-- -------------------------
+-- Bucket B gating helpers (SAFE, data-only)
+-- -------------------------
+
+function M.getCore()
+    local snap = _snapshot
+    local hasSnap = (type(snap) == "table")
+    local hasParsed = (hasSnap and type(snap.parsed) == "table")
+
+    if not hasSnap or not hasParsed then
+        return {
+            ok = true,
+            hasSnapshot = hasSnap,
+            hasParsed = hasParsed,
+            snapshotTs = hasSnap and snap.ts or nil,
+            snapshotSource = hasSnap and snap.source or nil,
+            variant = hasSnap and snap.variant or nil,
+            name = nil,
+            class = nil,
+            level = nil,
+            reason = "unknown_stale",
+        }
+    end
+
+    local p = snap.parsed or {}
+    return {
+        ok = true,
+        hasSnapshot = true,
+        hasParsed = true,
+        snapshotTs = snap.ts,
+        snapshotSource = snap.source,
+        variant = snap.variant,
+        name = (type(p.name) == "string" and p.name ~= "") and p.name or nil,
+        class = (type(p.class) == "string" and p.class ~= "") and p.class or nil,
+        level = (type(p.level) == "number") and p.level or nil,
+        reason = "ok",
+    }
+end
+
 -- SAFE, test-only:
--- - Writes to a selftest relPath (default under selftest/*)
--- - Uses configurePersistence + ingest + internal load to validate round-trip
--- - Cleans up the file best-effort (if store.delete exists)
--- - Restores ALL prior in-memory state + persistence config/status
 function M.selfTestPersistenceSmoke(opts)
     opts = (type(opts) == "table") and opts or {}
     local relPath = _isNonEmptyString(opts.relPath) and tostring(opts.relPath) or
@@ -997,7 +1017,6 @@ function M.selfTestPersistenceSmoke(opts)
         _snapshot = (type(prevSnap) == "table") and _copySnapshot(prevSnap) or nil
         _history = _copyHistory(prevHist)
 
-        -- restore all known keys
         for k, _ in pairs(_persist) do
             _persist[k] = prevPersist[k]
         end
@@ -1045,7 +1064,6 @@ function M.selfTestPersistenceSmoke(opts)
             error("loaded snapshot source mismatch")
         end
 
-        -- Fixture should parse
         if type(_snapshot.parsed) ~= "table" then
             error("loaded snapshot parsed missing (parser should succeed for fixture)")
         end
@@ -1074,7 +1092,6 @@ function M.printSummary()
 
     _out("  persistence : " .. (_persist.enabled and "ENABLED" or "DISABLED"))
 
-    -- Best-effort: show data directory when persist paths are available
     do
         local okP, paths = _getPersistPaths()
         if okP and type(paths) == "table" and type(paths.getDataDir) == "function" then

@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.practice_store_service
 -- Owner       : Services
--- Version     : v2026-03-03C
+-- Version     : v2026-03-04H
 -- Purpose     :
 --   - Provide a SAFE, manual-only practice text snapshot store (No-GMCP).
 --   - Ingest practice-like text via explicit API calls (no send(), no timers).
@@ -9,6 +9,7 @@
 --   - Manual-only persistence using DWKit.persist.store (writes only on ingest/clear/wipe).
 --   - Emit a namespaced update event when snapshot changes.
 --   - Provide deterministic fixtures + a tolerant parser for practice variants.
+--   - Provide SAFE query helpers for ActionPad gating (learned / unknown-stale).
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -33,6 +34,23 @@
 --   - ingestFixture(name?, meta?) -> boolean ok, string|nil err
 --   - selfTestPersistenceSmoke(opts?) -> boolean ok, string|nil err (SAFE; test-only)
 --
+--   -- Bucket B gating helpers (SAFE, data-only):
+--   - normalizePracticeKey(raw) -> string|nil key, string|nil err
+--   - getLearnStatus(kind, practiceKey) -> table status
+--       status fields:
+--         - ok:boolean
+--         - kind:string
+--         - practiceKey:string
+--         - hasSnapshot:boolean
+--         - hasParsed:boolean
+--         - learned:boolean
+--         - tier:string|nil
+--         - cost:number|nil
+--         - percent:number|nil
+--         - reason:string|nil  ("unknown_stale" | "not_learned" | "not_listed" | "ok")
+--         - snapshotTs:number|nil
+--         - snapshotSource:string|nil
+--
 -- Events Emitted :
 --   - DWKit:Service:PracticeStore:Updated
 --     payload: { ts=number, snapshot=table, source=string|nil }
@@ -51,7 +69,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-03C"
+M.VERSION = "v2026-03-04H"
 
 local ID = require("dwkit.core.identity")
 
@@ -297,6 +315,13 @@ local function _normKey(s)
     s = s:gsub("%s+", " ")
     s = s:lower()
     return s
+end
+
+function M.normalizePracticeKey(raw)
+    if raw == nil then return nil, "normalizePracticeKey(raw): raw is nil" end
+    local s = _normKey(raw)
+    if s == "" then return nil, "normalizePracticeKey(raw): raw is empty" end
+    return s, nil
 end
 
 local function _parsePercent(s)
@@ -766,6 +791,135 @@ function M.wipe(meta)
 
     _emitUpdated({ schemaVersion = SCHEMA_VERSION, ts = os.time(), source = source, raw = "", parsed = nil }, source)
     return true, nil
+end
+
+-- -------------------------
+-- Bucket B gating helpers (SAFE, data-only)
+-- -------------------------
+
+local function _sectionForKind(kind)
+    kind = tostring(kind or ""):lower()
+    if kind == "skill" or kind == "skills" then return "skills" end
+    if kind == "spell" or kind == "spells" then return "spells" end
+    if kind == "race" or kind == "raceskill" or kind == "raceskills" or kind == "race-skill" or kind == "race skill" then
+        return "raceSkills"
+    end
+    if kind == "weapon" or kind == "weapons" or kind == "weaponprof" or kind == "weaponprofs" or kind == "weapon-prof" then
+        return "weaponProfs"
+    end
+    return nil
+end
+
+local function _getEntryFromSnapshot(snap, section, key)
+    if type(snap) ~= "table" then return nil end
+    if type(snap.parsed) ~= "table" then return nil end
+    local p = snap.parsed
+    local sec = p[section]
+    if type(sec) ~= "table" then return nil end
+    local e = sec[key]
+    if type(e) ~= "table" then return nil end
+    return e
+end
+
+function M.getLearnStatus(kind, practiceKey)
+    local section = _sectionForKind(kind)
+    if section == nil then
+        return {
+            ok = false,
+            kind = tostring(kind or ""),
+            practiceKey = tostring(practiceKey or ""),
+            hasSnapshot = (type(_snapshot) == "table"),
+            hasParsed = (type(_snapshot) == "table" and type(_snapshot.parsed) == "table"),
+            learned = false,
+            tier = nil,
+            cost = nil,
+            percent = nil,
+            reason = "bad_kind",
+            snapshotTs = (type(_snapshot) == "table") and _snapshot.ts or nil,
+            snapshotSource = (type(_snapshot) == "table") and _snapshot.source or nil,
+        }
+    end
+
+    local pk, pkErr = M.normalizePracticeKey(practiceKey)
+    if not pk then
+        return {
+            ok = false,
+            kind = tostring(kind or ""),
+            practiceKey = tostring(practiceKey or ""),
+            hasSnapshot = (type(_snapshot) == "table"),
+            hasParsed = (type(_snapshot) == "table" and type(_snapshot.parsed) == "table"),
+            learned = false,
+            tier = nil,
+            cost = nil,
+            percent = nil,
+            reason = "bad_key:" .. tostring(pkErr),
+            snapshotTs = (type(_snapshot) == "table") and _snapshot.ts or nil,
+            snapshotSource = (type(_snapshot) == "table") and _snapshot.source or nil,
+        }
+    end
+
+    local snap = _snapshot
+    local hasSnap = (type(snap) == "table")
+    local hasParsed = (hasSnap and type(snap.parsed) == "table")
+
+    if not hasSnap or not hasParsed then
+        return {
+            ok = true,
+            kind = tostring(kind or ""),
+            practiceKey = pk,
+            hasSnapshot = hasSnap,
+            hasParsed = hasParsed,
+            learned = false,
+            tier = nil,
+            cost = nil,
+            percent = nil,
+            reason = "unknown_stale",
+            snapshotTs = hasSnap and snap.ts or nil,
+            snapshotSource = hasSnap and snap.source or nil,
+        }
+    end
+
+    local e = _getEntryFromSnapshot(snap, section, pk)
+    if type(e) ~= "table" then
+        -- Not present in parsed list (common: not learned or not shown in output)
+        return {
+            ok = true,
+            kind = tostring(kind or ""),
+            practiceKey = pk,
+            hasSnapshot = true,
+            hasParsed = true,
+            learned = false,
+            tier = nil,
+            cost = nil,
+            percent = nil,
+            reason = "not_listed",
+            snapshotTs = snap.ts,
+            snapshotSource = snap.source,
+        }
+    end
+
+    local tier = (type(e.tier) == "string") and e.tier or nil
+    local learned = (e.learned == true)
+    if type(tier) == "string" and tier:lower() == "not known" then
+        learned = false
+    end
+
+    local reason = learned and "ok" or "not_learned"
+
+    return {
+        ok = true,
+        kind = tostring(kind or ""),
+        practiceKey = pk,
+        hasSnapshot = true,
+        hasParsed = true,
+        learned = learned,
+        tier = tier,
+        cost = (type(e.cost) == "number") and e.cost or nil,
+        percent = (type(e.percent) == "number") and e.percent or nil,
+        reason = reason,
+        snapshotTs = snap.ts,
+        snapshotSource = snap.source,
+    }
 end
 
 -- SAFE, test-only:
