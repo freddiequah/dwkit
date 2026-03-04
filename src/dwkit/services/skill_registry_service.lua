@@ -1,13 +1,14 @@
 -- #########################################################################
 -- Module Name : dwkit.services.skill_registry_service
 -- Owner       : Services
--- Version     : v2026-03-04C
+-- Version     : v2026-03-04D
 -- Purpose     :
 --   - SAFE SkillRegistryService (data only).
 --   - Owns skill/spell registry (data-driven), emits updates.
 --   - Provides class normalization + schema validation for ActionPad needs.
 --   - Provides lookups by practiceKey and alias, plus list helpers.
 --   - No UI, no persistence, no timers, no send().
+--   - Hardened validation: detects duplicate practiceKey + alias collisions.
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -35,7 +36,7 @@
 
 local M                = {}
 
-M.VERSION              = "v2026-03-04C"
+M.VERSION              = "v2026-03-04D"
 
 local ID               = require("dwkit.core.identity")
 local BUS              = require("dwkit.bus.event_bus")
@@ -299,8 +300,8 @@ local STATE            = {
     updates = 0,
 
     -- indexes (rebuilt on changes; SAFE)
-    practiceIndex = {}, -- practiceKey -> key
-    aliasIndex = {},    -- alias(normalized) -> key
+    practiceIndex = {}, -- practiceKey -> key (first-wins; collisions are reported by validateAll)
+    aliasIndex = {},    -- alias(normalized) -> key (first-wins; collisions are reported by validateAll)
 }
 
 local function _shallowCopy(t)
@@ -422,6 +423,14 @@ local function _normalizeKind(kind)
     return k
 end
 
+local function _pushIssue(issues, key, err, meta)
+    local it = { key = tostring(key), error = tostring(err) }
+    if type(meta) == "table" then
+        for k, v in pairs(meta) do it[k] = v end
+    end
+    issues[#issues + 1] = it
+end
+
 function M.validateDef(def, opts)
     opts = opts or {}
     if type(def) ~= "table" then
@@ -455,6 +464,11 @@ function M.validateDef(def, opts)
     if type(def.tags) ~= "table" then
         return false, "validateDef(def): missing/invalid required field: tags (array)"
     end
+    for i = 1, #def.tags do
+        if type(def.tags[i]) ~= "string" then
+            return false, "validateDef(def): tags must be array of strings"
+        end
+    end
 
     local ck, ckErr = M.normalizeClassKey(def.classKey)
     if not ck then
@@ -468,6 +482,18 @@ function M.validateDef(def, opts)
 
     if opts.strictClassList == true and CLASS_KEYS[ck] ~= true then
         return false, "validateDef(def): classKey not in locked class list: " .. tostring(ck)
+    end
+
+    -- aliases are optional, but if present must already be normalized array of strings
+    if def.aliases ~= nil then
+        if type(def.aliases) ~= "table" then
+            return false, "validateDef(def): aliases must be array (when present)"
+        end
+        for i = 1, #def.aliases do
+            if type(def.aliases[i]) ~= "string" or _trim(def.aliases[i]) == "" then
+                return false, "validateDef(def): aliases must be non-empty strings"
+            end
+        end
     end
 
     return true, nil
@@ -500,7 +526,7 @@ local function _rebuildIndexes()
     for key, def in pairs(STATE.registry) do
         if type(key) == "string" and key ~= "" and type(def) == "table" then
             local pk = tostring(def.practiceKey or "")
-            if pk ~= "" then
+            if pk ~= "" and p[pk] == nil then
                 p[pk] = key
             end
 
@@ -508,7 +534,7 @@ local function _rebuildIndexes()
             if type(aliases) == "table" then
                 for i = 1, #aliases do
                     local al = tostring(aliases[i] or "")
-                    if al ~= "" then
+                    if al ~= "" and a[al] == nil then
                         a[al] = key
                     end
                 end
@@ -635,15 +661,59 @@ function M.validateAll(opts)
     local strictClassList = (opts.strictClassList ~= false)
 
     local issues = {}
+
+    -- duplicates / collisions
+    local seenPractice = {} -- practiceKey -> firstKey
+    local seenAlias = {}    -- alias -> firstKey
+
     for k, def in pairs(STATE.registry) do
         if type(k) ~= "string" or k == "" then
-            issues[#issues + 1] = { key = tostring(k), error = "registry key must be non-empty string" }
+            _pushIssue(issues, tostring(k), "registry key must be non-empty string")
         elseif type(def) ~= "table" then
-            issues[#issues + 1] = { key = tostring(k), error = "def must be a table" }
+            _pushIssue(issues, tostring(k), "def must be a table")
         else
             local ok, err = M.validateDef(def, { strictClassList = strictClassList })
             if not ok then
-                issues[#issues + 1] = { key = tostring(k), error = tostring(err) }
+                _pushIssue(issues, tostring(k), tostring(err))
+            else
+                -- Strong consistency: key should match def.id (prevents silent drift)
+                if tostring(def.id) ~= tostring(k) then
+                    _pushIssue(issues, tostring(k), "def.id must match registry key", { id = tostring(def.id) })
+                end
+
+                -- practiceKey uniqueness
+                local pk = tostring(def.practiceKey or "")
+                if pk ~= "" then
+                    local first = seenPractice[pk]
+                    if first == nil then
+                        seenPractice[pk] = tostring(k)
+                    elseif tostring(first) ~= tostring(k) then
+                        _pushIssue(issues, tostring(k), "duplicate practiceKey (must be unique)",
+                            { practiceKey = pk, firstKey = tostring(first) })
+                    end
+                end
+
+                -- alias collisions (alias must be unique, and must not collide with a different def.practiceKey)
+                if type(def.aliases) == "table" then
+                    for i = 1, #def.aliases do
+                        local al = tostring(def.aliases[i] or "")
+                        if al ~= "" then
+                            local firstA = seenAlias[al]
+                            if firstA == nil then
+                                seenAlias[al] = tostring(k)
+                            elseif tostring(firstA) ~= tostring(k) then
+                                _pushIssue(issues, tostring(k), "alias collision (must be unique)",
+                                    { alias = al, firstKey = tostring(firstA) })
+                            end
+
+                            local firstPk = seenPractice[al]
+                            if firstPk ~= nil and tostring(firstPk) ~= tostring(k) then
+                                _pushIssue(issues, tostring(k), "alias collides with another def.practiceKey",
+                                    { alias = al, practiceKeyKey = tostring(firstPk) })
+                            end
+                        end
+                    end
+                end
             end
         end
     end
@@ -667,6 +737,15 @@ function M.setRegistry(registry, opts)
             return false, "setRegistry(registry): def must be table for key: " .. tostring(k)
         end
         local norm = _normalizeDef(def)
+
+        -- enforce id matches key (prevents drift)
+        norm.id = tostring(norm.id or "")
+        if norm.id == "" then norm.id = tostring(k) end
+        if tostring(norm.id) ~= tostring(k) then
+            return false,
+                "setRegistry(registry): def.id must match key. key=" .. tostring(k) .. " id=" .. tostring(norm.id)
+        end
+
         local okV, errV = M.validateDef(norm, { strictClassList = true })
         if not okV then
             return false, "setRegistry(registry): invalid def for key=" .. tostring(k) .. " err=" .. tostring(errV)
@@ -676,6 +755,12 @@ function M.setRegistry(registry, opts)
 
     STATE.registry = nextReg
     _rebuildIndexes()
+
+    -- Ensure collisions are surfaced before we emit "Updated"
+    local okAll, issues = M.validateAll({ strictClassList = true })
+    if not okAll then
+        return false, "setRegistry(registry): validateAll failed issues=" .. tostring(#issues)
+    end
 
     STATE.lastTs = os.time()
     STATE.updates = STATE.updates + 1
@@ -695,6 +780,14 @@ function M.upsert(key, def, opts)
     end
 
     local norm = _normalizeDef(def)
+
+    -- enforce id matches key (prevents drift)
+    norm.id = tostring(norm.id or "")
+    if norm.id == "" then norm.id = tostring(key) end
+    if tostring(norm.id) ~= tostring(key) then
+        return false, "upsert(key, def): def.id must match key. key=" .. tostring(key) .. " id=" .. tostring(norm.id)
+    end
+
     local okV, errV = M.validateDef(norm, { strictClassList = true })
     if not okV then
         return false, "upsert(key, def): invalid def err=" .. tostring(errV)
@@ -702,6 +795,15 @@ function M.upsert(key, def, opts)
 
     STATE.registry[key] = _shallowCopy(norm)
     _rebuildIndexes()
+
+    -- Ensure collisions are surfaced (dup practiceKey/alias)
+    local okAll, issues = M.validateAll({ strictClassList = true })
+    if not okAll then
+        -- rollback this one change (best-effort)
+        STATE.registry[key] = nil
+        _rebuildIndexes()
+        return false, "upsert(key, def): validateAll failed issues=" .. tostring(#issues)
+    end
 
     STATE.lastTs = os.time()
     STATE.updates = STATE.updates + 1
@@ -753,9 +855,17 @@ do
     for k, def in pairs(DEFAULT_REGISTRY) do
         if type(k) == "string" and k ~= "" and type(def) == "table" then
             local norm = _normalizeDef(def)
-            local okV = M.validateDef(norm, { strictClassList = true })
-            if okV then
-                nextReg[k] = _shallowCopy(norm)
+
+            -- enforce id matches key for seeded entries
+            norm.id = tostring(norm.id or "")
+            if norm.id == "" then norm.id = tostring(k) end
+            if tostring(norm.id) ~= tostring(k) then
+                -- skip invalid seed
+            else
+                local okV = M.validateDef(norm, { strictClassList = true })
+                if okV then
+                    nextReg[k] = _shallowCopy(norm)
+                end
             end
         end
     end
