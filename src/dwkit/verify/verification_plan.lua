@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-04H
+-- Version     : v2026-03-05C
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-04H"
+M.VERSION = "v2026-03-05C"
 
 local SUITES = {
     default = {
@@ -203,6 +203,90 @@ local SUITES = {
                 cmd =
                 'lua do local S=require("dwkit.services.score_store_service"); local ok,err=S.clear({source="dwverify:actionpad_gating:score_clear"}); if ok==false then error("score clear failed: "..tostring(err)) end; local core=S.getCore(); print(string.format("[dwverify-gating] score after clear reason=%s hasSnapshot=%s hasParsed=%s", tostring(core.reason), tostring(core.hasSnapshot), tostring(core.hasParsed))) if tostring(core.reason)~="unknown_stale" then error("Expected score unknown_stale after clear; got "..tostring(core.reason)) end; print("[dwverify-gating] PASS actionpad_gating_smoke") end',
                 note = "ASSERT: after ScoreStore.clear, core returns unknown_stale.",
+            },
+        },
+    },
+
+    -- NEW: ActionPad gating UI smoke (Bucket B implementation)
+    actionpad_gating_ui_smoke = {
+        title = "actionpad_gating_ui_smoke",
+        description =
+        "ActionPad gating UI smoke (Bucket B): deterministic seed (owned_profiles + Presence + ActionPadService rows), ingest Practice+Score fixtures, show ActionPad UI, then ASSERT ActionPadService.resolveActionGate returns expected reason codes: ok/not_learned/unknown_stale.practice/unknown_stale.score/below_level/wrong_class. No gameplay sends.",
+        delay = 0.25,
+        steps = {
+            {
+                cmd =
+                'lua do local O=require("dwkit.config.owned_profiles"); local ok,err=O.setMap({["Alpha"]="Profile-A",["Beta"]="Profile-B",["Healer"]="Profile-Heal"},{noSave=true}); if ok==false then error("owned_profiles.setMap failed: "..tostring(err)) end; local st=O.status(); print(string.format("[dwverify-actionpad-gui] seeded owned_profiles count=%s", tostring(st.count))) end',
+                note = "Seed deterministic owned_profiles (session-only).",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.presence_service"); local ok,err=P.setState({myProfilesOnline={"Alpha (Profile-A) [ONLINE] [HERE]","Beta (Profile-B) [ONLINE]","Healer (Profile-Heal) [ONLINE]"},myProfilesOffline={},myProfilesHere={"Alpha (Profile-A) [ONLINE] [HERE]"},otherPlayersInRoom={"OtherGuy"},mapping={count=3},roomTs=os.time(),whoTs=os.time()},{source="dwverify:actionpad_gating_ui:seed_presence"}); if ok==false then error("PresenceService.setState failed: "..tostring(err)) end; print("[dwverify-actionpad-gui] seeded PresenceService roster (Healer ONLINE for stub gate)") end',
+                note =
+                "Seed PresenceService roster with Healer ONLINE so service buttons can pass healer stub gate when learned/known.",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local ok,err=A.recompute({source="dwverify:actionpad_gating_ui:recompute"}); if ok==false then error("ActionPadService.recompute failed: "..tostring(err)) end; local rows=A.getRowsOnlineOnly(); print(string.format("[dwverify-actionpad-gui] ActionPadService rowsOnline count=%s (expect 3)", tostring(#rows))) if #rows~=3 then error("Expected ActionPadService rowsOnline=3; got "..tostring(#rows)) end end',
+                note = "Recompute ActionPadService; ASSERT online-only rows count=3 (Alpha/Beta/Healer).",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.practice_store_service"); local ok,err=P.ingestFixture("basic",{source="dwverify:actionpad_gating_ui:practice_fixture"}); print(string.format("[dwverify-actionpad-gui] practice ingestFixture ok=%s err=%s", tostring(ok==true), tostring(err))) if ok~=true then error("practice ingestFixture failed: "..tostring(err)) end end',
+                note = "PracticeStore fixture ingest (learned vs not learned).",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.score_store_service"); local ok,err=S.ingestFixture("score_table_short",{source="dwverify:actionpad_gating_ui:score_fixture"}); print(string.format("[dwverify-actionpad-gui] score ingestFixture ok=%s err=%s", tostring(ok==true), tostring(err))) if ok~=true then error("score ingestFixture failed: "..tostring(err)) end; local core=S.getCore(); print(string.format("[dwverify-actionpad-gui] score core reason=%s class=%s level=%s", tostring(core.reason), tostring(core.class or "nil"), tostring(core.level or "nil"))) if core.ok~=true then error("score core ok~=true") end end',
+                note = "ScoreStore fixture ingest (Warrior level 48).",
+            },
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("actionpad_ui", true, {noSave=true}); gs.setVisible("actionpad_ui", true, {noSave=true}); local UI=require("dwkit.ui.actionpad_ui"); local ok,err=UI.apply({source="dwverify:actionpad_gating_ui_smoke:show"}); if ok==false then error("actionpad_ui.apply failed: "..tostring(err)) end; local s=UI.getState(); local lr=s.lastRender or {}; print(string.format("[dwverify-actionpad-gui] SHOW visible=%s enabled=%s runtimeVisible=%s rows=%s lastErr=%s", tostring(s.visible), tostring(s.enabled), tostring(s.runtimeVisible), tostring(lr.rowsCount or "nil"), tostring(s.lastError))) end',
+                note = "Show ActionPad UI (console-first).",
+            },
+
+            -- FIXED: ok path uses honorSpec=true to avoid registry classKey constraints (verification-only).
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local g=A.resolveActionGate({kind="spell",practiceKey="heal",displayName="Heal",classKey="",minLevel=1},{honorSpec=true}); print(string.format("[dwverify-actionpad-gui] gate heal(ok via honorSpec) enabled=%s reason=%s detail=%s", tostring(g.enabled==true), tostring(g.reason), tostring(g.detail))) if g.enabled~=true then error("Expected heal enabled=true; got reason="..tostring(g.reason)) end; if tostring(g.reason)~="ok" then error("Expected heal reason=ok; got "..tostring(g.reason)) end end',
+                note = "ASSERT: ok (verification-only override; UI default still respects registry constraints).",
+            },
+
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local g=A.resolveActionGate({kind="spell",practiceKey="power heal",displayName="Power Heal"}); print(string.format("[dwverify-actionpad-gui] gate power heal enabled=%s reason=%s detail=%s", tostring(g.enabled==true), tostring(g.reason), tostring(g.detail))) if g.enabled~=false then error("Expected power heal enabled=false") end; if tostring(g.reason)~="not_learned" then error("Expected power heal reason=not_learned; got "..tostring(g.reason)) end end',
+                note = "ASSERT: not_learned (power heal is not learned in fixture).",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local g=A.resolveActionGate({kind="spell",practiceKey="heal",displayName="Heal",classKey="",minLevel=60},{honorSpec=true}); print(string.format("[dwverify-actionpad-gui] gate below_level enabled=%s reason=%s detail=%s", tostring(g.enabled==true), tostring(g.reason), tostring(g.detail))) if g.enabled~=false then error("Expected below_level enabled=false") end; if tostring(g.reason)~="below_level" then error("Expected below_level reason=below_level; got "..tostring(g.reason)) end end',
+                note = "ASSERT: below_level via explicit minLevel=60 (score fixture level=48), using a learned ability.",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local g=A.resolveActionGate({kind="spell",practiceKey="heal",displayName="Heal",classKey="cleric"}); print(string.format("[dwverify-actionpad-gui] gate wrong_class enabled=%s reason=%s detail=%s", tostring(g.enabled==true), tostring(g.reason), tostring(g.detail))) if g.enabled~=false then error("Expected wrong_class enabled=false") end; if tostring(g.reason)~="wrong_class" then error("Expected wrong_class reason=wrong_class; got "..tostring(g.reason)) end end',
+                note = "ASSERT: wrong_class (score class is Warrior; spec wants cleric).",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.practice_store_service"); local ok,err=P.clear({source="dwverify:actionpad_gating_ui:practice_clear"}); if ok==false then error("practice clear failed: "..tostring(err)) end; local A=require("dwkit.services.actionpad_service"); local g=A.resolveActionGate({kind="spell",practiceKey="heal",displayName="Heal"}); print(string.format("[dwverify-actionpad-gui] gate practice stale enabled=%s reason=%s detail=%s", tostring(g.enabled==true), tostring(g.reason), tostring(g.detail))) if g.enabled~=false then error("Expected practice stale enabled=false") end; if tostring(g.reason)~="unknown_stale.practice" then error("Expected unknown_stale.practice; got "..tostring(g.reason)) end end',
+                note = "ASSERT: unknown_stale.practice after PracticeStore.clear.",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.practice_store_service"); local ok,err=P.ingestFixture("basic",{source="dwverify:actionpad_gating_ui:practice_fixture2"}); if ok~=true then error("practice ingestFixture failed: "..tostring(err)) end; local S=require("dwkit.services.score_store_service"); local ok2,err2=S.clear({source="dwverify:actionpad_gating_ui:score_clear"}); if ok2==false then error("score clear failed: "..tostring(err2)) end; local A=require("dwkit.services.actionpad_service"); local g=A.resolveActionGate({kind="spell",practiceKey="heal",displayName="Heal",minLevel=1,classKey="warrior"}); print(string.format("[dwverify-actionpad-gui] gate score stale enabled=%s reason=%s detail=%s", tostring(g.enabled==true), tostring(g.reason), tostring(g.detail))) if g.enabled~=false then error("Expected score stale enabled=false") end; if tostring(g.reason)~="unknown_stale.score" then error("Expected unknown_stale.score; got "..tostring(g.reason)) end; print("[dwverify-actionpad-gui] PASS actionpad_gating_ui_smoke (service gate assertions)") end',
+                note = "ASSERT: unknown_stale.score after ScoreStore.clear (with minLevel/classKey forcing scoreNeeded).",
+            },
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("actionpad_ui", true, {noSave=true}); gs.setVisible("actionpad_ui", false, {noSave=true}); local UI=require("dwkit.ui.actionpad_ui"); local ok,err=UI.apply({source="dwverify:actionpad_gating_ui_smoke:hide"}); if ok==false then error("actionpad_ui.apply(hide) failed: "..tostring(err)) end; local s=UI.getState(); print(string.format("[dwverify-actionpad-gui] HIDE visible=%s enabled=%s runtimeVisible=%s lastErr=%s", tostring(s.visible), tostring(s.enabled), tostring(s.runtimeVisible), tostring(s.lastError))) end',
+                note = "Hide ActionPad UI via gui_settings + apply() and print state.",
+            },
+            {
+                cmd =
+                'lua do print("[dwverify-actionpad-gui] VISUAL CHECK: Hover buttons to see tooltip reason/detail. Click a DISABLED button and confirm it prints: [ActionPad] DISABLED (...) reason=<...> detail=<...>.") end',
+                note = "Human UI surface check (disabled reasons must be visible).",
             },
         },
     },

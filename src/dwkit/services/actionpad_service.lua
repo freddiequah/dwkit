@@ -2,13 +2,15 @@
 -- #########################################################################
 -- Module Name : dwkit.services.actionpad_service
 -- Owner       : Services
--- Version     : v2026-03-04D
+-- Version     : v2026-03-05B
 -- Purpose     :
 --   - SAFE ActionPadService (data only).
 --   - Produces "online-only" roster rows for ActionPad UI, based on PresenceService
 --     roster when available (preferred), otherwise best-effort fallback to owned_profiles
 --     + CPC local-online + WhoStore online.
 --   - Provides deterministic planning helpers for RemoteExec, WITHOUT sending.
+--   - Provides deterministic gating helpers for ActionPad UI (Practice/Score/Registry),
+--     WITHOUT sending.
 --   - No UI, no persistence, no timers, no send().
 --
 -- Public API  :
@@ -25,17 +27,28 @@
 --   - planAssistExec(healerName, targetName, cmdTemplate, opts?) -> table|nil plan, string|nil err
 --     cmdTemplate MUST contain "{target}" placeholder.
 --
+-- Gating (NO SEND):
+--   - resolveActionGate(spec, opts?) -> table gate
+--       spec: { kind, practiceKey, displayName?, minLevel?, classKey? }
+--       opts:
+--         - honorSpec=true: if spec explicitly provides classKey/minLevel, do not override
+--           those fields from SkillRegistry def. (Default false; UI uses default behavior.)
+--       gate: { enabled, reason, detail, learned?, tier?, cost?, percent?, level?, classKey? }
+--
 -- Events Emitted:
 --   - DWKit:Service:ActionPad:Updated
 -- Automation Policy: Manual only
 -- Dependencies     : dwkit.core.identity, dwkit.bus.event_bus, dwkit.config.owned_profiles (best-effort),
 --                    dwkit.services.presence_service (preferred), dwkit.services.whostore_service (fallback),
---                    dwkit.services.cross_profile_comm_service (fallback)
+--                    dwkit.services.cross_profile_comm_service (fallback),
+--                    dwkit.services.practice_store_service (best-effort),
+--                    dwkit.services.score_store_service (best-effort),
+--                    dwkit.services.skill_registry_service (best-effort)
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-03-04D"
+M.VERSION = "v2026-03-05B"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -350,6 +363,238 @@ local function _rowsFromFallbackBestEffort()
     end
 
     return rows, nil
+end
+
+-- -------------------------------------------------------------------------
+-- Gating helpers (SAFE; no send)
+-- -------------------------------------------------------------------------
+
+local function _normalizePracticeKeyBestEffort(raw)
+    local okP, P = _safeRequire("dwkit.services.practice_store_service")
+    if okP and type(P) == "table" and type(P.normalizePracticeKey) == "function" then
+        local ok, k = pcall(P.normalizePracticeKey, tostring(raw or ""))
+        if ok and type(k) == "string" and _trim(k) ~= "" then
+            return _trim(k)
+        end
+    end
+    return _trim(raw)
+end
+
+local function _skillRegistryResolveBestEffort(kind, practiceKey)
+    kind = _trim(kind)
+    practiceKey = _normalizePracticeKeyBestEffort(practiceKey)
+
+    local okS, S = _safeRequire("dwkit.services.skill_registry_service")
+    if not okS or type(S) ~= "table" then
+        return nil
+    end
+
+    local def = nil
+
+    if type(S.resolveByPracticeKey) == "function" then
+        local ok, v = pcall(S.resolveByPracticeKey, practiceKey)
+        if ok and type(v) == "table" then def = v end
+    end
+
+    if not def and type(S.getRegistry) == "function" then
+        local ok, reg = pcall(S.getRegistry)
+        if ok and type(reg) == "table" then
+            def = reg[practiceKey]
+        end
+    end
+
+    if type(def) ~= "table" then
+        return nil
+    end
+
+    -- Best-effort kind match: if kind is provided and def.kind conflicts, treat as not found.
+    if kind ~= "" and tostring(def.kind or "") ~= "" then
+        if tostring(def.kind) ~= kind then
+            return nil
+        end
+    end
+
+    return def
+end
+
+local function _scoreCoreBestEffort()
+    local okS, S = _safeRequire("dwkit.services.score_store_service")
+    if not okS or type(S) ~= "table" or type(S.getCore) ~= "function" then
+        return { ok = false, reason = "unknown_stale" }
+    end
+    local ok, core = pcall(S.getCore)
+    if not ok or type(core) ~= "table" then
+        return { ok = false, reason = "unknown_stale" }
+    end
+    return core
+end
+
+local function _normalizeClassKeyBestEffort(displayClass)
+    local okR, R = _safeRequire("dwkit.services.skill_registry_service")
+    if okR and type(R) == "table" and type(R.normalizeClassKey) == "function" then
+        local ok, ck, err = pcall(R.normalizeClassKey, tostring(displayClass or ""))
+        if ok and type(ck) == "string" and ck ~= "" then
+            return ck, nil
+        end
+        return nil, tostring(err or "normalizeClassKey failed")
+    end
+    return nil, "skill_registry_service.normalizeClassKey not available"
+end
+
+local function _practiceLearnStatusBestEffort(kind, practiceKey)
+    local okP, P = _safeRequire("dwkit.services.practice_store_service")
+    if not okP or type(P) ~= "table" or type(P.getLearnStatus) ~= "function" then
+        return {
+            ok = false,
+            learned = false,
+            reason = "unknown_stale",
+            hasSnapshot = false,
+            hasParsed = false,
+        }
+    end
+    local ok, st = pcall(P.getLearnStatus, tostring(kind or ""), tostring(practiceKey or ""))
+    if not ok or type(st) ~= "table" then
+        return {
+            ok = false,
+            learned = false,
+            reason = "unknown_stale",
+            hasSnapshot = false,
+            hasParsed = false,
+        }
+    end
+    return st
+end
+
+local function _mkGate(enabled, reason, detail)
+    return {
+        enabled = (enabled == true),
+        reason = tostring(reason or ""),
+        detail = tostring(detail or ""),
+    }
+end
+
+-- Public: resolve deterministic gate for an action spec (SAFE; no send)
+function M.resolveActionGate(spec, opts)
+    spec = (type(spec) == "table") and spec or {}
+    opts = (type(opts) == "table") and opts or {}
+
+    local rawSpecMin = spec.minLevel
+    local rawSpecClass = spec.classKey
+
+    local kind = _trim(spec.kind)
+    local practiceKey = _normalizePracticeKeyBestEffort(spec.practiceKey)
+    local displayName = _trim(spec.displayName)
+    local wantMinLevel = tonumber(spec.minLevel)
+    local wantClassKey = _trim(spec.classKey)
+
+    if kind == "" or practiceKey == "" then
+        return _mkGate(false, "bad_spec", "missing kind/practiceKey")
+    end
+
+    local def = _skillRegistryResolveBestEffort(kind, practiceKey)
+    if type(def) == "table" then
+        local honorSpec = (opts.honorSpec == true)
+
+        -- Only override from registry if honorSpec is not enabled, OR the spec field was not provided at all.
+        if honorSpec ~= true or rawSpecMin == nil then
+            if tonumber(def.minLevel) ~= nil then wantMinLevel = tonumber(def.minLevel) end
+        end
+        if honorSpec ~= true or rawSpecClass == nil then
+            if _trim(def.classKey) ~= "" then wantClassKey = _trim(def.classKey) end
+        end
+
+        if displayName == "" and _trim(def.displayName) ~= "" then displayName = _trim(def.displayName) end
+    end
+    if displayName == "" then displayName = practiceKey end
+
+    -- Practice gate is always evaluated (manual-only; may be unknown_stale)
+    local pst = _practiceLearnStatusBestEffort(kind, practiceKey)
+
+    if tostring(pst.reason or "") == "unknown_stale" then
+        local g = _mkGate(false, "unknown_stale.practice", "Practice snapshot missing/stale")
+        g.learned = (pst.learned == true)
+        g.tier = pst.tier
+        g.cost = pst.cost
+        g.percent = pst.percent
+        return g
+    end
+
+    if tostring(pst.reason or "") == "not_learned" or pst.learned == false then
+        local g = _mkGate(false, "not_learned", "Not learned: " .. tostring(displayName))
+        g.learned = false
+        g.tier = pst.tier
+        g.cost = pst.cost
+        g.percent = pst.percent
+        return g
+    end
+
+    -- If practice store indicates other non-ok reasons (not_listed, bad_kind, bad_key, etc.)
+    if pst.ok ~= true or tostring(pst.reason or "") ~= "ok" then
+        local g = _mkGate(false, "not_listed", "Not listed in PracticeStore: " .. tostring(displayName))
+        g.learned = (pst.learned == true)
+        g.tier = pst.tier
+        g.cost = pst.cost
+        g.percent = pst.percent
+        return g
+    end
+
+    -- If registry/spec requires score (minLevel/classKey), we must have score core ok
+    local scoreNeeded = false
+    if tonumber(wantMinLevel) ~= nil then scoreNeeded = true end
+    if wantClassKey ~= "" then scoreNeeded = true end
+
+    local core = nil
+    local classKey = nil
+    local level = nil
+
+    if scoreNeeded then
+        core = _scoreCoreBestEffort()
+        if tostring(core.reason or "") == "unknown_stale" or core.ok ~= true then
+            local g = _mkGate(false, "unknown_stale.score", "Score snapshot missing/stale")
+            g.learned = true
+            g.level = core.level
+            g.class = core.class
+            return g
+        end
+
+        level = tonumber(core.level or 0) or 0
+        local ck, errCk = _normalizeClassKeyBestEffort(core.class)
+        classKey = ck
+
+        if wantClassKey ~= "" and classKey ~= wantClassKey then
+            local got = tostring(classKey or "unknown")
+            local g = _mkGate(false, "wrong_class",
+                string.format("Wrong class: need=%s got=%s", tostring(wantClassKey), got))
+            g.learned = true
+            g.level = level
+            g.classKey = classKey
+            g.class = core.class
+            return g
+        end
+
+        if tonumber(wantMinLevel) ~= nil and level < tonumber(wantMinLevel) then
+            local g = _mkGate(false, "below_level",
+                string.format("Below level: need=%s got=%s", tostring(wantMinLevel), tostring(level)))
+            g.learned = true
+            g.level = level
+            g.classKey = classKey
+            g.class = core.class
+            return g
+        end
+    end
+
+    local g = _mkGate(true, "ok", "OK: " .. tostring(displayName))
+    g.learned = true
+    g.tier = pst.tier
+    g.cost = pst.cost
+    g.percent = pst.percent
+    g.level = level
+    g.classKey = classKey
+    if type(core) == "table" then
+        g.class = core.class
+        g.name = core.name
+    end
+    return g
 end
 
 -- -------------------------------------------------------------------------

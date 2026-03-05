@@ -2,10 +2,11 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.actionpad_ui
 -- Owner       : UI
--- Version     : v2026-03-04H
+-- Version     : v2026-03-05A
 -- Purpose     :
 --   - ActionPad UI (Bucket A): online-only owned roster view with real button groups (PLAN-only).
 --   - Consumes ActionPadService rowsOnlineOnly.
+--   - Bucket B: wires deterministic enable/disable gating (Practice/Score/Registry) + disabled reasons.
 --   - SAFE: does NOT send gameplay commands. Buttons only print computed plans.
 --   - Follows UI contracts: shared frame (ui_window + ui_theme) + content kits.
 --
@@ -25,7 +26,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-04H"
+M.VERSION = "v2026-03-05A"
 M.UI_ID = "actionpad_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -263,7 +264,37 @@ local function _planLocal(cmd, metaLabel)
     return true, nil
 end
 
-local function _mkBtn(name, parent, x, y, w, h, label, enabled, onClick)
+local function _safeSetTooltip(btn, text)
+    if type(btn) ~= "table" then return end
+    if type(text) ~= "string" or text == "" then return end
+    if type(btn.setToolTip) == "function" then
+        pcall(function() btn:setToolTip(text) end)
+        return
+    end
+    if type(btn.setTooltip) == "function" then
+        pcall(function() btn:setTooltip(text) end)
+        return
+    end
+end
+
+local function _mkTip(labelShort, fullName, gate)
+    fullName = tostring(fullName or "")
+    labelShort = tostring(labelShort or "")
+    gate = (type(gate) == "table") and gate or {}
+
+    local reason = tostring(gate.reason or "")
+    local detail = tostring(gate.detail or "")
+
+    if reason == "" then reason = "unknown" end
+    if detail == "" then detail = reason end
+
+    return string.format("ActionPad: %s (%s)\nstate=%s\nreason=%s\ndetail=%s",
+        fullName, labelShort,
+        tostring(gate.enabled == true and "ENABLED" or "DISABLED"),
+        reason, detail)
+end
+
+local function _mkBtn(name, parent, x, y, w, h, label, enabled, onClick, tooltipText, disabledGate, disabledLabel)
     local btn = G.Label:new({
         name = name,
         x = tostring(x) .. "px",
@@ -278,6 +309,26 @@ local function _mkBtn(name, parent, x, y, w, h, label, enabled, onClick)
 
     pcall(function() btn:echo(tostring(label or "")) end)
     pcall(ButtonKit.applyButtonStyle, btn, { enabled = (enabled == true), minHeightPx = h })
+
+    if type(tooltipText) == "string" and tooltipText ~= "" then
+        _safeSetTooltip(btn, tooltipText)
+    end
+
+    if enabled ~= true then
+        local g = (type(disabledGate) == "table") and disabledGate or {}
+        local dl = tostring(disabledLabel or tostring(label or ""))
+        local function onDisabled()
+            local line = string.format("[ActionPad] DISABLED (%s) reason=%s detail=%s",
+                dl,
+                tostring(g.reason or "unknown"),
+                tostring(g.detail or ""))
+            print(line)
+            _setStatusLine(line)
+        end
+        pcall(ButtonKit.wireClick, btn, onDisabled)
+        return btn
+    end
+
     if type(onClick) == "function" then
         pcall(ButtonKit.wireClick, btn, onClick)
     end
@@ -305,7 +356,10 @@ local function _layoutRightButtons(parent, y, rowH, btnW, gap, specs, namePrefix
             rowH,
             s.label,
             (s.enabled ~= false),
-            s.onClick
+            s.onClick,
+            s.tooltip,
+            s.disabledGate,
+            s.disabledLabel
         )
         out[#out + 1] = btn
     end
@@ -321,6 +375,7 @@ local function _renderGlobal(topY, rowH, gap, btnW)
         {
             label = "FE",
             enabled = true,
+            tooltip = "ActionPad: Feast (FE)\nstate=ENABLED\nreason=ok\ndetail=LOCAL plan only",
             onClick = function()
                 _planLocal("yamcha", "Feast")
             end,
@@ -329,6 +384,18 @@ local function _renderGlobal(topY, rowH, gap, btnW)
 
     local btns = _layoutRightButtons(_state.widgets.listRoot, topY, rowH, btnW, gap, specs, "DWKit_ActionPad_Global")
     _state.widgets.global.feastBtn = btns[1]
+end
+
+local function _gateBestEffort(kind, practiceKey, displayName)
+    local okA, A = pcall(require, "dwkit.services.actionpad_service")
+    if not okA or type(A) ~= "table" or type(A.resolveActionGate) ~= "function" then
+        return { enabled = false, reason = "service_missing", detail = "ActionPadService.resolveActionGate not available" }
+    end
+    local g = A.resolveActionGate({ kind = kind, practiceKey = practiceKey, displayName = displayName }, {})
+    if type(g) ~= "table" then
+        return { enabled = false, reason = "gate_error", detail = "resolveActionGate returned invalid gate" }
+    end
+    return g
 end
 
 local function _render()
@@ -393,6 +460,7 @@ local function _render()
             {
                 label = "FM",
                 enabled = true,
+                tooltip = "ActionPad: FMe (FM)\nstate=ENABLED\nreason=ok\ndetail=PLAN self-exec only",
                 onClick = function()
                     local ok, err = _planSelfExec(name, "[TODO] follow-me", "FMe")
                     if not ok then _setStatusLine("[ActionPad] FMe plan failed: " .. tostring(err)) end
@@ -401,6 +469,7 @@ local function _render()
             {
                 label = "FS",
                 enabled = true,
+                tooltip = "ActionPad: FSelf (FS)\nstate=ENABLED\nreason=ok\ndetail=PLAN self-exec only",
                 onClick = function()
                     local ok, err = _planSelfExec(name, "[TODO] follow-self", "FSelf")
                     if not ok then _setStatusLine("[ActionPad] FSelf plan failed: " .. tostring(err)) end
@@ -409,6 +478,7 @@ local function _render()
             {
                 label = "GA",
                 enabled = true,
+                tooltip = "ActionPad: GrpAll (GA)\nstate=ENABLED\nreason=ok\ndetail=PLAN self-exec only",
                 onClick = function()
                     local ok, err = _planSelfExec(name, "[TODO] group-all", "GrpAll")
                     if not ok then _setStatusLine("[ActionPad] GrpAll plan failed: " .. tostring(err)) end
@@ -417,6 +487,7 @@ local function _render()
             {
                 label = "FL",
                 enabled = true,
+                tooltip = "ActionPad: Flee (FL)\nstate=ENABLED\nreason=ok\ndetail=PLAN self-exec only",
                 onClick = function()
                     local ok, err = _planSelfExec(name, "[TODO] flee", "Flee")
                     if not ok then _setStatusLine("[ActionPad] Flee plan failed: " .. tostring(err)) end
@@ -427,76 +498,89 @@ local function _render()
             "DWKit_ActionPad_Ctrl_" .. tostring(i))
 
         -- SERVICE: Buff / Feed / Heal / PHeal / Rst / Rej (ASSIST-EXEC plan)
-        local serviceEnabled = healerOnline
+        -- Bucket B: deterministic gating from Practice/Score/Registry.
+        -- Note: healer selection is still a stub; we keep healerOnline as an additional gate.
+        local gBless = _gateBestEffort("spell", "bless", "Bless")
+        local gHeal = _gateBestEffort("spell", "heal", "Heal")
+        local gPHeal = _gateBestEffort("spell", "power heal", "Power Heal")
+        local gRefresh = _gateBestEffort("spell", "refresh", "Refresh")
+        local gFeed = _gateBestEffort("spell", "feed", "Feed")
+        local gRej = _gateBestEffort("spell", "rej", "Rej")
+
+        local function _withHealerGate(g, fullName)
+            if healerOnline ~= true then
+                return {
+                    enabled = false,
+                    reason = "healer_offline_stub",
+                    detail = "Healer stub is offline: " .. tostring(healerName),
+                }, tostring(fullName or "")
+            end
+            return g, tostring(fullName or "")
+        end
+
         local serviceSpecs = {
             {
                 label = "BU",
-                enabled = serviceEnabled,
+                disabledLabel = "BU",
+                disabledGate = _withHealerGate(gBless, "Buff"),
+                tooltip = _mkTip("BU", "Buff (Bless)", _withHealerGate(gBless, "Buff")),
+                enabled = (_withHealerGate(gBless, "Buff").enabled == true),
                 onClick = function()
-                    if not serviceEnabled then
-                        _setStatusLine("[ActionPad] Buff disabled: healer not online (stub)")
-                        return
-                    end
                     local ok, err = _planAssistExec(healerName, name, "cast bless {target}", "Buff")
                     if not ok then _setStatusLine("[ActionPad] Buff plan failed: " .. tostring(err)) end
                 end
             },
             {
                 label = "FD",
-                enabled = serviceEnabled,
+                disabledLabel = "FD",
+                disabledGate = _withHealerGate(gFeed, "Feed"),
+                tooltip = _mkTip("FD", "Feed", _withHealerGate(gFeed, "Feed")),
+                enabled = (_withHealerGate(gFeed, "Feed").enabled == true),
                 onClick = function()
-                    if not serviceEnabled then
-                        _setStatusLine("[ActionPad] Feed disabled: healer not online (stub)")
-                        return
-                    end
                     local ok, err = _planAssistExec(healerName, name, "[TODO] feed {target}", "Feed")
                     if not ok then _setStatusLine("[ActionPad] Feed plan failed: " .. tostring(err)) end
                 end
             },
             {
                 label = "HL",
-                enabled = serviceEnabled,
+                disabledLabel = "HL",
+                disabledGate = _withHealerGate(gHeal, "Heal"),
+                tooltip = _mkTip("HL", "Heal", _withHealerGate(gHeal, "Heal")),
+                enabled = (_withHealerGate(gHeal, "Heal").enabled == true),
                 onClick = function()
-                    if not serviceEnabled then
-                        _setStatusLine("[ActionPad] Heal disabled: healer not online (stub)")
-                        return
-                    end
                     local ok, err = _planAssistExec(healerName, name, "cast heal {target}", "Heal")
                     if not ok then _setStatusLine("[ActionPad] Heal plan failed: " .. tostring(err)) end
                 end
             },
             {
                 label = "PH",
-                enabled = serviceEnabled,
+                disabledLabel = "PH",
+                disabledGate = _withHealerGate(gPHeal, "Power Heal"),
+                tooltip = _mkTip("PH", "Power Heal", _withHealerGate(gPHeal, "Power Heal")),
+                enabled = (_withHealerGate(gPHeal, "Power Heal").enabled == true),
                 onClick = function()
-                    if not serviceEnabled then
-                        _setStatusLine("[ActionPad] PHeal disabled: healer not online (stub)")
-                        return
-                    end
                     local ok, err = _planAssistExec(healerName, name, "cast 'power heal' {target}", "PHeal")
                     if not ok then _setStatusLine("[ActionPad] PHeal plan failed: " .. tostring(err)) end
                 end
             },
             {
                 label = "RS",
-                enabled = serviceEnabled,
+                disabledLabel = "RS",
+                disabledGate = _withHealerGate(gRefresh, "Refresh"),
+                tooltip = _mkTip("RS", "Refresh", _withHealerGate(gRefresh, "Refresh")),
+                enabled = (_withHealerGate(gRefresh, "Refresh").enabled == true),
                 onClick = function()
-                    if not serviceEnabled then
-                        _setStatusLine("[ActionPad] Rst disabled: healer not online (stub)")
-                        return
-                    end
                     local ok, err = _planAssistExec(healerName, name, "cast refresh {target}", "Rst")
                     if not ok then _setStatusLine("[ActionPad] Rst plan failed: " .. tostring(err)) end
                 end
             },
             {
                 label = "RJ",
-                enabled = serviceEnabled,
+                disabledLabel = "RJ",
+                disabledGate = _withHealerGate(gRej, "Rej"),
+                tooltip = _mkTip("RJ", "Rej", _withHealerGate(gRej, "Rej")),
+                enabled = (_withHealerGate(gRej, "Rej").enabled == true),
                 onClick = function()
-                    if not serviceEnabled then
-                        _setStatusLine("[ActionPad] Rej disabled: healer not online (stub)")
-                        return
-                    end
                     local ok, err = _planAssistExec(healerName, name, "[TODO] rej {target}", "Rej")
                     if not ok then _setStatusLine("[ActionPad] Rej plan failed: " .. tostring(err)) end
                 end
@@ -510,6 +594,7 @@ local function _render()
             {
                 label = "SU",
                 enabled = true,
+                tooltip = "ActionPad: Summon (SU)\nstate=ENABLED\nreason=ok\ndetail=PLAN self-exec only",
                 onClick = function()
                     local ok, err = _planSelfExec(name, "[TODO] summon", "Summon")
                     if not ok then _setStatusLine("[ActionPad] Summon plan failed: " .. tostring(err)) end
@@ -518,6 +603,7 @@ local function _render()
             {
                 label = "RE",
                 enabled = true,
+                tooltip = "ActionPad: Relocate (RE)\nstate=ENABLED\nreason=ok\ndetail=PLAN self-exec only",
                 onClick = function()
                     local ok, err = _planSelfExec(name, "[TODO] relocate", "Relocate")
                     if not ok then _setStatusLine("[ActionPad] Relocate plan failed: " .. tostring(err)) end
@@ -528,10 +614,21 @@ local function _render()
             "DWKit_ActionPad_Move_" .. tostring(i))
 
         -- COMBAT: Assist / Kick / Bash / Pummel / Circle / Guard / Rescue (SELF-EXEC plan)
+        local gAssist = _gateBestEffort("skill", "assist", "Assist")
+        local gKick = _gateBestEffort("skill", "kick", "Kick")
+        local gBash = _gateBestEffort("skill", "bash", "Bash")
+        local gPummel = _gateBestEffort("skill", "pummel", "Pummel")
+        local gCircle = _gateBestEffort("skill", "circle", "Circle")
+        local gGuard = _gateBestEffort("skill", "guard", "Guard")
+        local gRescue = _gateBestEffort("skill", "rescue", "Rescue")
+
         local combatSpecs = {
             {
                 label = "AS",
-                enabled = true,
+                disabledLabel = "AS",
+                disabledGate = gAssist,
+                tooltip = _mkTip("AS", "Assist", gAssist),
+                enabled = (gAssist.enabled == true),
                 onClick = function()
                     local ok, err = _planSelfExec(name, "[TODO] assist", "Assist")
                     if not ok then _setStatusLine("[ActionPad] Assist plan failed: " .. tostring(err)) end
@@ -539,7 +636,10 @@ local function _render()
             },
             {
                 label = "KI",
-                enabled = true,
+                disabledLabel = "KI",
+                disabledGate = gKick,
+                tooltip = _mkTip("KI", "Kick", gKick),
+                enabled = (gKick.enabled == true),
                 onClick = function()
                     local ok, err = _planSelfExec(name, "[TODO] kick", "Kick")
                     if not ok then _setStatusLine("[ActionPad] Kick plan failed: " .. tostring(err)) end
@@ -547,7 +647,10 @@ local function _render()
             },
             {
                 label = "BA",
-                enabled = true,
+                disabledLabel = "BA",
+                disabledGate = gBash,
+                tooltip = _mkTip("BA", "Bash", gBash),
+                enabled = (gBash.enabled == true),
                 onClick = function()
                     local ok, err = _planSelfExec(name, "[TODO] bash", "Bash")
                     if not ok then _setStatusLine("[ActionPad] Bash plan failed: " .. tostring(err)) end
@@ -555,7 +658,10 @@ local function _render()
             },
             {
                 label = "PU",
-                enabled = true,
+                disabledLabel = "PU",
+                disabledGate = gPummel,
+                tooltip = _mkTip("PU", "Pummel", gPummel),
+                enabled = (gPummel.enabled == true),
                 onClick = function()
                     local ok, err = _planSelfExec(name, "[TODO] pummel", "Pummel")
                     if not ok then _setStatusLine("[ActionPad] Pummel plan failed: " .. tostring(err)) end
@@ -563,7 +669,10 @@ local function _render()
             },
             {
                 label = "CI",
-                enabled = true,
+                disabledLabel = "CI",
+                disabledGate = gCircle,
+                tooltip = _mkTip("CI", "Circle", gCircle),
+                enabled = (gCircle.enabled == true),
                 onClick = function()
                     local ok, err = _planSelfExec(name, "[TODO] circle", "Circle")
                     if not ok then _setStatusLine("[ActionPad] Circle plan failed: " .. tostring(err)) end
@@ -571,7 +680,10 @@ local function _render()
             },
             {
                 label = "GU",
-                enabled = true,
+                disabledLabel = "GU",
+                disabledGate = gGuard,
+                tooltip = _mkTip("GU", "Guard", gGuard),
+                enabled = (gGuard.enabled == true),
                 onClick = function()
                     local ok, err = _planSelfExec(name, "[TODO] guard", "Guard")
                     if not ok then _setStatusLine("[ActionPad] Guard plan failed: " .. tostring(err)) end
@@ -579,7 +691,10 @@ local function _render()
             },
             {
                 label = "RC",
-                enabled = true,
+                disabledLabel = "RC",
+                disabledGate = gRescue,
+                tooltip = _mkTip("RC", "Rescue", gRescue),
+                enabled = (gRescue.enabled == true),
                 onClick = function()
                     local ok, err = _planSelfExec(name, "[TODO] rescue", "Rescue")
                     if not ok then _setStatusLine("[ActionPad] Rescue plan failed: " .. tostring(err)) end
@@ -612,7 +727,7 @@ local function _render()
     }
 
     local hInfo = healerOnline and ("healer=" .. healerName .. " ONLINE") or
-    ("healer=" .. healerName .. " OFFLINE (service disabled)")
+        ("healer=" .. healerName .. " OFFLINE (service disabled by stub)")
     _setStatusLine(string.format("Rendered %d online rows. %s. (PLAN only)", #rows, hInfo))
     return true, nil
 end
