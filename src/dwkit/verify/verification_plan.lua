@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-05C
+-- Version     : v2026-03-05E
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-05C"
+M.VERSION = "v2026-03-05E"
 
 local SUITES = {
     default = {
@@ -207,11 +207,11 @@ local SUITES = {
         },
     },
 
-    -- NEW: ActionPad gating UI smoke (Bucket B implementation)
+    -- UPDATED: ActionPad gating UI smoke (Bucket B implementation) now uses AssistBy selection (Bucket C)
     actionpad_gating_ui_smoke = {
         title = "actionpad_gating_ui_smoke",
         description =
-        "ActionPad gating UI smoke (Bucket B): deterministic seed (owned_profiles + Presence + ActionPadService rows), ingest Practice+Score fixtures, show ActionPad UI, then ASSERT ActionPadService.resolveActionGate returns expected reason codes: ok/not_learned/unknown_stale.practice/unknown_stale.score/below_level/wrong_class. No gameplay sends.",
+        "ActionPad gating UI smoke (Bucket B): deterministic seed (owned_profiles + Presence + ActionPadService rows), ingest Practice+Score fixtures, set AssistBy deterministically, show ActionPad UI, then ASSERT ActionPadService.resolveActionGate returns expected reason codes: ok/not_learned/unknown_stale.practice/unknown_stale.score/below_level/wrong_class. No gameplay sends.",
         delay = 0.25,
         steps = {
             {
@@ -221,14 +221,18 @@ local SUITES = {
             },
             {
                 cmd =
-                'lua do local P=require("dwkit.services.presence_service"); local ok,err=P.setState({myProfilesOnline={"Alpha (Profile-A) [ONLINE] [HERE]","Beta (Profile-B) [ONLINE]","Healer (Profile-Heal) [ONLINE]"},myProfilesOffline={},myProfilesHere={"Alpha (Profile-A) [ONLINE] [HERE]"},otherPlayersInRoom={"OtherGuy"},mapping={count=3},roomTs=os.time(),whoTs=os.time()},{source="dwverify:actionpad_gating_ui:seed_presence"}); if ok==false then error("PresenceService.setState failed: "..tostring(err)) end; print("[dwverify-actionpad-gui] seeded PresenceService roster (Healer ONLINE for stub gate)") end',
-                note =
-                "Seed PresenceService roster with Healer ONLINE so service buttons can pass healer stub gate when learned/known.",
+                'lua do local P=require("dwkit.services.presence_service"); local ok,err=P.setState({myProfilesOnline={"Alpha (Profile-A) [ONLINE] [HERE]","Beta (Profile-B) [ONLINE]","Healer (Profile-Heal) [ONLINE]"},myProfilesOffline={},myProfilesHere={"Alpha (Profile-A) [ONLINE] [HERE]"},otherPlayersInRoom={"OtherGuy"},mapping={count=3},roomTs=os.time(),whoTs=os.time()},{source="dwverify:actionpad_gating_ui:seed_presence"}); if ok==false then error("PresenceService.setState failed: "..tostring(err)) end; print("[dwverify-actionpad-gui] seeded PresenceService roster (Healer ONLINE)") end',
+                note = "Seed PresenceService roster with Healer ONLINE.",
             },
             {
                 cmd =
                 'lua do local A=require("dwkit.services.actionpad_service"); local ok,err=A.recompute({source="dwverify:actionpad_gating_ui:recompute"}); if ok==false then error("ActionPadService.recompute failed: "..tostring(err)) end; local rows=A.getRowsOnlineOnly(); print(string.format("[dwverify-actionpad-gui] ActionPadService rowsOnline count=%s (expect 3)", tostring(#rows))) if #rows~=3 then error("Expected ActionPadService rowsOnline=3; got "..tostring(#rows)) end end',
                 note = "Recompute ActionPadService; ASSERT online-only rows count=3 (Alpha/Beta/Healer).",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local ok,err=A.setAssistBySelected("Healer",{source="dwverify:actionpad_gating_ui:set_assist"}); if ok==false then error("setAssistBySelected failed: "..tostring(err)) end; local st=A.getAssistByState(); print(string.format("[dwverify-actionpad-gui] assistBy mode=%s selected=%s resolved=%s online=%s reason=%s", tostring(st.mode), tostring(st.selectedName or "nil"), tostring(st.resolvedName or "nil"), tostring(st.resolvedOnline==true), tostring(st.lastReason or "nil"))) if tostring(st.resolvedName or "")~="Healer" or st.resolvedOnline~=true then error("Expected resolvedName=Healer online=true") end end',
+                note = "Set AssistBy deterministically to Healer (session-only).",
             },
             {
                 cmd =
@@ -287,6 +291,61 @@ local SUITES = {
                 cmd =
                 'lua do print("[dwverify-actionpad-gui] VISUAL CHECK: Hover buttons to see tooltip reason/detail. Click a DISABLED button and confirm it prints: [ActionPad] DISABLED (...) reason=<...> detail=<...>.") end',
                 note = "Human UI surface check (disabled reasons must be visible).",
+            },
+        },
+    },
+
+    -- NEW: ActionPad healer/assistBy selection smoke (Bucket C)
+    actionpad_healer_select_smoke = {
+        title = "actionpad_healer_select_smoke",
+        description =
+        "ActionPad healer/assistBy selection smoke (Bucket C): deterministic seed (owned_profiles + Presence + ActionPadService), then assert AssistBy auto/manual selection behavior + offline handling. Show ActionPad UI and assert service gating uses no_healer_online when assistby missing/offline. No gameplay sends.",
+        delay = 0.25,
+        steps = {
+            {
+                cmd =
+                'lua do local O=require("dwkit.config.owned_profiles"); local ok,err=O.setMap({["Alpha"]="Profile-A",["Beta"]="Profile-B",["Healer"]="Profile-Heal"},{noSave=true}); if ok==false then error("owned_profiles.setMap failed: "..tostring(err)) end; local st=O.status(); print(string.format("[dwverify-healer] seeded owned_profiles count=%s", tostring(st.count))) end',
+                note = "Seed deterministic owned_profiles (session-only).",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.presence_service"); local ok,err=P.setState({myProfilesOnline={"Alpha (Profile-A) [ONLINE] [HERE]","Beta (Profile-B) [ONLINE]","Healer (Profile-Heal) [ONLINE]"},myProfilesOffline={},myProfilesHere={"Alpha (Profile-A) [ONLINE] [HERE]"},otherPlayersInRoom={"OtherGuy"},mapping={count=3},roomTs=os.time(),whoTs=os.time()},{source="dwverify:healer_select:seed_presence"}); if ok==false then error("PresenceService.setState failed: "..tostring(err)) end; print("[dwverify-healer] seeded PresenceService roster (all 3 online)") end',
+                note = "Seed Presence roster with Healer online.",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local ok,err=A.recompute({source="dwverify:healer_select:recompute"}); if ok==false then error("ActionPadService.recompute failed: "..tostring(err)) end; local rows=A.getRowsOnlineOnly(); print(string.format("[dwverify-healer] ActionPadService rowsOnline count=%s (expect 3)", tostring(#rows))) if #rows~=3 then error("Expected rowsOnline=3; got "..tostring(#rows)) end end',
+                note = "Recompute ActionPadService; ASSERT 3 rows online.",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local ok,err=A.setAssistByAuto({source="dwverify:healer_select:auto"}); if ok==false then error("setAssistByAuto failed: "..tostring(err)) end; local st=A.getAssistByState(); print(string.format("[dwverify-healer] auto mode=%s resolved=%s online=%s reason=%s", tostring(st.mode), tostring(st.resolvedName or "nil"), tostring(st.resolvedOnline==true), tostring(st.lastReason or "nil"))) if tostring(st.mode)~="auto" then error("Expected mode=auto") end; if st.resolvedOnline~=true then error("Expected resolvedOnline=true in auto mode with candidates") end end',
+                note = "ASSERT: auto resolves to first online candidate.",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local ok,err=A.setAssistBySelected("Healer",{source="dwverify:healer_select:manual"}); if ok==false then error("setAssistBySelected failed: "..tostring(err)) end; local st=A.getAssistByState(); print(string.format("[dwverify-healer] manual mode=%s selected=%s resolved=%s online=%s reason=%s", tostring(st.mode), tostring(st.selectedName or "nil"), tostring(st.resolvedName or "nil"), tostring(st.resolvedOnline==true), tostring(st.lastReason or "nil"))) if tostring(st.mode)~="manual" then error("Expected mode=manual") end; if tostring(st.resolvedName or "")~="Healer" or st.resolvedOnline~=true then error("Expected resolvedName=Healer online=true") end end',
+                note = "ASSERT: manual selection resolves to Healer when online.",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.presence_service"); local ok,err=P.setState({myProfilesOnline={"Alpha (Profile-A) [ONLINE] [HERE]","Beta (Profile-B) [ONLINE]"},myProfilesOffline={"Healer (Profile-Heal) [OFFLINE]"},myProfilesHere={"Alpha (Profile-A) [ONLINE] [HERE]"},otherPlayersInRoom={"OtherGuy"},mapping={count=3},roomTs=os.time(),whoTs=os.time()},{source="dwverify:healer_select:seed_presence_offline"}); if ok==false then error("PresenceService.setState failed: "..tostring(err)) end; local A=require("dwkit.services.actionpad_service"); local ok2,err2=A.recompute({source="dwverify:healer_select:recompute_offline"}); if ok2==false then error("ActionPadService.recompute failed: "..tostring(err2)) end; local st=A.getAssistByState(); print(string.format("[dwverify-healer] after healer offline mode=%s selected=%s resolved=%s online=%s reason=%s", tostring(st.mode), tostring(st.selectedName or "nil"), tostring(st.resolvedName or "nil"), tostring(st.resolvedOnline==true), tostring(st.lastReason or "nil"))) if tostring(st.mode)~="manual" then error("Expected mode stays manual") end; if st.resolvedOnline~=false then error("Expected resolvedOnline=false when selected healer offline") end end',
+                note = "ASSERT: manual selection stays manual, but resolvedOnline=false when healer goes offline.",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.practice_store_service"); local ok,err=P.ingestFixture("basic",{source="dwverify:healer_select:practice_fixture"}); if ok~=true then error("practice ingestFixture failed: "..tostring(err)) end; local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("actionpad_ui", true, {noSave=true}); gs.setVisible("actionpad_ui", true, {noSave=true}); local UI=require("dwkit.ui.actionpad_ui"); local ok2,err2=UI.apply({source="dwverify:healer_select:show_ui"}); if ok2==false then error("actionpad_ui.apply failed: "..tostring(err2)) end; local s=UI.getState(); local lr=s.lastRender or {}; print(string.format("[dwverify-healer] SHOW ui visible=%s runtimeVisible=%s rows=%s", tostring(s.visible), tostring(s.runtimeVisible), tostring(lr.rowsCount or "nil"))) end',
+                note = "Show ActionPad UI with healer offline (service buttons should be disabled by no_healer_online).",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local st=A.getAssistByState(); print(string.format("[dwverify-healer] assistBy state mode=%s selected=%s resolved=%s online=%s reason=%s", tostring(st.mode), tostring(st.selectedName or "nil"), tostring(st.resolvedName or "nil"), tostring(st.resolvedOnline==true), tostring(st.lastReason or "nil"))) print("[dwverify-healer] NOTE: now click a SERVICE button in UI; it must print DISABLED with reason=no_healer_online (because assistBy offline).") end',
+                note = "Manual check: UI click a service button -> DISABLED reason=no_healer_online.",
+            },
+            {
+                cmd =
+                'lua do print("[dwverify-healer] PASS actionpad_healer_select_smoke (service disabled reason uses no_healer_online when assistBy offline/missing).") end',
+                note = "PASS marker (suite includes a manual click check).",
             },
         },
     },
