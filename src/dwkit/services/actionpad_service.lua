@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.actionpad_service
 -- Owner       : Services
--- Version     : v2026-03-05B
+-- Version     : v2026-03-05D
 -- Purpose     :
 --   - SAFE ActionPadService (data only).
 --   - Produces "online-only" roster rows for ActionPad UI, based on PresenceService
@@ -11,6 +11,8 @@
 --   - Provides deterministic planning helpers for RemoteExec, WITHOUT sending.
 --   - Provides deterministic gating helpers for ActionPad UI (Practice/Score/Registry),
 --     WITHOUT sending.
+--   - Provides deterministic assistBy/healer selection helpers for ActionPad UI (Bucket C),
+--     WITHOUT sending, WITHOUT persistence.
 --   - No UI, no persistence, no timers, no send().
 --
 -- Public API  :
@@ -21,6 +23,14 @@
 --   - recompute(opts?) -> boolean ok, string|nil err
 --   - getRowsOnlineOnly() -> array of row records (copy)
 --   - resolveOwnedProfileLabel(name) -> string|nil profileLabel, string|nil err
+--
+-- AssistBy / Healer selection (NO SEND):
+--   - getAssistByState() -> table (copy)
+--       returns { mode="auto|manual", selectedName?, resolvedName?, resolvedOnline?,
+--                 candidates={names...}, lastReason? }
+--   - setAssistByAuto(opts?) -> boolean ok, string|nil err
+--   - setAssistBySelected(name, opts?) -> boolean ok, string|nil err
+--   - cycleAssistBy(delta, opts?) -> string|nil resolvedName, string|nil err
 --
 -- Planning only (NO SEND):
 --   - planSelfExec(characterName, cmd, opts?) -> table|nil plan, string|nil err
@@ -48,7 +58,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-05B"
+M.VERSION = "v2026-03-05D"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -62,6 +72,16 @@ local STATE = {
     updates = 0,
     lastSource = nil,
     lastErr = nil,
+
+    -- Bucket C: assistBy/healer selection (session-only; no persistence)
+    assistBy = {
+        mode = "auto",          -- "auto" | "manual"
+        selectedName = nil,     -- manual selection (may be offline)
+        resolvedName = nil,     -- computed (must be online if present)
+        resolvedOnline = false, -- computed
+        candidates = {},        -- sorted online owned names
+        lastReason = nil,       -- last resolution note (diagnostic)
+    },
 }
 
 -- -------------------------------------------------------------------------
@@ -366,6 +386,161 @@ local function _rowsFromFallbackBestEffort()
 end
 
 -- -------------------------------------------------------------------------
+-- Bucket C: assistBy/healer selection (SAFE; no send; session-only)
+-- -------------------------------------------------------------------------
+
+local function _assistByBuildCandidates()
+    local names = {}
+    local rows = (type(STATE.rowsOnline) == "table") and STATE.rowsOnline or {}
+    for i = 1, #rows do
+        local r = rows[i] or {}
+        local n = _trim(r.name)
+        if n ~= "" then
+            names[#names + 1] = n
+        end
+    end
+    names = _sortedStringsCaseInsensitive(_dedupe(names))
+    return names
+end
+
+local function _assistByIsOnline(name)
+    name = _trim(name)
+    if name == "" then return false end
+    local rows = (type(STATE.rowsOnline) == "table") and STATE.rowsOnline or {}
+    for i = 1, #rows do
+        local r = rows[i] or {}
+        if tostring(r.name or "") == name and r.online == true then
+            return true
+        end
+    end
+    return false
+end
+
+local function _assistByResolve()
+    local st = STATE.assistBy
+    st.candidates = _assistByBuildCandidates()
+
+    if st.mode == "manual" then
+        local sel = _trim(st.selectedName)
+        if sel ~= "" and _assistByIsOnline(sel) == true then
+            st.resolvedName = sel
+            st.resolvedOnline = true
+            st.lastReason = "manual:ok"
+            return st.resolvedName
+        end
+        st.resolvedName = nil
+        st.resolvedOnline = false
+        if sel == "" then
+            st.lastReason = "manual:missing"
+        else
+            st.lastReason = "manual:offline"
+        end
+        return nil
+    end
+
+    -- auto (default): first candidate (deterministic)
+    if type(st.candidates) == "table" and #st.candidates > 0 then
+        st.resolvedName = tostring(st.candidates[1])
+        st.resolvedOnline = true
+        st.lastReason = "auto:first_online"
+        return st.resolvedName
+    end
+
+    st.resolvedName = nil
+    st.resolvedOnline = false
+    st.lastReason = "auto:none_online"
+    return nil
+end
+
+function M.getAssistByState()
+    _assistByResolve()
+    return _shallowCopy(STATE.assistBy)
+end
+
+function M.setAssistByAuto(opts)
+    opts = (type(opts) == "table") and opts or {}
+    STATE.assistBy.mode = "auto"
+    STATE.assistBy.selectedName = nil
+    _assistByResolve()
+
+    local src = tostring(opts.source or "actionpad:setAssistByAuto")
+    local okEmit, errEmit = _emit({ assistBy = "auto" }, src)
+    if not okEmit then
+        return false, tostring(errEmit)
+    end
+    return true, nil
+end
+
+function M.setAssistBySelected(name, opts)
+    opts = (type(opts) == "table") and opts or {}
+    name = _trim(name)
+    if name == "" then
+        return false, "setAssistBySelected(name): name invalid"
+    end
+
+    -- Must be an owned name (mapped); selection may still be offline later.
+    local _, err = M.resolveOwnedProfileLabel(name)
+    if err then
+        return false, "setAssistBySelected: " .. tostring(err)
+    end
+
+    STATE.assistBy.mode = "manual"
+    STATE.assistBy.selectedName = name
+    _assistByResolve()
+
+    local src = tostring(opts.source or "actionpad:setAssistBySelected")
+    local okEmit, errEmit = _emit({ assistBy = "manual", selectedName = name }, src)
+    if not okEmit then
+        return false, tostring(errEmit)
+    end
+    return true, nil
+end
+
+function M.cycleAssistBy(delta, opts)
+    opts = (type(opts) == "table") and opts or {}
+    delta = tonumber(delta or 1) or 1
+    if delta == 0 then delta = 1 end
+
+    local names = _assistByBuildCandidates()
+    if type(names) ~= "table" or #names == 0 then
+        STATE.assistBy.mode = "auto"
+        STATE.assistBy.selectedName = nil
+        _assistByResolve()
+        return nil, "cycleAssistBy: no online owned candidates"
+    end
+
+    local cur = _trim(STATE.assistBy.resolvedName)
+    local idx = 0
+    if cur ~= "" then
+        for i = 1, #names do
+            if tostring(names[i]) == cur then
+                idx = i
+                break
+            end
+        end
+    end
+    if idx == 0 then idx = 1 end
+
+    local n = #names
+    local nextIdx = idx + delta
+    while nextIdx < 1 do nextIdx = nextIdx + n end
+    while nextIdx > n do nextIdx = nextIdx - n end
+
+    local pick = tostring(names[nextIdx])
+    STATE.assistBy.mode = "manual"
+    STATE.assistBy.selectedName = pick
+    _assistByResolve()
+
+    local src = tostring(opts.source or "actionpad:cycleAssistBy")
+    local okEmit, errEmit = _emit({ assistBy = "manual", selectedName = pick }, src)
+    if not okEmit then
+        return nil, tostring(errEmit)
+    end
+
+    return pick, nil
+end
+
+-- -------------------------------------------------------------------------
 -- Gating helpers (SAFE; no send)
 -- -------------------------------------------------------------------------
 
@@ -618,6 +793,7 @@ function M.getState()
         lastErr = STATE.lastErr,
         rowsOnline = _copyArrayOfTables(STATE.rowsOnline),
         rowCount = (type(STATE.rowsOnline) == "table") and #STATE.rowsOnline or 0,
+        assistBy = _shallowCopy(M.getAssistByState()),
     }
 end
 
@@ -657,6 +833,9 @@ function M.recompute(opts)
     STATE.updates = (tonumber(STATE.updates) or 0) + 1
     STATE.lastSource = used
     STATE.lastErr = nil
+
+    -- refresh assistBy resolution on roster change (no persistence)
+    _assistByResolve()
 
     local okEmit, errEmit = _emit({ recompute = true, sourceUsed = used }, source)
     if not okEmit then
@@ -759,6 +938,7 @@ end
 -- Seed initial state (no emit)
 do
     STATE.rowsOnline = {}
+    _assistByResolve()
 end
 
 return M

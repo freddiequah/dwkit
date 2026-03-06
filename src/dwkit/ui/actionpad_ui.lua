@@ -2,11 +2,12 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.actionpad_ui
 -- Owner       : UI
--- Version     : v2026-03-05A
+-- Version     : v2026-03-05B
 -- Purpose     :
 --   - ActionPad UI (Bucket A): online-only owned roster view with real button groups (PLAN-only).
 --   - Consumes ActionPadService rowsOnlineOnly.
 --   - Bucket B: wires deterministic enable/disable gating (Practice/Score/Registry) + disabled reasons.
+--   - Bucket C: assistBy/healer selection rule (session-only) wired to ActionPadService.
 --   - SAFE: does NOT send gameplay commands. Buttons only print computed plans.
 --   - Follows UI contracts: shared frame (ui_window + ui_theme) + content kits.
 --
@@ -26,7 +27,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-05A"
+M.VERSION = "v2026-03-05B"
 M.UI_ID = "actionpad_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -53,6 +54,8 @@ local _state = {
         status = nil,
         global = {
             feastBtn = nil,
+            healerAutoBtn = nil,
+            healerNextBtn = nil,
         },
         rows = {}, -- array of row blocks { widgets = { ... } }
     },
@@ -96,7 +99,9 @@ end
 local function _clearGlobal()
     local g = _state.widgets.global or {}
     _safeDelete(g.feastBtn)
-    _state.widgets.global = { feastBtn = nil }
+    _safeDelete(g.healerAutoBtn)
+    _safeDelete(g.healerNextBtn)
+    _state.widgets.global = { feastBtn = nil, healerAutoBtn = nil, healerNextBtn = nil }
 end
 
 local function _ensureCreated()
@@ -184,18 +189,6 @@ local function _setStatusLine(text)
     if type(s) == "table" and type(s.echo) == "function" then
         pcall(function() s:echo(ListKit.toPreHtml(tostring(text or ""))) end)
     end
-end
-
-local function _hasOnlineName(rows, name)
-    name = tostring(name or "")
-    if name == "" then return false end
-    for i = 1, #rows do
-        local r = rows[i] or {}
-        if tostring(r.name or "") == name then
-            return true
-        end
-    end
-    return false
 end
 
 local function _planSelfExec(rowName, cmd, metaLabel)
@@ -367,25 +360,6 @@ local function _layoutRightButtons(parent, y, rowH, btnW, gap, specs, namePrefix
     return out
 end
 
-local function _renderGlobal(topY, rowH, gap, btnW)
-    _clearGlobal()
-
-    -- Global action: Feast (LOCAL plan only)
-    local specs = {
-        {
-            label = "FE",
-            enabled = true,
-            tooltip = "ActionPad: Feast (FE)\nstate=ENABLED\nreason=ok\ndetail=LOCAL plan only",
-            onClick = function()
-                _planLocal("yamcha", "Feast")
-            end,
-        },
-    }
-
-    local btns = _layoutRightButtons(_state.widgets.listRoot, topY, rowH, btnW, gap, specs, "DWKit_ActionPad_Global")
-    _state.widgets.global.feastBtn = btns[1]
-end
-
 local function _gateBestEffort(kind, practiceKey, displayName)
     local okA, A = pcall(require, "dwkit.services.actionpad_service")
     if not okA or type(A) ~= "table" or type(A.resolveActionGate) ~= "function" then
@@ -398,6 +372,135 @@ local function _gateBestEffort(kind, practiceKey, displayName)
     return g
 end
 
+local function _getAssistBy()
+    local okA, A = pcall(require, "dwkit.services.actionpad_service")
+    if not okA or type(A) ~= "table" or type(A.getAssistByState) ~= "function" then
+        return {
+            mode = "auto",
+            resolvedName = nil,
+            resolvedOnline = false,
+            candidates = {},
+            lastReason =
+            "service_missing"
+        }
+    end
+    local st = A.getAssistByState()
+    if type(st) ~= "table" then
+        return {
+            mode = "auto",
+            resolvedName = nil,
+            resolvedOnline = false,
+            candidates = {},
+            lastReason =
+            "service_missing"
+        }
+    end
+    return st
+end
+
+local function _assistGate(g, assistState)
+    assistState = (type(assistState) == "table") and assistState or {}
+    if assistState.resolvedOnline ~= true or tostring(assistState.resolvedName or "") == "" then
+        return {
+            enabled = false,
+            reason = "no_healer_online",
+            detail = "No assistBy online (mode=" .. tostring(assistState.mode or "auto") .. ")",
+        }
+    end
+    return g
+end
+
+local function _assistLabel(assistState)
+    assistState = (type(assistState) == "table") and assistState or {}
+    local mode = tostring(assistState.mode or "auto")
+    local sel = tostring(assistState.selectedName or "")
+    local res = tostring(assistState.resolvedName or "")
+    local online = (assistState.resolvedOnline == true)
+
+    if mode == "manual" then
+        if res ~= "" and online then
+            return string.format("AssistBy: %s (manual)", res)
+        end
+        if sel ~= "" then
+            return string.format("AssistBy: %s (manual, OFFLINE)", sel)
+        end
+        return "AssistBy: (manual, none)"
+    end
+
+    if res ~= "" and online then
+        return string.format("AssistBy: %s (auto)", res)
+    end
+    return "AssistBy: (auto, none online)"
+end
+
+local function _renderGlobal(topY, rowH, gap, btnW)
+    _clearGlobal()
+
+    local assist = _getAssistBy()
+    local assistLine = _assistLabel(assist)
+
+    -- Global actions:
+    -- FE = Feast (LOCAL plan only)
+    -- AU = AssistBy Auto (sets mode auto)
+    -- NX = AssistBy Next (cycles to next online owned)
+    local specs = {
+        {
+            label = "FE",
+            enabled = true,
+            tooltip = "ActionPad: Feast (FE)\nstate=ENABLED\nreason=ok\ndetail=LOCAL plan only",
+            onClick = function()
+                _planLocal("yamcha", "Feast")
+            end,
+        },
+        {
+            label = "AU",
+            enabled = true,
+            tooltip = "ActionPad: AssistBy Auto (AU)\nstate=ENABLED\nreason=ok\ndetail=Set assistBy mode to auto",
+            onClick = function()
+                local okA, A = pcall(require, "dwkit.services.actionpad_service")
+                if okA and type(A) == "table" and type(A.setAssistByAuto) == "function" then
+                    local ok, err = A.setAssistByAuto({ source = "actionpad_ui:assist_auto" })
+                    if ok ~= true then
+                        _setStatusLine("[ActionPad] AssistBy Auto failed: " .. tostring(err))
+                    else
+                        _setStatusLine("[ActionPad] AssistBy set to AUTO. " .. assistLine)
+                    end
+                else
+                    _setStatusLine("[ActionPad] AssistBy Auto not available (service missing).")
+                end
+                pcall(_render)
+            end,
+        },
+        {
+            label = "NX",
+            enabled = true,
+            tooltip = "ActionPad: AssistBy Next (NX)\nstate=ENABLED\nreason=ok\ndetail=Cycle to next online owned",
+            onClick = function()
+                local okA, A = pcall(require, "dwkit.services.actionpad_service")
+                if okA and type(A) == "table" and type(A.cycleAssistBy) == "function" then
+                    local name, err = A.cycleAssistBy(1, { source = "actionpad_ui:assist_next" })
+                    if not name then
+                        _setStatusLine("[ActionPad] AssistBy Next failed: " .. tostring(err))
+                    else
+                        _setStatusLine("[ActionPad] AssistBy set to: " .. tostring(name))
+                    end
+                else
+                    _setStatusLine("[ActionPad] AssistBy Next not available (service missing).")
+                end
+                pcall(_render)
+            end,
+        },
+    }
+
+    local btns = _layoutRightButtons(_state.widgets.listRoot, topY, rowH, btnW, gap, specs, "DWKit_ActionPad_Global")
+    _state.widgets.global.feastBtn = btns[1]
+    _state.widgets.global.healerAutoBtn = btns[2]
+    _state.widgets.global.healerNextBtn = btns[3]
+
+    -- Put assistBy line into status immediately (non-invasive; keeps header unchanged)
+    _setStatusLine(assistLine)
+end
+
 local function _render()
     local okA, A = pcall(require, "dwkit.services.actionpad_service")
     if not okA or type(A) ~= "table" or type(A.getRowsOnlineOnly) ~= "function" then
@@ -406,6 +509,7 @@ local function _render()
     end
 
     local rows = A.getRowsOnlineOnly() or {}
+    local assist = _getAssistBy()
 
     _clearRows()
 
@@ -422,10 +526,8 @@ local function _render()
     -- Roster blocks start after global row
     local yCursor = topY + rowH + gap + 2
 
-    -- NOTE: Bucket A uses a fixed healer name "Healer" when present.
-    -- This is a stub until the pickedHealer/assistBy rule is finalized.
-    local healerName = "Healer"
-    local healerOnline = _hasOnlineName(rows, healerName)
+    local healerName = tostring(assist.resolvedName or "")
+    local healerOnline = (assist.resolvedOnline == true and healerName ~= "")
 
     for i = 1, #rows do
         local r = rows[i] or {}
@@ -499,7 +601,7 @@ local function _render()
 
         -- SERVICE: Buff / Feed / Heal / PHeal / Rst / Rej (ASSIST-EXEC plan)
         -- Bucket B: deterministic gating from Practice/Score/Registry.
-        -- Note: healer selection is still a stub; we keep healerOnline as an additional gate.
+        -- Bucket C: assistBy selection must be online; otherwise disabled with reason no_healer_online.
         local gBless = _gateBestEffort("spell", "bless", "Bless")
         local gHeal = _gateBestEffort("spell", "heal", "Heal")
         local gPHeal = _gateBestEffort("spell", "power heal", "Power Heal")
@@ -507,24 +609,13 @@ local function _render()
         local gFeed = _gateBestEffort("spell", "feed", "Feed")
         local gRej = _gateBestEffort("spell", "rej", "Rej")
 
-        local function _withHealerGate(g, fullName)
-            if healerOnline ~= true then
-                return {
-                    enabled = false,
-                    reason = "healer_offline_stub",
-                    detail = "Healer stub is offline: " .. tostring(healerName),
-                }, tostring(fullName or "")
-            end
-            return g, tostring(fullName or "")
-        end
-
         local serviceSpecs = {
             {
                 label = "BU",
                 disabledLabel = "BU",
-                disabledGate = _withHealerGate(gBless, "Buff"),
-                tooltip = _mkTip("BU", "Buff (Bless)", _withHealerGate(gBless, "Buff")),
-                enabled = (_withHealerGate(gBless, "Buff").enabled == true),
+                disabledGate = _assistGate(gBless, assist),
+                tooltip = _mkTip("BU", "Buff (Bless)", _assistGate(gBless, assist)),
+                enabled = (_assistGate(gBless, assist).enabled == true),
                 onClick = function()
                     local ok, err = _planAssistExec(healerName, name, "cast bless {target}", "Buff")
                     if not ok then _setStatusLine("[ActionPad] Buff plan failed: " .. tostring(err)) end
@@ -533,9 +624,9 @@ local function _render()
             {
                 label = "FD",
                 disabledLabel = "FD",
-                disabledGate = _withHealerGate(gFeed, "Feed"),
-                tooltip = _mkTip("FD", "Feed", _withHealerGate(gFeed, "Feed")),
-                enabled = (_withHealerGate(gFeed, "Feed").enabled == true),
+                disabledGate = _assistGate(gFeed, assist),
+                tooltip = _mkTip("FD", "Feed", _assistGate(gFeed, assist)),
+                enabled = (_assistGate(gFeed, assist).enabled == true),
                 onClick = function()
                     local ok, err = _planAssistExec(healerName, name, "[TODO] feed {target}", "Feed")
                     if not ok then _setStatusLine("[ActionPad] Feed plan failed: " .. tostring(err)) end
@@ -544,9 +635,9 @@ local function _render()
             {
                 label = "HL",
                 disabledLabel = "HL",
-                disabledGate = _withHealerGate(gHeal, "Heal"),
-                tooltip = _mkTip("HL", "Heal", _withHealerGate(gHeal, "Heal")),
-                enabled = (_withHealerGate(gHeal, "Heal").enabled == true),
+                disabledGate = _assistGate(gHeal, assist),
+                tooltip = _mkTip("HL", "Heal", _assistGate(gHeal, assist)),
+                enabled = (_assistGate(gHeal, assist).enabled == true),
                 onClick = function()
                     local ok, err = _planAssistExec(healerName, name, "cast heal {target}", "Heal")
                     if not ok then _setStatusLine("[ActionPad] Heal plan failed: " .. tostring(err)) end
@@ -555,9 +646,9 @@ local function _render()
             {
                 label = "PH",
                 disabledLabel = "PH",
-                disabledGate = _withHealerGate(gPHeal, "Power Heal"),
-                tooltip = _mkTip("PH", "Power Heal", _withHealerGate(gPHeal, "Power Heal")),
-                enabled = (_withHealerGate(gPHeal, "Power Heal").enabled == true),
+                disabledGate = _assistGate(gPHeal, assist),
+                tooltip = _mkTip("PH", "Power Heal", _assistGate(gPHeal, assist)),
+                enabled = (_assistGate(gPHeal, assist).enabled == true),
                 onClick = function()
                     local ok, err = _planAssistExec(healerName, name, "cast 'power heal' {target}", "PHeal")
                     if not ok then _setStatusLine("[ActionPad] PHeal plan failed: " .. tostring(err)) end
@@ -566,9 +657,9 @@ local function _render()
             {
                 label = "RS",
                 disabledLabel = "RS",
-                disabledGate = _withHealerGate(gRefresh, "Refresh"),
-                tooltip = _mkTip("RS", "Refresh", _withHealerGate(gRefresh, "Refresh")),
-                enabled = (_withHealerGate(gRefresh, "Refresh").enabled == true),
+                disabledGate = _assistGate(gRefresh, assist),
+                tooltip = _mkTip("RS", "Refresh", _assistGate(gRefresh, assist)),
+                enabled = (_assistGate(gRefresh, assist).enabled == true),
                 onClick = function()
                     local ok, err = _planAssistExec(healerName, name, "cast refresh {target}", "Rst")
                     if not ok then _setStatusLine("[ActionPad] Rst plan failed: " .. tostring(err)) end
@@ -577,9 +668,9 @@ local function _render()
             {
                 label = "RJ",
                 disabledLabel = "RJ",
-                disabledGate = _withHealerGate(gRej, "Rej"),
-                tooltip = _mkTip("RJ", "Rej", _withHealerGate(gRej, "Rej")),
-                enabled = (_withHealerGate(gRej, "Rej").enabled == true),
+                disabledGate = _assistGate(gRej, assist),
+                tooltip = _mkTip("RJ", "Rej", _assistGate(gRej, assist)),
+                enabled = (_assistGate(gRej, assist).enabled == true),
                 onClick = function()
                     local ok, err = _planAssistExec(healerName, name, "[TODO] rej {target}", "Rej")
                     if not ok then _setStatusLine("[ActionPad] Rej plan failed: " .. tostring(err)) end
@@ -722,12 +813,12 @@ local function _render()
         ts = os.time(),
         rowsCount = #rows,
         blocksCount = #rows,
+        assistBy = assist,
         healerName = healerName,
         healerOnline = healerOnline,
     }
 
-    local hInfo = healerOnline and ("healer=" .. healerName .. " ONLINE") or
-        ("healer=" .. healerName .. " OFFLINE (service disabled by stub)")
+    local hInfo = _assistLabel(assist)
     _setStatusLine(string.format("Rendered %d online rows. %s. (PLAN only)", #rows, hInfo))
     return true, nil
 end
