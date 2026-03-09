@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-09B
+-- Version     : v2026-03-09C
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-09B"
+M.VERSION = "v2026-03-09C"
 
 local SUITES = {
     default = {
@@ -140,13 +140,18 @@ local SUITES = {
     skill_registry_smoke = {
         title = "skill_registry_smoke",
         description =
-        "SkillRegistry smoke: assert expanded ActionPad baseline, canonical kind set, alias lookup, class normalization, validateAll PASS, and ActionPad-backed coverage keys exist. Also confirms dwskills prints without error.",
+        "SkillRegistry smoke: assert Phase 1 structural split baseline, canonical kind set, alias lookup, class normalization, validateAll PASS, and ActionPad-backed coverage keys exist. Also confirms dwskills prints without error.",
         delay = 0.20,
         steps = {
             {
                 cmd =
                 'lua do local S=require("dwkit.services.skill_registry_service"); print(string.format("[dwverify-skillreg] service version=%s", tostring(S.getVersion()))) local st=S.getStats(); print(string.format("[dwverify-skillreg] stats entries=%s updates=%s lastTs=%s", tostring(st.entries), tostring(st.updates), tostring(st.lastTs or "nil"))) end',
                 note = "Load service and print version + stats.",
+            },
+            {
+                cmd =
+                'lua do local C=require("dwkit.data.skill_registry.cleric"); local W=require("dwkit.data.skill_registry.warrior"); local T=require("dwkit.data.skill_registry.thief"); local X=require("dwkit.data.skill_registry.seed_misc"); local c=C.getEntries(); local w=W.getEntries(); local t=T.getEntries(); local x=X.getEntries(); local function cnt(m) local n=0; for _ in pairs(m or {}) do n=n+1 end; return n end; print(string.format("[dwverify-skillreg] data modules cleric=%s warrior=%s thief=%s seed_misc=%s", tostring(cnt(c)), tostring(cnt(w)), tostring(cnt(t)), tostring(cnt(x)))) if cnt(c) < 10 then error("Expected cleric module entries >= 10") end; if cnt(w) < 5 then error("Expected warrior module entries >= 5") end; if cnt(t) < 1 then error("Expected thief module entries >= 1") end; if cnt(x) < 5 then error("Expected seed_misc module entries >= 5") end; print("[dwverify-skillreg] PASS data modules load") end',
+                note = "ASSERT: Phase 1 split modules load and contain expected baseline content.",
             },
             {
                 cmd =

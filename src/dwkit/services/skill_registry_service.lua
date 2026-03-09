@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.skill_registry_service
 -- Owner       : Services
--- Version     : v2026-03-09B
+-- Version     : v2026-03-09C
 -- Purpose     :
 --   - SAFE SkillRegistryService (data only).
 --   - Owns skill/spell registry (data-driven), emits updates.
@@ -31,15 +31,21 @@
 -- Events Emitted:
 --   - DWKit:Service:SkillRegistry:Updated
 -- Automation Policy: Manual only
--- Dependencies     : dwkit.core.identity, dwkit.bus.event_bus
+-- Dependencies     : dwkit.core.identity, dwkit.bus.event_bus,
+--                    dwkit.data.skill_registry.*
 -- #########################################################################
 
 local M                = {}
 
-M.VERSION              = "v2026-03-09B"
+M.VERSION              = "v2026-03-09C"
 
 local ID               = require("dwkit.core.identity")
 local BUS              = require("dwkit.bus.event_bus")
+
+local CLERIC_DATA      = require("dwkit.data.skill_registry.cleric")
+local WARRIOR_DATA     = require("dwkit.data.skill_registry.warrior")
+local THIEF_DATA       = require("dwkit.data.skill_registry.thief")
+local SEED_MISC_DATA   = require("dwkit.data.skill_registry.seed_misc")
 
 local EV_UPDATED       = tostring(ID.eventPrefix or "DWKit:") .. "Service:SkillRegistry:Updated"
 
@@ -87,325 +93,6 @@ local LEGACY_KIND_MAP  = {
     ["weapon-prof"] = "weapon",
 }
 
--- Expanded ActionPad baseline registry (data only; not exhaustive).
--- NOTE: practiceKey must match PracticeStore normalization (lowercase + collapsed spaces).
-local DEFAULT_REGISTRY = {
-    -- Cleric core service / utility
-    heal = {
-        id = "heal",
-        displayName = "Heal",
-        practiceKey = "heal",
-        classKey = "cleric",
-        kind = "spell",
-        minLevel = 1,
-        tags = { "actionpad", "service" },
-        notes = "Baseline cleric heal spell.",
-    },
-    ["power heal"] = {
-        id = "power heal",
-        displayName = "Power Heal",
-        practiceKey = "power heal",
-        classKey = "cleric",
-        kind = "spell",
-        minLevel = 1,
-        tags = { "actionpad", "service" },
-        aliases = { "ph", "pheal", "powerheal" },
-        notes = "Exact minLevel may be refined later.",
-    },
-    refresh = {
-        id = "refresh",
-        displayName = "Refresh",
-        practiceKey = "refresh",
-        classKey = "cleric",
-        kind = "spell",
-        minLevel = 1,
-        tags = { "actionpad", "service" },
-        aliases = { "ref" },
-        notes = "Common cleric service spell (baseline).",
-    },
-    feed = {
-        id = "feed",
-        displayName = "Feed",
-        practiceKey = "feed",
-        classKey = "cleric",
-        kind = "spell",
-        minLevel = 1,
-        tags = { "actionpad", "service" },
-        notes = "Baseline service spell for ActionPad Feed button.",
-    },
-    restore = {
-        id = "restore",
-        displayName = "Restore",
-        practiceKey = "restore",
-        classKey = "cleric",
-        kind = "spell",
-        minLevel = 1,
-        tags = { "actionpad", "service" },
-        aliases = { "rst" },
-        notes = "Baseline cleric restore spell.",
-    },
-    rejuvenate = {
-        id = "rejuvenate",
-        displayName = "Rejuvenate",
-        practiceKey = "rejuvenate",
-        classKey = "cleric",
-        kind = "spell",
-        minLevel = 1,
-        tags = { "actionpad", "service" },
-        aliases = { "rej" },
-        notes = "Baseline cleric rejuvenate spell.",
-    },
-    bless = {
-        id = "bless",
-        displayName = "Bless",
-        practiceKey = "bless",
-        classKey = "cleric",
-        kind = "spell",
-        minLevel = 1,
-        tags = { "actionpad", "buff" },
-        aliases = { "buff" },
-        notes = "Mapped as baseline buff spell for ActionPad.",
-    },
-    calm = {
-        id = "calm",
-        displayName = "Calm",
-        practiceKey = "calm",
-        classKey = "cleric",
-        kind = "spell",
-        minLevel = 1,
-        tags = { "actionpad", "utility" },
-    },
-    summon = {
-        id = "summon",
-        displayName = "Summon",
-        practiceKey = "summon",
-        classKey = "cleric",
-        kind = "spell",
-        minLevel = 1,
-        tags = { "actionpad", "movement" },
-        notes = "Baseline move-action spell for ActionPad coverage.",
-    },
-    relocate = {
-        id = "relocate",
-        displayName = "Relocate",
-        practiceKey = "relocate",
-        classKey = "cleric",
-        kind = "spell",
-        minLevel = 1,
-        tags = { "actionpad", "movement" },
-        notes = "Baseline move-action spell for ActionPad coverage.",
-    },
-
-    -- Cleric group/service set used by healer util group buttons
-    ["group armor"] = {
-        id = "group armor",
-        displayName = "Group Armor",
-        practiceKey = "group armor",
-        classKey = "cleric",
-        kind = "spell",
-        minLevel = 1,
-        tags = { "actionpad", "group", "buff" },
-        aliases = { "garm", "g armor", "garmor" },
-        notes = "Baseline group support spell for ActionPad group utility coverage.",
-    },
-    ["group recall"] = {
-        id = "group recall",
-        displayName = "Group Recall",
-        practiceKey = "group recall",
-        classKey = "cleric",
-        kind = "spell",
-        minLevel = 1,
-        tags = { "actionpad", "group", "utility" },
-        aliases = { "grec", "grecall", "g recall" },
-        notes = "Baseline group utility spell for ActionPad GRec coverage.",
-    },
-    ["group heal"] = {
-        id = "group heal",
-        displayName = "Group Heal",
-        practiceKey = "group heal",
-        classKey = "cleric",
-        kind = "spell",
-        minLevel = 1,
-        tags = { "actionpad", "group", "service" },
-        aliases = { "gh", "gheal", "g heal" },
-        notes = "Baseline group healing spell.",
-    },
-    ["group rejuvenate"] = {
-        id = "group rejuvenate",
-        displayName = "Group Rejuvenate",
-        practiceKey = "group rejuvenate",
-        classKey = "cleric",
-        kind = "spell",
-        minLevel = 1,
-        tags = { "actionpad", "group", "service" },
-        aliases = { "grej", "g rej", "grejuvenate" },
-        notes = "Baseline group rejuvenate spell.",
-    },
-    ["group power heal"] = {
-        id = "group power heal",
-        displayName = "Group Power Heal",
-        practiceKey = "group power heal",
-        classKey = "cleric",
-        kind = "spell",
-        minLevel = 1,
-        tags = { "actionpad", "group", "service" },
-        aliases = { "gph", "gpheal", "g power heal", "gpowerheal" },
-        notes = "Baseline group power-heal spell.",
-    },
-
-    -- Warrior combat core
-    kick = {
-        id = "kick",
-        displayName = "Kick",
-        practiceKey = "kick",
-        classKey = "warrior",
-        kind = "skill",
-        minLevel = 1,
-        tags = { "actionpad", "combat" },
-    },
-    bash = {
-        id = "bash",
-        displayName = "Bash",
-        practiceKey = "bash",
-        classKey = "warrior",
-        kind = "skill",
-        minLevel = 1,
-        tags = { "actionpad", "combat", "fightOnly" },
-    },
-    assist = {
-        id = "assist",
-        displayName = "Assist",
-        practiceKey = "assist",
-        classKey = "warrior",
-        kind = "skill",
-        minLevel = 1,
-        tags = { "actionpad", "combat", "fightOnly" },
-    },
-    rescue = {
-        id = "rescue",
-        displayName = "Rescue",
-        practiceKey = "rescue",
-        classKey = "warrior",
-        kind = "skill",
-        minLevel = 1,
-        tags = { "actionpad", "combat", "fightOnly" },
-        notes = "ActionPad will gate fightOnly by state later.",
-    },
-    pummel = {
-        id = "pummel",
-        displayName = "Pummel",
-        practiceKey = "pummel",
-        classKey = "warrior",
-        kind = "skill",
-        minLevel = 1,
-        tags = { "actionpad", "combat", "fightOnly" },
-        notes = "Baseline warrior example (minLevel may be refined later).",
-    },
-
-    -- Thief combat baseline
-    circle = {
-        id = "circle",
-        displayName = "Circle",
-        practiceKey = "circle",
-        classKey = "thief",
-        kind = "skill",
-        minLevel = 1,
-        tags = { "actionpad", "combat", "fightOnly" },
-    },
-
-    -- Paladin / Anti-Paladin baseline examples (seed-level; not exhaustive)
-    guard = {
-        id = "guard",
-        displayName = "Guard",
-        practiceKey = "guard",
-        classKey = "paladin",
-        kind = "skill",
-        minLevel = 1,
-        tags = { "actionpad", "combat" },
-    },
-    ["anti-paladin example"] = {
-        id = "anti-paladin example",
-        displayName = "Anti-Paladin Example",
-        practiceKey = "anti-paladin example",
-        classKey = "anti-paladin",
-        kind = "skill",
-        minLevel = 1,
-        tags = { "seed" },
-        notes = "Seed used only to assert hyphen-preserving classKey handling.",
-    },
-
-    -- Remort-only class examples (structure only)
-    ["ranger example"] = {
-        id = "ranger example",
-        displayName = "Ranger Example",
-        practiceKey = "ranger example",
-        classKey = "ranger",
-        kind = "skill",
-        minLevel = 1,
-        tags = { "seed", "remort" },
-    },
-    ["monk example"] = {
-        id = "monk example",
-        displayName = "Monk Example",
-        practiceKey = "monk example",
-        classKey = "monk",
-        kind = "skill",
-        minLevel = 1,
-        tags = { "seed", "remort" },
-    },
-    ["bard example"] = {
-        id = "bard example",
-        displayName = "Bard Example",
-        practiceKey = "bard example",
-        classKey = "bard",
-        kind = "skill",
-        minLevel = 1,
-        tags = { "seed", "remort" },
-    },
-    ["pirate example"] = {
-        id = "pirate example",
-        displayName = "Pirate Example",
-        practiceKey = "pirate example",
-        classKey = "pirate",
-        kind = "skill",
-        minLevel = 1,
-        tags = { "seed", "remort" },
-    },
-
-    -- Race skills (examples)
-    ["race example"] = {
-        id = "race example",
-        displayName = "Race Example",
-        practiceKey = "race example",
-        classKey = "warrior",
-        kind = "race",
-        minLevel = 0,
-        tags = { "race", "seed" },
-        notes = "Race skills are not class-learned; classKey is used as grouping only (seed).",
-    },
-
-    -- Weapon proficiencies (examples)
-    ["sword"] = {
-        id = "sword",
-        displayName = "Sword",
-        practiceKey = "sword",
-        classKey = "warrior",
-        kind = "weapon",
-        minLevel = 0,
-        tags = { "weapon" },
-        notes = "Weapon prof example; classKey grouping is seed-level.",
-    },
-    ["dagger"] = {
-        id = "dagger",
-        displayName = "Dagger",
-        practiceKey = "dagger",
-        classKey = "thief",
-        kind = "weapon",
-        minLevel = 0,
-        tags = { "weapon" },
-    },
-}
-
 local STATE            = {
     registry = {}, -- key -> def table
     lastTs = nil,
@@ -444,17 +131,47 @@ end
 
 local function _lowerCollapseSpaces(s)
     s = _trim(s):lower()
-    -- collapse internal whitespace
     s = s:gsub("%s+", " ")
     return s
 end
 
 local function _compactKey(s)
     s = _lowerCollapseSpaces(s)
-    -- strip spaces + hyphens to support alias matching like "anti paladin" / "anti-paladin" / "antipaladin"
     s = s:gsub("[%s%-]", "")
     return s
 end
+
+local function _getEntriesFromModule(mod)
+    if type(mod) ~= "table" or type(mod.getEntries) ~= "function" then
+        return {}
+    end
+    local ok, entries = pcall(mod.getEntries)
+    if not ok or type(entries) ~= "table" then
+        return {}
+    end
+    return entries
+end
+
+local function _mergeEntries(dst, src)
+    if type(dst) ~= "table" or type(src) ~= "table" then
+        return dst
+    end
+    for k, v in pairs(src) do
+        dst[k] = v
+    end
+    return dst
+end
+
+local function _buildDefaultRegistry()
+    local out = {}
+    _mergeEntries(out, _getEntriesFromModule(CLERIC_DATA))
+    _mergeEntries(out, _getEntriesFromModule(WARRIOR_DATA))
+    _mergeEntries(out, _getEntriesFromModule(THIEF_DATA))
+    _mergeEntries(out, _getEntriesFromModule(SEED_MISC_DATA))
+    return out
+end
+
+local DEFAULT_REGISTRY = _buildDefaultRegistry()
 
 function M.normalizeClassKey(raw)
     if raw == nil then return nil, "normalizeClassKey(raw): raw is nil" end
@@ -462,7 +179,6 @@ function M.normalizeClassKey(raw)
     if s == "" then return nil, "normalizeClassKey(raw): raw is empty" end
 
     local direct = _lowerCollapseSpaces(s)
-    -- preserve hyphen canonicalization for anti-paladin and allow "anti paladin"
     if direct == "anti paladin" or direct == "anti-paladin" then
         return "anti-paladin", nil
     end
@@ -473,7 +189,6 @@ function M.normalizeClassKey(raw)
         return mapped, nil
     end
 
-    -- If it already looks like a canonical classKey, accept only if locked list allows it
     local maybe = direct
     if maybe == "anti paladin" then maybe = "anti-paladin" end
     if CLASS_KEYS[maybe] == true then
@@ -596,7 +311,6 @@ function M.validateDef(def, opts)
         return false, "validateDef(def): classKey not in locked class list: " .. tostring(ck)
     end
 
-    -- aliases are optional, but if present must already be normalized array of strings
     if def.aliases ~= nil then
         if type(def.aliases) ~= "table" then
             return false, "validateDef(def): aliases must be array (when present)"
@@ -614,7 +328,6 @@ end
 local function _normalizeDef(def)
     local out = _shallowCopy(def)
 
-    -- required normalization
     local ck = out.classKey
     local ckNorm, _ = M.normalizeClassKey(ck)
     if ckNorm then out.classKey = ckNorm end
@@ -624,7 +337,6 @@ local function _normalizeDef(def)
     if pkNorm then out.practiceKey = pkNorm end
 
     out.kind = _normalizeKind(out.kind)
-
     out.aliases = _normalizeAliases(out.aliases)
     out.tags = _normalizeTags(out.tags)
 
@@ -710,7 +422,6 @@ function M.resolveByAlias(alias)
     local a, err = M.normalizePracticeKey(alias)
     if not a then return nil end
 
-    -- Allow direct practiceKey lookup first
     local def = M.resolveByPracticeKey(a)
     if def then return def end
 
@@ -774,9 +485,8 @@ function M.validateAll(opts)
 
     local issues = {}
 
-    -- duplicates / collisions
-    local seenPractice = {} -- practiceKey -> firstKey
-    local seenAlias = {}    -- alias -> firstKey
+    local seenPractice = {}
+    local seenAlias = {}
 
     for k, def in pairs(STATE.registry) do
         if type(k) ~= "string" or k == "" then
@@ -788,12 +498,10 @@ function M.validateAll(opts)
             if not ok then
                 _pushIssue(issues, tostring(k), tostring(err))
             else
-                -- Strong consistency: key should match def.id (prevents silent drift)
                 if tostring(def.id) ~= tostring(k) then
                     _pushIssue(issues, tostring(k), "def.id must match registry key", { id = tostring(def.id) })
                 end
 
-                -- practiceKey uniqueness
                 local pk = tostring(def.practiceKey or "")
                 if pk ~= "" then
                     local first = seenPractice[pk]
@@ -805,7 +513,6 @@ function M.validateAll(opts)
                     end
                 end
 
-                -- alias collisions (alias must be unique, and must not collide with a different def.practiceKey)
                 if type(def.aliases) == "table" then
                     for i = 1, #def.aliases do
                         local al = tostring(def.aliases[i] or "")
@@ -839,7 +546,6 @@ function M.setRegistry(registry, opts)
         return false, "setRegistry(registry): registry must be a table"
     end
 
-    -- Validate + normalize all entries (schema for ActionPad gating)
     local nextReg = {}
     for k, def in pairs(registry) do
         if type(k) ~= "string" or k == "" then
@@ -850,7 +556,6 @@ function M.setRegistry(registry, opts)
         end
         local norm = _normalizeDef(def)
 
-        -- enforce id matches key (prevents drift)
         norm.id = tostring(norm.id or "")
         if norm.id == "" then norm.id = tostring(k) end
         if tostring(norm.id) ~= tostring(k) then
@@ -868,7 +573,6 @@ function M.setRegistry(registry, opts)
     STATE.registry = nextReg
     _rebuildIndexes()
 
-    -- Ensure collisions are surfaced before we emit "Updated"
     local okAll, issues = M.validateAll({ strictClassList = true })
     if not okAll then
         return false, "setRegistry(registry): validateAll failed issues=" .. tostring(#issues)
@@ -893,7 +597,6 @@ function M.upsert(key, def, opts)
 
     local norm = _normalizeDef(def)
 
-    -- enforce id matches key (prevents drift)
     norm.id = tostring(norm.id or "")
     if norm.id == "" then norm.id = tostring(key) end
     if tostring(norm.id) ~= tostring(key) then
@@ -908,10 +611,8 @@ function M.upsert(key, def, opts)
     STATE.registry[key] = _shallowCopy(norm)
     _rebuildIndexes()
 
-    -- Ensure collisions are surfaced (dup practiceKey/alias)
     local okAll, issues = M.validateAll({ strictClassList = true })
     if not okAll then
-        -- rollback this one change (best-effort)
         STATE.registry[key] = nil
         _rebuildIndexes()
         return false, "upsert(key, def): validateAll failed issues=" .. tostring(#issues)
@@ -961,14 +662,12 @@ function M.getStats()
     }
 end
 
--- Seed default registry at module load (SAFE, no emit; avoids surprise events on boot)
 do
     local nextReg = {}
     for k, def in pairs(DEFAULT_REGISTRY) do
         if type(k) == "string" and k ~= "" and type(def) == "table" then
             local norm = _normalizeDef(def)
 
-            -- enforce id matches key for seeded entries
             norm.id = tostring(norm.id or "")
             if norm.id == "" then norm.id = tostring(k) end
             if tostring(norm.id) ~= tostring(k) then
