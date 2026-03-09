@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.actionpad_ui
 -- Owner       : UI
--- Version     : v2026-03-09A
+-- Version     : v2026-03-09B
 -- Purpose     :
 --   - ActionPad UI (Bucket A): online-only owned roster view with real button groups.
 --   - Consumes ActionPadService rowsOnlineOnly.
@@ -10,6 +10,8 @@
 --   - Bucket C: assistBy/healer selection rule (session-only) wired to ActionPadService.
 --   - Bucket D: dispatches owned-only RemoteExec for real non-placeholder commands, while
 --     placeholder actions remain PLAN-only.
+--   - Bucket F: corrects cleric service row wiring so ActionPad service buttons align with
+--     the agreed service set (Buff / Feed / Heal / PHeal / Rst / Rej).
 --   - Follows UI contracts: shared frame (ui_window + ui_theme) + content kits.
 --
 -- Public API  :
@@ -28,7 +30,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-09A"
+M.VERSION = "v2026-03-09B"
 M.UI_ID = "actionpad_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -61,6 +63,8 @@ local _state = {
         rows = {},
     },
 }
+
+local _render
 
 local function _safeDelete(w)
     pcall(function() U.safeDelete(w) end)
@@ -152,8 +156,10 @@ local function _ensureCreated()
     }, listRoot)
 
     if type(header) == "table" then
-        pcall(function() header:echo(ListKit.toPreHtml(
-            "ActionPad - online-only roster (Bucket D dispatch + plan-only placeholders)")) end)
+        pcall(function()
+            header:echo(ListKit.toPreHtml(
+                "ActionPad - online-only roster (Bucket D dispatch + plan-only placeholders)"))
+        end)
         pcall(ListKit.applySectionHeaderStyle, header)
     end
 
@@ -479,12 +485,12 @@ local function _renderGlobal(topY, rowH, gap, btnW)
                     if ok ~= true then
                         _setStatusLine("[ActionPad] AssistBy Auto failed: " .. tostring(err))
                     else
-                        _setStatusLine("[ActionPad] AssistBy set to AUTO. " .. assistLine)
+                        _setStatusLine("[ActionPad] AssistBy set to AUTO. " .. _assistLabel(_getAssistBy()))
                     end
                 else
                     _setStatusLine("[ActionPad] AssistBy Auto not available (service missing).")
                 end
-                pcall(_render)
+                if type(_render) == "function" then pcall(_render) end
             end,
         },
         {
@@ -503,7 +509,7 @@ local function _renderGlobal(topY, rowH, gap, btnW)
                 else
                     _setStatusLine("[ActionPad] AssistBy Next not available (service missing).")
                 end
-                pcall(_render)
+                if type(_render) == "function" then pcall(_render) end
             end,
         },
     }
@@ -516,7 +522,7 @@ local function _renderGlobal(topY, rowH, gap, btnW)
     _setStatusLine(assistLine)
 end
 
-local function _render()
+_render = function()
     local okA, A = pcall(require, "dwkit.services.actionpad_service")
     if not okA or type(A) ~= "table" or type(A.getRowsOnlineOnly) ~= "function" then
         _setStatusLine("ActionPadService not available.")
@@ -610,19 +616,26 @@ local function _render()
             "DWKit_ActionPad_Ctrl_" .. tostring(i))
 
         local gBless = _gateBestEffort("spell", "bless", "Bless")
+        local gFeed = _gateBestEffort("spell", "feed", "Feed")
         local gHeal = _gateBestEffort("spell", "heal", "Heal")
         local gPHeal = _gateBestEffort("spell", "power heal", "Power Heal")
-        local gRefresh = _gateBestEffort("spell", "refresh", "Refresh")
-        local gFeed = _gateBestEffort("spell", "feed", "Feed")
-        local gRej = _gateBestEffort("spell", "rej", "Rej")
+        local gRestore = _gateBestEffort("spell", "restore", "Restore")
+        local gRej = _gateBestEffort("spell", "rejuvenate", "Rejuvenate")
+
+        local gateBuff = _assistGate(gBless, assist)
+        local gateFeed = _assistGate(gFeed, assist)
+        local gateHeal = _assistGate(gHeal, assist)
+        local gatePHeal = _assistGate(gPHeal, assist)
+        local gateRestore = _assistGate(gRestore, assist)
+        local gateRej = _assistGate(gRej, assist)
 
         local serviceSpecs = {
             {
                 label = "BU",
                 disabledLabel = "BU",
-                disabledGate = _assistGate(gBless, assist),
-                tooltip = _mkTip("BU", "Buff (Bless)", _assistGate(gBless, assist)),
-                enabled = (_assistGate(gBless, assist).enabled == true),
+                disabledGate = gateBuff,
+                tooltip = _mkTip("BU", "Buff (Bless)", gateBuff),
+                enabled = (gateBuff.enabled == true),
                 onClick = function()
                     local ok, err = _dispatchAssistExec(healerName, name, "cast bless {target}", "Buff")
                     if not ok then _setStatusLine("[ActionPad] Buff failed: " .. tostring(err)) end
@@ -631,20 +644,20 @@ local function _render()
             {
                 label = "FD",
                 disabledLabel = "FD",
-                disabledGate = _assistGate(gFeed, assist),
-                tooltip = _mkTip("FD", "Feed", _assistGate(gFeed, assist)),
-                enabled = (_assistGate(gFeed, assist).enabled == true),
+                disabledGate = gateFeed,
+                tooltip = _mkTip("FD", "Feed", gateFeed),
+                enabled = (gateFeed.enabled == true),
                 onClick = function()
-                    local ok, err = _dispatchAssistExec(healerName, name, "[TODO] feed {target}", "Feed")
+                    local ok, err = _dispatchAssistExec(healerName, name, "cast feed {target}", "Feed")
                     if not ok then _setStatusLine("[ActionPad] Feed failed: " .. tostring(err)) end
                 end
             },
             {
                 label = "HL",
                 disabledLabel = "HL",
-                disabledGate = _assistGate(gHeal, assist),
-                tooltip = _mkTip("HL", "Heal", _assistGate(gHeal, assist)),
-                enabled = (_assistGate(gHeal, assist).enabled == true),
+                disabledGate = gateHeal,
+                tooltip = _mkTip("HL", "Heal", gateHeal),
+                enabled = (gateHeal.enabled == true),
                 onClick = function()
                     local ok, err = _dispatchAssistExec(healerName, name, "cast heal {target}", "Heal")
                     if not ok then _setStatusLine("[ActionPad] Heal failed: " .. tostring(err)) end
@@ -653,9 +666,9 @@ local function _render()
             {
                 label = "PH",
                 disabledLabel = "PH",
-                disabledGate = _assistGate(gPHeal, assist),
-                tooltip = _mkTip("PH", "Power Heal", _assistGate(gPHeal, assist)),
-                enabled = (_assistGate(gPHeal, assist).enabled == true),
+                disabledGate = gatePHeal,
+                tooltip = _mkTip("PH", "Power Heal", gatePHeal),
+                enabled = (gatePHeal.enabled == true),
                 onClick = function()
                     local ok, err = _dispatchAssistExec(healerName, name, "cast 'power heal' {target}", "PHeal")
                     if not ok then _setStatusLine("[ActionPad] PHeal failed: " .. tostring(err)) end
@@ -664,22 +677,22 @@ local function _render()
             {
                 label = "RS",
                 disabledLabel = "RS",
-                disabledGate = _assistGate(gRefresh, assist),
-                tooltip = _mkTip("RS", "Refresh", _assistGate(gRefresh, assist)),
-                enabled = (_assistGate(gRefresh, assist).enabled == true),
+                disabledGate = gateRestore,
+                tooltip = _mkTip("RS", "Restore", gateRestore),
+                enabled = (gateRestore.enabled == true),
                 onClick = function()
-                    local ok, err = _dispatchAssistExec(healerName, name, "cast refresh {target}", "Rst")
+                    local ok, err = _dispatchAssistExec(healerName, name, "cast restore {target}", "Rst")
                     if not ok then _setStatusLine("[ActionPad] Rst failed: " .. tostring(err)) end
                 end
             },
             {
                 label = "RJ",
                 disabledLabel = "RJ",
-                disabledGate = _assistGate(gRej, assist),
-                tooltip = _mkTip("RJ", "Rej", _assistGate(gRej, assist)),
-                enabled = (_assistGate(gRej, assist).enabled == true),
+                disabledGate = gateRej,
+                tooltip = _mkTip("RJ", "Rejuvenate", gateRej),
+                enabled = (gateRej.enabled == true),
                 onClick = function()
-                    local ok, err = _dispatchAssistExec(healerName, name, "[TODO] rej {target}", "Rej")
+                    local ok, err = _dispatchAssistExec(healerName, name, "cast rejuvenate {target}", "Rej")
                     if not ok then _setStatusLine("[ActionPad] Rej failed: " .. tostring(err)) end
                 end
             },
