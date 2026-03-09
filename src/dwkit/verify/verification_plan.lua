@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-09D
+-- Version     : v2026-03-09E
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-09D"
+M.VERSION = "v2026-03-09E"
 
 local SUITES = {
     default = {
@@ -182,6 +182,11 @@ local SUITES = {
                 cmd =
                 'lua do local S=require("dwkit.services.skill_registry_service"); local d=S.getDef("double"); local t=S.getDef("triple"); local dw=S.getDef("dual wield"); local dt=S.getDef("detect traps"); if type(d)~="table" or type(t)~="table" or type(dw)~="table" or type(dt)~="table" then error("Expected double/triple/dual wield/detect traps defs") end; if tostring(d.practiceKey)~="double" then error("Expected double def practiceKey=double") end; if tostring(t.practiceKey)~="triple" then error("Expected triple def practiceKey=triple") end; if tostring(dw.practiceKey)~="dual wield" then error("Expected dual wield practiceKey") end; if tostring(dt.practiceKey)~="detect traps" then error("Expected detect traps practiceKey") end; local function hasTag(def,needle) local tags=def.tags or {}; for i=1,#tags do if tostring(tags[i])==needle then return true end end return false end; if hasTag(d,"progression")~=true then error("Expected double progression tag") end; if hasTag(t,"progression")~=true then error("Expected triple progression tag") end; if hasTag(dw,"passive")~=true then error("Expected dual wield passive tag") end; if hasTag(dt,"passive")~=true then error("Expected detect traps passive tag") end; print("[dwverify-skillreg] PASS progression/passive modeling checks") end',
                 note = "ASSERT: progression and passive entries are represented as separate canonical defs.",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.skill_registry_service"); local g=S.getDef("guard"); if type(g)~="table" then error("Expected guard def") end; if tostring(g.classKey)~="warrior" then error("Expected guard classKey=warrior; got "..tostring(g.classKey)) end; if tonumber(g.minLevel or -1)~=19 then error("Expected guard minLevel=19; got "..tostring(g.minLevel)) end; print("[dwverify-skillreg] PASS guard canonical def checks") end',
+                note = "ASSERT: guard resolves to the warrior canonical entry after seed collision removal.",
             },
             { cmd = "dwskills",                       note = "Should print SkillRegistryService summary and list keys (SAFE)." },
             { cmd = "dwskills dump power heal",       note = "Should dump one multi-word entry if parser supports it." },

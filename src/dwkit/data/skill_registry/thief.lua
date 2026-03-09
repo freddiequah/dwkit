@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.data.skill_registry.thief
 -- Owner       : Data
--- Version     : v2026-03-09D
+-- Version     : v2026-03-09E
 -- Purpose     :
 --   - Data-only SkillRegistry raw declarations for Thief entries.
 --   - Owns raw entry tables only.
@@ -19,7 +19,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-09D"
+M.VERSION = "v2026-03-09E"
 
 local ENTRIES = {
     backstab = {
@@ -82,9 +82,9 @@ local ENTRIES = {
         practiceKey = "haggle",
         classKey = "thief",
         kind = "skill",
-        minLevel = 1,
+        minLevel = 10,
         tags = { "passive", "utility" },
-        notes = "Dump-backed automatic thief skill. Current uploaded dump excerpt confirms automatic behavior but not explicit thief level.",
+        notes = "Class help confirms thief level 10.",
     },
     sneak = {
         id = "sneak",
