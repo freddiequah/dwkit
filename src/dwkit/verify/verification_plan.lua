@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-05E
+-- Version     : v2026-03-09A
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-05E"
+M.VERSION = "v2026-03-09A"
 
 local SUITES = {
     default = {
@@ -83,11 +83,10 @@ local SUITES = {
         },
     },
 
-    -- RemoteExec smoke (Objective B)
     remoteexec_smoke = {
         title = "remoteexec_smoke",
         description =
-        "RemoteExec MVP smoke (owned-only, manual-triggered). Deterministic receiver simulation: install service, ensure current profile label is treated as owned (noSave; merge into existing map), then inject a receiver-side SEND (empty allowlist) using test helpers and assert send:not_allowlisted. This avoids relying on raiseGlobalEvent loopback which may not deliver to the same profile in some Mudlet builds.",
+        "RemoteExec Bucket D smoke: install service, ensure current profile label is owned, verify allowlist rejection, then verify allowed SEND captures deterministically via test sink (no gameplay send). Also exercises dwremoteexec command surface.",
         delay = 0.25,
         steps = {
             {
@@ -99,18 +98,36 @@ local SUITES = {
                 cmd =
                 'lua do local O=require("dwkit.config.owned_profiles"); local p=(type(getProfileName)=="function" and getProfileName()) or "unknown-profile"; local before=O.status(); local m=(type(O.getMap)=="function" and O.getMap()) or {}; local merged={}; if type(m)=="table" then for k,v in pairs(m) do merged[k]=v end end; merged["SelfChar"]=tostring(p); local ok,err=O.setMap(merged,{noSave=true}); if ok==false then error("owned_profiles.setMap failed: "..tostring(err)) end; local after=O.status(); print(string.format("[dwverify-remoteexec] ensured SelfChar owned (merge) beforeCount=%s afterCount=%s selfProfile=%s", tostring(before and before.count), tostring(after and after.count), tostring(p))) end',
                 note =
-                "Ensure current profile label is treated as owned (session-only) WITHOUT clobbering an existing owned_profiles map (merge best-effort).",
+                "Ensure current profile label is treated as owned (session-only) WITHOUT clobbering an existing owned_profiles map.",
             },
             {
                 cmd =
-                'lua do local S=require("dwkit.services.remote_exec_service"); S.clearAllowlist(); local p=(type(getProfileName)=="function" and getProfileName()) or "unknown-profile"; local wire=S._testMakeWire(tostring(p),"SEND","say hello",{source="dwverify:remoteexec"}); local ok,err=S._testInjectWire(wire); print(string.format("[dwverify-remoteexec] injected SEND ok=%s err=%s (expect REJECT send:not_allowlisted)", tostring(ok==true), tostring(err))) end',
+                'lua do local S=require("dwkit.services.remote_exec_service"); S.clearAllowlist(); local p=(type(getProfileName)=="function" and getProfileName()) or "unknown-profile"; local wire=S._testMakeWire(tostring(p),"SEND","say hello",{source="dwverify:remoteexec:reject"}); local ok,err=S._testInjectWire(wire); print(string.format("[dwverify-remoteexec] injected SEND reject-path ok=%s err=%s (expect REJECT send:not_allowlisted)", tostring(ok==true), tostring(err))) end',
                 note =
                 "Deterministic receiver simulation: inject SEND to self with empty allowlist; receiver must REJECT send:not_allowlisted.",
             },
             {
                 cmd =
-                'lua do local S=require("dwkit.services.remote_exec_service"); local st=S.status(); local stats=st.stats or {}; print(string.format("[dwverify-remoteexec] stats sends=%s recv=%s rejected=%s lastReject=%s", tostring(stats.sends or 0), tostring(stats.recv or 0), tostring(stats.rejected or 0), tostring(stats.lastReject or "nil"))) if tostring(stats.lastReject or "")~="send:not_allowlisted" then error("Expected lastReject=send:not_allowlisted; got "..tostring(stats.lastReject)) end; print("[dwverify-remoteexec] PASS remoteexec_smoke") end',
-                note = "ASSERT: lastReject must be send:not_allowlisted (proves allowlist gate works).",
+                'lua do local S=require("dwkit.services.remote_exec_service"); local st=S.status(); local stats=st.stats or {}; print(string.format("[dwverify-remoteexec] reject stats sends=%s recv=%s rejected=%s lastReject=%s", tostring(stats.sends or 0), tostring(stats.recv or 0), tostring(stats.rejected or 0), tostring(stats.lastReject or "nil"))) if tostring(stats.lastReject or "")~="send:not_allowlisted" then error("Expected lastReject=send:not_allowlisted; got "..tostring(stats.lastReject)) end end',
+                note = "ASSERT: lastReject must be send:not_allowlisted.",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.remote_exec_service"); local ok1,err1=S._testSetSendSink(function(cmd,env) return true end); if ok1==false then error("testSetSendSink failed: "..tostring(err1)) end; local ok2,err2=S.allowPrefix("cast ",{quiet=true}); if ok2==false then error("allowPrefix failed: "..tostring(err2)) end; local p=(type(getProfileName)=="function" and getProfileName()) or "unknown-profile"; local wire=S._testMakeWire(tostring(p),"SEND","cast heal Alpha",{source="dwverify:remoteexec:allow"}); local ok3,err3=S._testInjectWire(wire); if ok3==false then error("testInjectWire allow-path failed: "..tostring(err3)) end; local cap=S._testGetLastCaptured(); print(string.format("[dwverify-remoteexec] captured cmd=%s from=%s to=%s source=%s", tostring(cap and cap.cmd or "nil"), tostring(cap and cap.fromProfile or "nil"), tostring(cap and cap.toProfile or "nil"), tostring(cap and cap.source or "nil"))) if type(cap)~="table" then error("Expected captured table after allowlisted SEND") end; if tostring(cap.cmd or "")~="cast heal Alpha" then error("Expected captured cmd=cast heal Alpha; got "..tostring(cap.cmd)) end end',
+                note = "ASSERT: allowlisted SEND routes to deterministic capture sink (no gameplay send).",
+            },
+            {
+                cmd = "dwremoteexec can cast heal Alpha",
+                note = "Should print local allowlist gate enabled=true for cast prefix.",
+            },
+            {
+                cmd = "dwremoteexec status",
+                note = "Should show allowPrefixes and test.lastCaptured.",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.remote_exec_service"); S._testSetSendSink(nil); print("[dwverify-remoteexec] PASS remoteexec_smoke") end',
+                note = "Cleanup test sink and print PASS marker.",
             },
             {
                 cmd =
@@ -120,7 +137,6 @@ local SUITES = {
         },
     },
 
-    -- SkillRegistry smoke (Objective: SkillRegistry expansion)
     skill_registry_smoke = {
         title = "skill_registry_smoke",
         description =
@@ -162,7 +178,6 @@ local SUITES = {
         },
     },
 
-    -- NEW: ActionPad gating foundation smoke (Bucket B)
     actionpad_gating_smoke = {
         title = "actionpad_gating_smoke",
         description =
@@ -207,7 +222,6 @@ local SUITES = {
         },
     },
 
-    -- UPDATED: ActionPad gating UI smoke (Bucket B implementation) now uses AssistBy selection (Bucket C)
     actionpad_gating_ui_smoke = {
         title = "actionpad_gating_ui_smoke",
         description =
@@ -249,14 +263,11 @@ local SUITES = {
                 'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("actionpad_ui", true, {noSave=true}); gs.setVisible("actionpad_ui", true, {noSave=true}); local UI=require("dwkit.ui.actionpad_ui"); local ok,err=UI.apply({source="dwverify:actionpad_gating_ui_smoke:show"}); if ok==false then error("actionpad_ui.apply failed: "..tostring(err)) end; local s=UI.getState(); local lr=s.lastRender or {}; print(string.format("[dwverify-actionpad-gui] SHOW visible=%s enabled=%s runtimeVisible=%s rows=%s lastErr=%s", tostring(s.visible), tostring(s.enabled), tostring(s.runtimeVisible), tostring(lr.rowsCount or "nil"), tostring(s.lastError))) end',
                 note = "Show ActionPad UI (console-first).",
             },
-
-            -- FIXED: ok path uses honorSpec=true to avoid registry classKey constraints (verification-only).
             {
                 cmd =
                 'lua do local A=require("dwkit.services.actionpad_service"); local g=A.resolveActionGate({kind="spell",practiceKey="heal",displayName="Heal",classKey="",minLevel=1},{honorSpec=true}); print(string.format("[dwverify-actionpad-gui] gate heal(ok via honorSpec) enabled=%s reason=%s detail=%s", tostring(g.enabled==true), tostring(g.reason), tostring(g.detail))) if g.enabled~=true then error("Expected heal enabled=true; got reason="..tostring(g.reason)) end; if tostring(g.reason)~="ok" then error("Expected heal reason=ok; got "..tostring(g.reason)) end end',
                 note = "ASSERT: ok (verification-only override; UI default still respects registry constraints).",
             },
-
             {
                 cmd =
                 'lua do local A=require("dwkit.services.actionpad_service"); local g=A.resolveActionGate({kind="spell",practiceKey="power heal",displayName="Power Heal"}); print(string.format("[dwverify-actionpad-gui] gate power heal enabled=%s reason=%s detail=%s", tostring(g.enabled==true), tostring(g.reason), tostring(g.detail))) if g.enabled~=false then error("Expected power heal enabled=false") end; if tostring(g.reason)~="not_learned" then error("Expected power heal reason=not_learned; got "..tostring(g.reason)) end end',
@@ -295,7 +306,6 @@ local SUITES = {
         },
     },
 
-    -- NEW: ActionPad healer/assistBy selection smoke (Bucket C)
     actionpad_healer_select_smoke = {
         title = "actionpad_healer_select_smoke",
         description =
@@ -350,7 +360,6 @@ local SUITES = {
         },
     },
 
-    -- NEW: ActionPadService smoke (Objective: ActionPadService MVP)
     actionpad_service_smoke = {
         title = "actionpad_service_smoke",
         description =
@@ -380,11 +389,10 @@ local SUITES = {
         },
     },
 
-    -- NEW: ActionPad UI smoke (Objective: ActionPad UI MVP)
     actionpad_ui_smoke = {
         title = "actionpad_ui_smoke",
         description =
-        "ActionPad UI smoke: deterministic seed (owned_profiles + PresenceService + ActionPadService.recompute), then enable+show actionpad_ui via gui_settings and apply(); print state; then hide via gui_settings and apply() again. Console-first (no screenshots). Buttons remain PLAN-only (no sends).",
+        "ActionPad UI smoke: deterministic seed (owned_profiles + PresenceService + ActionPadService.recompute), then enable+show actionpad_ui via gui_settings and apply(); print state; then hide via gui_settings and apply() again. Console-first (no screenshots). Bucket D dispatch is present, but placeholders remain PLAN-only.",
         delay = 0.25,
         steps = {
             {
@@ -414,7 +422,7 @@ local SUITES = {
             },
             {
                 cmd =
-                'lua do print("[dwverify-actionpad-ui] VISUAL CHECK: ActionPad window appears, shows Alpha/Beta rows, and buttons are PLAN-only (no sends).") end',
+                'lua do print("[dwverify-actionpad-ui] VISUAL CHECK: ActionPad window appears, shows Alpha/Beta rows, and placeholders still print PLAN while real service spells can dispatch when receiver allowlisted.") end',
                 note = "Human visual PASS/FAIL gate.",
             },
         },
