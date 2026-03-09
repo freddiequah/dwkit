@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-09C
+-- Version     : v2026-03-09D
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-09C"
+M.VERSION = "v2026-03-09D"
 
 local SUITES = {
     default = {
@@ -140,7 +140,7 @@ local SUITES = {
     skill_registry_smoke = {
         title = "skill_registry_smoke",
         description =
-        "SkillRegistry smoke: assert Phase 1 structural split baseline, canonical kind set, alias lookup, class normalization, validateAll PASS, and ActionPad-backed coverage keys exist. Also confirms dwskills prints without error.",
+        "SkillRegistry smoke: assert Phase 2 dump-backed cleric/warrior/thief enrichment baseline, canonical kind set, alias lookup, class normalization, validateAll PASS, and ActionPad-backed coverage keys exist. Also confirms dwskills prints without error.",
         delay = 0.20,
         steps = {
             {
@@ -150,8 +150,8 @@ local SUITES = {
             },
             {
                 cmd =
-                'lua do local C=require("dwkit.data.skill_registry.cleric"); local W=require("dwkit.data.skill_registry.warrior"); local T=require("dwkit.data.skill_registry.thief"); local X=require("dwkit.data.skill_registry.seed_misc"); local c=C.getEntries(); local w=W.getEntries(); local t=T.getEntries(); local x=X.getEntries(); local function cnt(m) local n=0; for _ in pairs(m or {}) do n=n+1 end; return n end; print(string.format("[dwverify-skillreg] data modules cleric=%s warrior=%s thief=%s seed_misc=%s", tostring(cnt(c)), tostring(cnt(w)), tostring(cnt(t)), tostring(cnt(x)))) if cnt(c) < 10 then error("Expected cleric module entries >= 10") end; if cnt(w) < 5 then error("Expected warrior module entries >= 5") end; if cnt(t) < 1 then error("Expected thief module entries >= 1") end; if cnt(x) < 5 then error("Expected seed_misc module entries >= 5") end; print("[dwverify-skillreg] PASS data modules load") end',
-                note = "ASSERT: Phase 1 split modules load and contain expected baseline content.",
+                'lua do local C=require("dwkit.data.skill_registry.cleric"); local W=require("dwkit.data.skill_registry.warrior"); local T=require("dwkit.data.skill_registry.thief"); local X=require("dwkit.data.skill_registry.seed_misc"); local c=C.getEntries(); local w=W.getEntries(); local t=T.getEntries(); local x=X.getEntries(); local function cnt(m) local n=0; for _ in pairs(m or {}) do n=n+1 end; return n end; print(string.format("[dwverify-skillreg] data modules cleric=%s warrior=%s thief=%s seed_misc=%s", tostring(cnt(c)), tostring(cnt(w)), tostring(cnt(t)), tostring(cnt(x)))) if cnt(c) < 35 then error("Expected cleric module entries >= 35") end; if cnt(w) < 13 then error("Expected warrior module entries >= 13") end; if cnt(t) < 13 then error("Expected thief module entries >= 13") end; if cnt(x) < 5 then error("Expected seed_misc module entries >= 5") end; print("[dwverify-skillreg] PASS data modules load") end',
+                note = "ASSERT: Phase 2 class modules load and contain expected dump-backed content.",
             },
             {
                 cmd =
@@ -160,27 +160,34 @@ local SUITES = {
             },
             {
                 cmd =
-                'lua do local S=require("dwkit.services.skill_registry_service"); local reg=S.getRegistry(); if type(reg)~="table" then error("Expected registry table") end; local required={"heal","power heal","refresh","feed","restore","rejuvenate","summon","relocate","group armor","group recall","group heal","group rejuvenate","group power heal","assist","kick","bash","pummel","circle","guard","rescue","anti-paladin example"}; for i=1,#required do local k=required[i]; if type(reg[k])~="table" then error("Expected required registry key present: "..tostring(k)) end end; local def=reg["anti-paladin example"]; if tostring(def.classKey)~="anti-paladin" then error("Expected classKey anti-paladin; got "..tostring(def.classKey)) end; print(string.format("[dwverify-skillreg] PASS required ActionPad coverage keys=%s", tostring(#required))) end',
-                note = "ASSERT: required ActionPad-backed keys exist; anti-paladin remains hyphen-preserved.",
+                'lua do local S=require("dwkit.services.skill_registry_service"); local reg=S.getRegistry(); if type(reg)~="table" then error("Expected registry table") end; local required={"heal","power heal","refresh","feed","restore","rejuvenate","summon","relocate","group armor","group recall","group heal","group rejuvenate","group power heal","assist","kick","bash","pummel","circle","guard","rescue","backstab","detect traps","dual wield","dodge","anti-paladin example"}; for i=1,#required do local k=required[i]; if type(reg[k])~="table" then error("Expected required registry key present: "..tostring(k)) end end; local def=reg["anti-paladin example"]; if tostring(def.classKey)~="anti-paladin" then error("Expected classKey anti-paladin; got "..tostring(def.classKey)) end; print(string.format("[dwverify-skillreg] PASS required coverage keys=%s", tostring(#required))) end',
+                note = "ASSERT: required baseline and new dump-backed keys exist; anti-paladin remains hyphen-preserved.",
             },
             {
                 cmd =
-                'lua do local S=require("dwkit.services.skill_registry_service"); local def=S.resolveByPracticeKey("Power   Heal"); if not def then error("Expected resolveByPracticeKey Power Heal to find entry") end; if tostring(def.practiceKey)~="power heal" then error("Expected practiceKey power heal; got "..tostring(def.practiceKey)) end; local def2=S.resolveByAlias("PHEAL"); if not def2 then error("Expected resolveByAlias PHEAL to find entry") end; if tostring(def2.practiceKey)~="power heal" then error("Expected alias to resolve to power heal; got "..tostring(def2.practiceKey)) end; local def3=S.resolveByAlias("GPH"); if not def3 then error("Expected resolveByAlias GPH to find entry") end; if tostring(def3.practiceKey)~="group power heal" then error("Expected alias to resolve to group power heal; got "..tostring(def3.practiceKey)) end; local def4=S.resolveByAlias("RST"); if not def4 then error("Expected resolveByAlias RST to find entry") end; if tostring(def4.practiceKey)~="restore" then error("Expected alias to resolve to restore; got "..tostring(def4.practiceKey)) end; print("[dwverify-skillreg] PASS resolveByPracticeKey + resolveByAlias") end',
-                note = "ASSERT: practiceKey normalization and alias lookup work for expanded ActionPad entries.",
+                'lua do local S=require("dwkit.services.skill_registry_service"); local def=S.resolveByPracticeKey("Power   Heal"); if not def then error("Expected resolveByPracticeKey Power Heal to find entry") end; if tostring(def.practiceKey)~="power heal" then error("Expected practiceKey power heal; got "..tostring(def.practiceKey)) end; local def2=S.resolveByAlias("PHEAL"); if not def2 then error("Expected resolveByAlias PHEAL to find entry") end; if tostring(def2.practiceKey)~="power heal" then error("Expected alias to resolve to power heal; got "..tostring(def2.practiceKey)) end; local def3=S.resolveByAlias("GPH"); if not def3 then error("Expected resolveByAlias GPH to find entry") end; if tostring(def3.practiceKey)~="group power heal" then error("Expected alias to resolve to group power heal; got "..tostring(def3.practiceKey)) end; local def4=S.resolveByAlias("RST"); if not def4 then error("Expected resolveByAlias RST to find entry") end; if tostring(def4.practiceKey)~="restore" then error("Expected alias to resolve to restore; got "..tostring(def4.practiceKey)) end; local def5=S.resolveByAlias("REJUVINATE"); if not def5 then error("Expected resolveByAlias REJUVINATE to find entry") end; if tostring(def5.practiceKey)~="rejuvenate" then error("Expected alias to resolve to rejuvenate; got "..tostring(def5.practiceKey)) end; local def6=S.resolveByAlias("DUALWIELD"); if not def6 then error("Expected resolveByAlias DUALWIELD to find entry") end; if tostring(def6.practiceKey)~="dual wield" then error("Expected alias to resolve to dual wield; got "..tostring(def6.practiceKey)) end; print("[dwverify-skillreg] PASS resolveByPracticeKey + resolveByAlias") end',
+                note = "ASSERT: practiceKey normalization and alias lookup work for cleric and thief enrichments.",
             },
             {
                 cmd =
-                'lua do local S=require("dwkit.services.skill_registry_service"); local ck,err=S.normalizeClassKey("APAL"); if not ck then error("normalizeClassKey(APAL) failed: "..tostring(err)) end; if ck~="anti-paladin" then error("Expected anti-paladin; got "..tostring(ck)) end; local list=S.listByClass("cleric","spell"); if type(list)~="table" then error("Expected list table") end; if #list < 12 then error("Expected >=12 cleric spell entries; got "..tostring(#list)) end; print(string.format("[dwverify-skillreg] PASS class normalization + cleric spell count=%s", tostring(#list))) end',
-                note = "ASSERT: class normalization preserves hyphen and expanded cleric spell coverage exists.",
+                'lua do local S=require("dwkit.services.skill_registry_service"); local ck,err=S.normalizeClassKey("APAL"); if not ck then error("normalizeClassKey(APAL) failed: "..tostring(err)) end; if ck~="anti-paladin" then error("Expected anti-paladin; got "..tostring(ck)) end; local list=S.listByClass("cleric","spell"); if type(list)~="table" then error("Expected list table") end; if #list < 35 then error("Expected >=35 cleric spell entries; got "..tostring(#list)) end; local list2=S.listByClass("thief","skill"); if type(list2)~="table" then error("Expected thief list table") end; if #list2 < 13 then error("Expected >=13 thief skill entries; got "..tostring(#list2)) end; print(string.format("[dwverify-skillreg] PASS class normalization + cleric spells=%s thief skills=%s", tostring(#list), tostring(#list2))) end',
+                note = "ASSERT: class normalization preserves hyphen and dump-backed cleric/thief coverage exists.",
             },
             {
                 cmd =
-                'lua do local S=require("dwkit.services.skill_registry_service"); local kinds={"skill","spell","race","weapon"}; for i=1,#kinds do local k=kinds[i]; local list=S.listByKind(k); if type(list)~="table" then error("Expected listByKind("..k..") returns table") end end; local st=S.getStats(); if tonumber(st.entries or 0) < 30 then error("Expected expanded baseline entries >= 30; got "..tostring(st.entries)) end; local s=S.listByKind("spell"); local sk=S.listByKind("skill"); local r=S.listByKind("race"); local w=S.listByKind("weapon"); if #s < 14 then error("Expected >=14 spells; got "..tostring(#s)) end; if #sk < 10 then error("Expected >=10 skills; got "..tostring(#sk)) end; if #r < 1 then error("Expected >=1 race entry; got "..tostring(#r)) end; if #w < 2 then error("Expected >=2 weapon entries; got "..tostring(#w)) end; print(string.format("[dwverify-skillreg] PASS coverage spells=%s skills=%s race=%s weapon=%s", tostring(#s), tostring(#sk), tostring(#r), tostring(#w))) end',
-                note = "ASSERT: minimum coverage counts per kind for Bucket E baseline.",
+                'lua do local S=require("dwkit.services.skill_registry_service"); local kinds={"skill","spell","race","weapon"}; for i=1,#kinds do local k=kinds[i]; local list=S.listByKind(k); if type(list)~="table" then error("Expected listByKind("..k..") returns table") end end; local st=S.getStats(); if tonumber(st.entries or 0) < 55 then error("Expected expanded baseline entries >= 55; got "..tostring(st.entries)) end; local s=S.listByKind("spell"); local sk=S.listByKind("skill"); local r=S.listByKind("race"); local w=S.listByKind("weapon"); if #s < 35 then error("Expected >=35 spells; got "..tostring(#s)) end; if #sk < 20 then error("Expected >=20 skills; got "..tostring(#sk)) end; if #r < 1 then error("Expected >=1 race entry; got "..tostring(#r)) end; if #w < 2 then error("Expected >=2 weapon entries; got "..tostring(#w)) end; print(string.format("[dwverify-skillreg] PASS coverage spells=%s skills=%s race=%s weapon=%s", tostring(#s), tostring(#sk), tostring(#r), tostring(#w))) end',
+                note = "ASSERT: minimum coverage counts per kind for Phase 2 baseline.",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.skill_registry_service"); local d=S.getDef("double"); local t=S.getDef("triple"); local dw=S.getDef("dual wield"); local dt=S.getDef("detect traps"); if type(d)~="table" or type(t)~="table" or type(dw)~="table" or type(dt)~="table" then error("Expected double/triple/dual wield/detect traps defs") end; if tostring(d.practiceKey)~="double" then error("Expected double def practiceKey=double") end; if tostring(t.practiceKey)~="triple" then error("Expected triple def practiceKey=triple") end; if tostring(dw.practiceKey)~="dual wield" then error("Expected dual wield practiceKey") end; if tostring(dt.practiceKey)~="detect traps" then error("Expected detect traps practiceKey") end; local function hasTag(def,needle) local tags=def.tags or {}; for i=1,#tags do if tostring(tags[i])==needle then return true end end return false end; if hasTag(d,"progression")~=true then error("Expected double progression tag") end; if hasTag(t,"progression")~=true then error("Expected triple progression tag") end; if hasTag(dw,"passive")~=true then error("Expected dual wield passive tag") end; if hasTag(dt,"passive")~=true then error("Expected detect traps passive tag") end; print("[dwverify-skillreg] PASS progression/passive modeling checks") end',
+                note = "ASSERT: progression and passive entries are represented as separate canonical defs.",
             },
             { cmd = "dwskills",                       note = "Should print SkillRegistryService summary and list keys (SAFE)." },
             { cmd = "dwskills dump power heal",       note = "Should dump one multi-word entry if parser supports it." },
             { cmd = "dwskills dump group power heal", note = "Should dump one multi-word group entry if parser supports it." },
+            { cmd = "dwskills dump dual wield",       note = "Should dump passive multi-word thief entry." },
+            { cmd = "dwskills dump detect traps",     note = "Should dump passive thief entry." },
         },
     },
 
