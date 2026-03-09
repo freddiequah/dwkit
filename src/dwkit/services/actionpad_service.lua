@@ -2,18 +2,20 @@
 -- #########################################################################
 -- Module Name : dwkit.services.actionpad_service
 -- Owner       : Services
--- Version     : v2026-03-05D
+-- Version     : v2026-03-09A
 -- Purpose     :
 --   - SAFE ActionPadService (data only).
 --   - Produces "online-only" roster rows for ActionPad UI, based on PresenceService
 --     roster when available (preferred), otherwise best-effort fallback to owned_profiles
 --     + CPC local-online + WhoStore online.
---   - Provides deterministic planning helpers for RemoteExec, WITHOUT sending.
+--   - Provides deterministic planning helpers for RemoteExec.
+--   - Provides deterministic dispatch helpers for RemoteExec (Bucket D), WITHOUT UI,
+--     WITHOUT persistence, manual-triggered only.
 --   - Provides deterministic gating helpers for ActionPad UI (Practice/Score/Registry),
 --     WITHOUT sending.
 --   - Provides deterministic assistBy/healer selection helpers for ActionPad UI (Bucket C),
 --     WITHOUT sending, WITHOUT persistence.
---   - No UI, no persistence, no timers, no send().
+--   - No UI, no persistence, no timers.
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -32,10 +34,28 @@
 --   - setAssistBySelected(name, opts?) -> boolean ok, string|nil err
 --   - cycleAssistBy(delta, opts?) -> string|nil resolvedName, string|nil err
 --
--- Planning only (NO SEND):
+-- Planning only:
 --   - planSelfExec(characterName, cmd, opts?) -> table|nil plan, string|nil err
 --   - planAssistExec(healerName, targetName, cmdTemplate, opts?) -> table|nil plan, string|nil err
 --     cmdTemplate MUST contain "{target}" placeholder.
+--
+-- Dispatch (Bucket D; manual-triggered only):
+--   - dispatchSelfExec(characterName, cmd, opts?) -> table|nil result, string|nil err
+--   - dispatchAssistExec(healerName, targetName, cmdTemplate, opts?) -> table|nil result, string|nil err
+--     result:
+--       {
+--         kind="remoteexec_dispatch",
+--         action="SEND",
+--         dispatched=true|false,
+--         mode="dispatch|plan_only",
+--         reason="ok|todo_placeholder",
+--         detail=string,
+--         targetProfile=...,
+--         cmd=...,
+--         source=...,
+--         healerName?,
+--         targetName?
+--       }
 --
 -- Gating (NO SEND):
 --   - resolveActionGate(spec, opts?) -> table gate
@@ -53,12 +73,13 @@
 --                    dwkit.services.cross_profile_comm_service (fallback),
 --                    dwkit.services.practice_store_service (best-effort),
 --                    dwkit.services.score_store_service (best-effort),
---                    dwkit.services.skill_registry_service (best-effort)
+--                    dwkit.services.skill_registry_service (best-effort),
+--                    dwkit.services.remote_exec_service (best-effort; Bucket D)
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-03-05D"
+M.VERSION = "v2026-03-09A"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -73,14 +94,13 @@ local STATE = {
     lastSource = nil,
     lastErr = nil,
 
-    -- Bucket C: assistBy/healer selection (session-only; no persistence)
     assistBy = {
-        mode = "auto",          -- "auto" | "manual"
-        selectedName = nil,     -- manual selection (may be offline)
-        resolvedName = nil,     -- computed (must be online if present)
-        resolvedOnline = false, -- computed
-        candidates = {},        -- sorted online owned names
-        lastReason = nil,       -- last resolution note (diagnostic)
+        mode = "auto",
+        selectedName = nil,
+        resolvedName = nil,
+        resolvedOnline = false,
+        candidates = {},
+        lastReason = nil,
     },
 }
 
@@ -169,6 +189,20 @@ local function _countMap(t)
     return n
 end
 
+local function _isTodoCmd(cmd)
+    cmd = _trim(cmd)
+    if cmd == "" then return false end
+    return (_trim(cmd):match("^%[TODO%]") ~= nil)
+end
+
+local function _getRemoteExecBestEffort()
+    local okR, R = _safeRequire("dwkit.services.remote_exec_service")
+    if not okR or type(R) ~= "table" then
+        return nil, "remote_exec_service not available"
+    end
+    return R, nil
+end
+
 -- -------------------------------------------------------------------------
 -- Owned profiles mapping (authoritative for "my profiles")
 -- -------------------------------------------------------------------------
@@ -204,8 +238,6 @@ end
 
 -- -------------------------------------------------------------------------
 -- Presence parsing (preferred source)
--- PresenceService.myProfilesOnline lines look like:
---   "Alpha (Profile-A) [ONLINE] [HERE]"
 -- -------------------------------------------------------------------------
 
 local function _parsePresenceLine(line)
@@ -234,7 +266,6 @@ local function _parsePresenceLine(line)
     }
 end
 
--- NEW: robust HERE matching using PresenceService.myProfilesHere (authoritative for "here")
 local function _buildHereSets(st)
     local byKey = {}
     local byLabel = {}
@@ -247,7 +278,6 @@ local function _buildHereSets(st)
             byKey[k] = true
             byLabel[tostring(r.profileLabel)] = true
         else
-            -- If parsing fails, still try label-only extraction:
             local s = _trim(list[i])
             local _, lbl = s:match("^(.+)%s%((.+)%)")
             if lbl and _trim(lbl) ~= "" then
@@ -281,11 +311,9 @@ local function _rowsFromPresenceBestEffort()
     end
 
     if #rows == 0 then
-        -- Presence may be stale or uninitialized; still return empty (not error)
         return {}, nil
     end
 
-    -- Apply HERE overrides from myProfilesHere (fixes suite determinism)
     do
         local hereByKey, hereByLabel = _buildHereSets(st)
         for i = 1, #rows do
@@ -297,7 +325,6 @@ local function _rowsFromPresenceBestEffort()
         end
     end
 
-    -- Deterministic ordering
     table.sort(rows, function(a, b)
         local la = tostring(a.name or ""):lower()
         local lb = tostring(b.name or ""):lower()
@@ -309,7 +336,7 @@ local function _rowsFromPresenceBestEffort()
 end
 
 -- -------------------------------------------------------------------------
--- Fallback online detection (only if Presence not available)
+-- Fallback online detection
 -- -------------------------------------------------------------------------
 
 local function _isLocalProfileOnlineBestEffort(profileLabel)
@@ -386,7 +413,7 @@ local function _rowsFromFallbackBestEffort()
 end
 
 -- -------------------------------------------------------------------------
--- Bucket C: assistBy/healer selection (SAFE; no send; session-only)
+-- Bucket C: assistBy/healer selection
 -- -------------------------------------------------------------------------
 
 local function _assistByBuildCandidates()
@@ -438,7 +465,6 @@ local function _assistByResolve()
         return nil
     end
 
-    -- auto (default): first candidate (deterministic)
     if type(st.candidates) == "table" and #st.candidates > 0 then
         st.resolvedName = tostring(st.candidates[1])
         st.resolvedOnline = true
@@ -478,7 +504,6 @@ function M.setAssistBySelected(name, opts)
         return false, "setAssistBySelected(name): name invalid"
     end
 
-    -- Must be an owned name (mapped); selection may still be offline later.
     local _, err = M.resolveOwnedProfileLabel(name)
     if err then
         return false, "setAssistBySelected: " .. tostring(err)
@@ -541,7 +566,7 @@ function M.cycleAssistBy(delta, opts)
 end
 
 -- -------------------------------------------------------------------------
--- Gating helpers (SAFE; no send)
+-- Gating helpers
 -- -------------------------------------------------------------------------
 
 local function _normalizePracticeKeyBestEffort(raw)
@@ -582,7 +607,6 @@ local function _skillRegistryResolveBestEffort(kind, practiceKey)
         return nil
     end
 
-    -- Best-effort kind match: if kind is provided and def.kind conflicts, treat as not found.
     if kind ~= "" and tostring(def.kind or "") ~= "" then
         if tostring(def.kind) ~= kind then
             return nil
@@ -648,7 +672,6 @@ local function _mkGate(enabled, reason, detail)
     }
 end
 
--- Public: resolve deterministic gate for an action spec (SAFE; no send)
 function M.resolveActionGate(spec, opts)
     spec = (type(spec) == "table") and spec or {}
     opts = (type(opts) == "table") and opts or {}
@@ -670,7 +693,6 @@ function M.resolveActionGate(spec, opts)
     if type(def) == "table" then
         local honorSpec = (opts.honorSpec == true)
 
-        -- Only override from registry if honorSpec is not enabled, OR the spec field was not provided at all.
         if honorSpec ~= true or rawSpecMin == nil then
             if tonumber(def.minLevel) ~= nil then wantMinLevel = tonumber(def.minLevel) end
         end
@@ -682,7 +704,6 @@ function M.resolveActionGate(spec, opts)
     end
     if displayName == "" then displayName = practiceKey end
 
-    -- Practice gate is always evaluated (manual-only; may be unknown_stale)
     local pst = _practiceLearnStatusBestEffort(kind, practiceKey)
 
     if tostring(pst.reason or "") == "unknown_stale" then
@@ -703,7 +724,6 @@ function M.resolveActionGate(spec, opts)
         return g
     end
 
-    -- If practice store indicates other non-ok reasons (not_listed, bad_kind, bad_key, etc.)
     if pst.ok ~= true or tostring(pst.reason or "") ~= "ok" then
         local g = _mkGate(false, "not_listed", "Not listed in PracticeStore: " .. tostring(displayName))
         g.learned = (pst.learned == true)
@@ -713,7 +733,6 @@ function M.resolveActionGate(spec, opts)
         return g
     end
 
-    -- If registry/spec requires score (minLevel/classKey), we must have score core ok
     local scoreNeeded = false
     if tonumber(wantMinLevel) ~= nil then scoreNeeded = true end
     if wantClassKey ~= "" then scoreNeeded = true end
@@ -834,7 +853,6 @@ function M.recompute(opts)
     STATE.lastSource = used
     STATE.lastErr = nil
 
-    -- refresh assistBy resolution on roster change (no persistence)
     _assistByResolve()
 
     local okEmit, errEmit = _emit({ recompute = true, sourceUsed = used }, source)
@@ -846,7 +864,6 @@ function M.recompute(opts)
     return true, nil
 end
 
--- Planning only: NO send, NO raiseGlobalEvent.
 local function _validateCmdSingleLine(cmd)
     cmd = tostring(cmd or "")
     cmd = _trim(cmd)
@@ -931,11 +948,102 @@ function M.planAssistExec(healerName, targetName, cmdTemplate, opts)
     }, nil
 end
 
+function M.dispatchSelfExec(characterName, cmd, opts)
+    opts = (type(opts) == "table") and opts or {}
+    local plan, errPlan = M.planSelfExec(characterName, cmd, opts)
+    if not plan then
+        return nil, tostring(errPlan)
+    end
+
+    if _isTodoCmd(plan.cmd) == true then
+        return {
+            kind = "remoteexec_dispatch",
+            action = "SEND",
+            dispatched = false,
+            mode = "plan_only",
+            reason = "todo_placeholder",
+            detail = "Placeholder command remains PLAN-only",
+            targetProfile = tostring(plan.targetProfile),
+            cmd = tostring(plan.cmd),
+            source = tostring(plan.source),
+        }, nil
+    end
+
+    local R, errR = _getRemoteExecBestEffort()
+    if not R then
+        return nil, tostring(errR)
+    end
+
+    local okSend, errSend = R.send(plan.targetProfile, plan.cmd, { source = plan.source })
+    if okSend ~= true then
+        return nil, "dispatchSelfExec: " .. tostring(errSend)
+    end
+
+    return {
+        kind = "remoteexec_dispatch",
+        action = "SEND",
+        dispatched = true,
+        mode = "dispatch",
+        reason = "ok",
+        detail = "Delivery attempted via RemoteExecService.send; receiver allowlist still applies",
+        targetProfile = tostring(plan.targetProfile),
+        cmd = tostring(plan.cmd),
+        source = tostring(plan.source),
+    }, nil
+end
+
+function M.dispatchAssistExec(healerName, targetName, cmdTemplate, opts)
+    opts = (type(opts) == "table") and opts or {}
+    local plan, errPlan = M.planAssistExec(healerName, targetName, cmdTemplate, opts)
+    if not plan then
+        return nil, tostring(errPlan)
+    end
+
+    if _isTodoCmd(plan.cmd) == true then
+        return {
+            kind = "remoteexec_dispatch",
+            action = "SEND",
+            dispatched = false,
+            mode = "plan_only",
+            reason = "todo_placeholder",
+            detail = "Placeholder command remains PLAN-only",
+            targetProfile = tostring(plan.targetProfile),
+            cmd = tostring(plan.cmd),
+            healerName = tostring(plan.healerName or ""),
+            targetName = tostring(plan.targetName or ""),
+            source = tostring(plan.source),
+        }, nil
+    end
+
+    local R, errR = _getRemoteExecBestEffort()
+    if not R then
+        return nil, tostring(errR)
+    end
+
+    local okSend, errSend = R.send(plan.targetProfile, plan.cmd, { source = plan.source })
+    if okSend ~= true then
+        return nil, "dispatchAssistExec: " .. tostring(errSend)
+    end
+
+    return {
+        kind = "remoteexec_dispatch",
+        action = "SEND",
+        dispatched = true,
+        mode = "dispatch",
+        reason = "ok",
+        detail = "Delivery attempted via RemoteExecService.send; receiver allowlist still applies",
+        targetProfile = tostring(plan.targetProfile),
+        cmd = tostring(plan.cmd),
+        healerName = tostring(plan.healerName or ""),
+        targetName = tostring(plan.targetName or ""),
+        source = tostring(plan.source),
+    }, nil
+end
+
 function M.onUpdated(handlerFn)
     return BUS.on(EV_UPDATED, handlerFn)
 end
 
--- Seed initial state (no emit)
 do
     STATE.rowsOnline = {}
     _assistByResolve()

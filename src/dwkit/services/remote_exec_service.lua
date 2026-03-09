@@ -2,12 +2,14 @@
 -- #########################################################################
 -- Module Name : dwkit.services.remote_exec_service
 -- Owner       : Services
--- Version     : v2026-03-03E
+-- Version     : v2026-03-09A
 -- Purpose     :
 --   - Owned-only remote execution transport across profiles in the SAME Mudlet instance.
 --   - Manual-triggered only: does not create timers, does not poll, does not auto-send.
 --   - String-only transport using raiseGlobalEvent (Mudlet compat: avoid table args).
---   - Provides SAFE "PING" (prints on target profile) and gated "SEND" (sendToMud) via allowlist.
+--   - Provides SAFE "PING" (prints on target) and gated "SEND" (sendToMud) via allowlist.
+--   - Provides deterministic test capture sink for dwverify, so SEND routing can be
+--     validated without sending gameplay commands to the MUD.
 --
 -- IMPORTANT:
 --   - This module does NOT reuse dwkit.services.cross_profile_comm_service decoding because CPC does not
@@ -27,10 +29,15 @@
 --   - allowPrefix(prefix, opts?) -> boolean ok, string|nil err
 --   - clearAllowlist() -> boolean ok
 --   - getAllowlist() -> string[] (sorted)
+--   - canSend(cmd) -> gate
+--       gate: { enabled, reason, detail, cmd }
 --
 -- Test helpers (SAFE; session-only; deterministic receiver simulation):
 --   - _testMakeWire(toProfile, action, cmd?, opts?) -> string wire
 --   - _testInjectWire(wire) -> boolean ok, string|nil err
+--   - _testSetSendSink(fn|nil) -> boolean ok, string|nil err
+--       * when set, receiver SEND calls fn(cmd, env) instead of send(cmd)
+--   - _testGetLastCaptured() -> table|nil copy
 --
 -- Events Emitted   : None (transport-level only)
 -- Events Consumed  : Mudlet global event: DWKit:RemoteExec:Msg
@@ -41,7 +48,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-03E"
+M.VERSION = "v2026-03-09A"
 
 local ID = require("dwkit.core.identity")
 local Owned = require("dwkit.config.owned_profiles")
@@ -67,6 +74,11 @@ local STATE = {
         -- allow prefixes for SEND commands (string match startsWith)
         -- default empty: sendToMud is blocked until explicitly allowlisted.
         prefixes = {},
+    },
+
+    test = {
+        sendSink = nil,     -- function(cmd, env) or nil
+        lastCaptured = nil, -- { ts, cmd, fromProfile, toProfile, action, source }
     },
 }
 
@@ -148,6 +160,18 @@ local function _startsWith(s, prefix)
     return s:sub(1, #prefix) == prefix
 end
 
+local function _copyCaptured(v)
+    if type(v) ~= "table" then return nil end
+    return {
+        ts = v.ts,
+        cmd = v.cmd,
+        fromProfile = v.fromProfile,
+        toProfile = v.toProfile,
+        action = v.action,
+        source = v.source,
+    }
+end
+
 -- -------------------------------------------------------------------------
 -- Owned-only enforcement helpers
 -- -------------------------------------------------------------------------
@@ -161,9 +185,6 @@ local function _ownedProfileLabelsSet()
         if Owned.isLoaded() ~= true then
             pcall(Owned.load, { quiet = true })
         end
-    else
-        -- Best-effort fallback (older interface): avoid forcing load repeatedly.
-        -- Owned.getMap() already does best-effort load if needed.
     end
 
     local map = Owned.getMap()
@@ -296,6 +317,45 @@ local function _isCmdAllowed(cmd)
     return false
 end
 
+function M.canSend(cmd)
+    cmd = tostring(cmd or "")
+    cmd = _trim(cmd)
+
+    if cmd == "" then
+        return {
+            enabled = false,
+            reason = "cmd_empty",
+            detail = "Command is empty",
+            cmd = cmd,
+        }
+    end
+
+    if cmd:find("\n", 1, true) or cmd:find("\r", 1, true) then
+        return {
+            enabled = false,
+            reason = "cmd_multiline",
+            detail = "Command must be single-line",
+            cmd = cmd,
+        }
+    end
+
+    if _isCmdAllowed(cmd) ~= true then
+        return {
+            enabled = false,
+            reason = "not_allowlisted",
+            detail = "Command prefix is not allowlisted on receiver profile",
+            cmd = cmd,
+        }
+    end
+
+    return {
+        enabled = true,
+        reason = "ok",
+        detail = "Command prefix allowlisted",
+        cmd = cmd,
+    }
+end
+
 -- -------------------------------------------------------------------------
 -- Receiver behavior
 -- -------------------------------------------------------------------------
@@ -330,6 +390,17 @@ local function _handlePing(env)
     return true
 end
 
+local function _captureSend(cmd, env)
+    STATE.test.lastCaptured = {
+        ts = os.time(),
+        cmd = tostring(cmd or ""),
+        fromProfile = tostring(env and env.fromProfile or ""),
+        toProfile = tostring(env and env.toProfile or ""),
+        action = tostring(env and env.action or ""),
+        source = tostring(env and env.source or ""),
+    }
+end
+
 local function _handleSend(env)
     local cmd = tostring(env.cmd or "")
     cmd = _trim(cmd)
@@ -338,14 +409,22 @@ local function _handleSend(env)
         return _reject("send:cmd_empty", env)
     end
 
-    -- Single-line enforcement
     if cmd:find("\n", 1, true) or cmd:find("\r", 1, true) then
         return _reject("send:cmd_multiline", env)
     end
 
-    -- Allowlist enforcement (default OFF)
     if _isCmdAllowed(cmd) ~= true then
         return _reject("send:not_allowlisted", env)
+    end
+
+    if type(STATE.test.sendSink) == "function" then
+        local okSink, errSink = pcall(STATE.test.sendSink, cmd, env)
+        if not okSink then
+            return _reject("send:test_sink_failed:" .. tostring(errSink), env)
+        end
+        _captureSend(cmd, env)
+        _print(string.format("[DWKit RemoteExec] SEND captured cmd=%s", cmd))
+        return true
     end
 
     if type(send) ~= "function" then
@@ -376,11 +455,9 @@ local function _onGlobalEvent(_, wire)
     local myProfile = _normLabel(STATE.myProfile or _myProfileNameBestEffort())
     local toProfile = _normLabel(env.toProfile)
     if toProfile ~= myProfile then
-        -- Not for me; ignore quietly (no reject spam)
         return true
     end
 
-    -- Owned-only enforcement (sender and target must be owned profile labels)
     if _isOwnedProfileLabel(tostring(env.fromProfile)) ~= true then
         return _reject("not_owned_sender", env)
     end
@@ -453,6 +530,10 @@ function M.getState()
             prefixes = M.getAllowlist(),
         },
         stats = _copyShallow(STATE.stats),
+        test = {
+            hasSendSink = (type(STATE.test.sendSink) == "function"),
+            lastCaptured = _copyCaptured(STATE.test.lastCaptured),
+        },
     }
 end
 
@@ -465,6 +546,7 @@ function M.status()
         globalEventName = st.globalEventName,
         allowPrefixes = (st.allow and st.allow.prefixes) or {},
         stats = st.stats,
+        test = st.test,
     }
 end
 
@@ -529,8 +611,6 @@ local function _preflightOwned(targetProfile)
         return false, "targetProfile required"
     end
 
-    -- IMPORTANT: do NOT rely on cached STATE.myProfile for ownership checks.
-    -- Use the live current profile label each call.
     local myProfileLive = _myProfileNameBestEffort()
 
     if _isOwnedProfileLabel(myProfileLive) ~= true then
@@ -552,7 +632,6 @@ function M.ping(targetProfile, opts)
         if not okI then return false, tostring(errI) end
     end
 
-    -- keep sender label fresh (for envelope + receiver gating)
     STATE.myProfile = _myProfileNameBestEffort()
 
     local okOwn, errOwn = _preflightOwned(targetProfile)
@@ -570,7 +649,6 @@ function M.send(targetProfile, cmd, opts)
         if not okI then return false, tostring(errI) end
     end
 
-    -- keep sender label fresh (for envelope + receiver gating)
     STATE.myProfile = _myProfileNameBestEffort()
 
     local okOwn, errOwn = _preflightOwned(targetProfile)
@@ -598,7 +676,6 @@ function M._testMakeWire(toProfile, action, cmd, opts)
     action = tostring(action or "")
     cmd = tostring(cmd or "")
 
-    -- Ensure sender label is the live profile label (so tests don't depend on stale STATE.myProfile).
     STATE.myProfile = _myProfileNameBestEffort()
 
     local env = _mkEnvelope(toProfile, action, cmd, {
@@ -614,7 +691,6 @@ function M._testInjectWire(wire)
         return false, "wire must be non-empty string"
     end
 
-    -- Ensure receiver thinks "my profile" is the live profile label.
     STATE.myProfile = _myProfileNameBestEffort()
 
     local okCall, resOrErr = pcall(_onGlobalEvent, nil, wire)
@@ -622,8 +698,22 @@ function M._testInjectWire(wire)
         return false, tostring(resOrErr)
     end
 
-    -- _onGlobalEvent returns true/false; for tests, treat false as ok (it means reject occurred).
     return true, nil
+end
+
+function M._testSetSendSink(fn)
+    if fn ~= nil and type(fn) ~= "function" then
+        return false, "fn must be function or nil"
+    end
+    STATE.test.sendSink = fn
+    if fn == nil then
+        STATE.test.lastCaptured = nil
+    end
+    return true, nil
+end
+
+function M._testGetLastCaptured()
+    return _copyCaptured(STATE.test.lastCaptured)
 end
 
 return M
