@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.skill_registry_service
 -- Owner       : Services
--- Version     : v2026-03-04D
+-- Version     : v2026-03-09B
 -- Purpose     :
 --   - SAFE SkillRegistryService (data only).
 --   - Owns skill/spell registry (data-driven), emits updates.
@@ -36,7 +36,7 @@
 
 local M                = {}
 
-M.VERSION              = "v2026-03-04D"
+M.VERSION              = "v2026-03-09B"
 
 local ID               = require("dwkit.core.identity")
 local BUS              = require("dwkit.bus.event_bus")
@@ -87,7 +87,7 @@ local LEGACY_KIND_MAP  = {
     ["weapon-prof"] = "weapon",
 }
 
--- Expanded baseline registry (starter set; not exhaustive)
+-- Expanded ActionPad baseline registry (data only; not exhaustive).
 -- NOTE: practiceKey must match PracticeStore normalization (lowercase + collapsed spaces).
 local DEFAULT_REGISTRY = {
     -- Cleric core service / utility
@@ -98,7 +98,7 @@ local DEFAULT_REGISTRY = {
         classKey = "cleric",
         kind = "spell",
         minLevel = 1,
-        tags = { "service" },
+        tags = { "actionpad", "service" },
         notes = "Baseline cleric heal spell.",
     },
     ["power heal"] = {
@@ -108,8 +108,8 @@ local DEFAULT_REGISTRY = {
         classKey = "cleric",
         kind = "spell",
         minLevel = 1,
-        tags = { "service" },
-        aliases = { "pheal", "powerheal" },
+        tags = { "actionpad", "service" },
+        aliases = { "ph", "pheal", "powerheal" },
         notes = "Exact minLevel may be refined later.",
     },
     refresh = {
@@ -119,8 +119,41 @@ local DEFAULT_REGISTRY = {
         classKey = "cleric",
         kind = "spell",
         minLevel = 1,
-        tags = { "service" },
+        tags = { "actionpad", "service" },
+        aliases = { "ref" },
         notes = "Common cleric service spell (baseline).",
+    },
+    feed = {
+        id = "feed",
+        displayName = "Feed",
+        practiceKey = "feed",
+        classKey = "cleric",
+        kind = "spell",
+        minLevel = 1,
+        tags = { "actionpad", "service" },
+        notes = "Baseline service spell for ActionPad Feed button.",
+    },
+    restore = {
+        id = "restore",
+        displayName = "Restore",
+        practiceKey = "restore",
+        classKey = "cleric",
+        kind = "spell",
+        minLevel = 1,
+        tags = { "actionpad", "service" },
+        aliases = { "rst" },
+        notes = "Baseline cleric restore spell.",
+    },
+    rejuvenate = {
+        id = "rejuvenate",
+        displayName = "Rejuvenate",
+        practiceKey = "rejuvenate",
+        classKey = "cleric",
+        kind = "spell",
+        minLevel = 1,
+        tags = { "actionpad", "service" },
+        aliases = { "rej" },
+        notes = "Baseline cleric rejuvenate spell.",
     },
     bless = {
         id = "bless",
@@ -129,7 +162,9 @@ local DEFAULT_REGISTRY = {
         classKey = "cleric",
         kind = "spell",
         minLevel = 1,
-        tags = { "buff" },
+        tags = { "actionpad", "buff" },
+        aliases = { "buff" },
+        notes = "Mapped as baseline buff spell for ActionPad.",
     },
     calm = {
         id = "calm",
@@ -138,7 +173,84 @@ local DEFAULT_REGISTRY = {
         classKey = "cleric",
         kind = "spell",
         minLevel = 1,
-        tags = { "utility" },
+        tags = { "actionpad", "utility" },
+    },
+    summon = {
+        id = "summon",
+        displayName = "Summon",
+        practiceKey = "summon",
+        classKey = "cleric",
+        kind = "spell",
+        minLevel = 1,
+        tags = { "actionpad", "movement" },
+        notes = "Baseline move-action spell for ActionPad coverage.",
+    },
+    relocate = {
+        id = "relocate",
+        displayName = "Relocate",
+        practiceKey = "relocate",
+        classKey = "cleric",
+        kind = "spell",
+        minLevel = 1,
+        tags = { "actionpad", "movement" },
+        notes = "Baseline move-action spell for ActionPad coverage.",
+    },
+
+    -- Cleric group/service set used by healer util group buttons
+    ["group armor"] = {
+        id = "group armor",
+        displayName = "Group Armor",
+        practiceKey = "group armor",
+        classKey = "cleric",
+        kind = "spell",
+        minLevel = 1,
+        tags = { "actionpad", "group", "buff" },
+        aliases = { "garm", "g armor", "garmor" },
+        notes = "Baseline group support spell for ActionPad group utility coverage.",
+    },
+    ["group recall"] = {
+        id = "group recall",
+        displayName = "Group Recall",
+        practiceKey = "group recall",
+        classKey = "cleric",
+        kind = "spell",
+        minLevel = 1,
+        tags = { "actionpad", "group", "utility" },
+        aliases = { "grec", "grecall", "g recall" },
+        notes = "Baseline group utility spell for ActionPad GRec coverage.",
+    },
+    ["group heal"] = {
+        id = "group heal",
+        displayName = "Group Heal",
+        practiceKey = "group heal",
+        classKey = "cleric",
+        kind = "spell",
+        minLevel = 1,
+        tags = { "actionpad", "group", "service" },
+        aliases = { "gh", "gheal", "g heal" },
+        notes = "Baseline group healing spell.",
+    },
+    ["group rejuvenate"] = {
+        id = "group rejuvenate",
+        displayName = "Group Rejuvenate",
+        practiceKey = "group rejuvenate",
+        classKey = "cleric",
+        kind = "spell",
+        minLevel = 1,
+        tags = { "actionpad", "group", "service" },
+        aliases = { "grej", "g rej", "grejuvenate" },
+        notes = "Baseline group rejuvenate spell.",
+    },
+    ["group power heal"] = {
+        id = "group power heal",
+        displayName = "Group Power Heal",
+        practiceKey = "group power heal",
+        classKey = "cleric",
+        kind = "spell",
+        minLevel = 1,
+        tags = { "actionpad", "group", "service" },
+        aliases = { "gph", "gpheal", "g power heal", "gpowerheal" },
+        notes = "Baseline group power-heal spell.",
     },
 
     -- Warrior combat core
@@ -149,7 +261,7 @@ local DEFAULT_REGISTRY = {
         classKey = "warrior",
         kind = "skill",
         minLevel = 1,
-        tags = { "combat" },
+        tags = { "actionpad", "combat" },
     },
     bash = {
         id = "bash",
@@ -158,7 +270,7 @@ local DEFAULT_REGISTRY = {
         classKey = "warrior",
         kind = "skill",
         minLevel = 1,
-        tags = { "combat", "fightOnly" },
+        tags = { "actionpad", "combat", "fightOnly" },
     },
     assist = {
         id = "assist",
@@ -167,7 +279,7 @@ local DEFAULT_REGISTRY = {
         classKey = "warrior",
         kind = "skill",
         minLevel = 1,
-        tags = { "combat", "fightOnly" },
+        tags = { "actionpad", "combat", "fightOnly" },
     },
     rescue = {
         id = "rescue",
@@ -176,7 +288,7 @@ local DEFAULT_REGISTRY = {
         classKey = "warrior",
         kind = "skill",
         minLevel = 1,
-        tags = { "combat", "fightOnly" },
+        tags = { "actionpad", "combat", "fightOnly" },
         notes = "ActionPad will gate fightOnly by state later.",
     },
     pummel = {
@@ -186,7 +298,7 @@ local DEFAULT_REGISTRY = {
         classKey = "warrior",
         kind = "skill",
         minLevel = 1,
-        tags = { "combat", "fightOnly" },
+        tags = { "actionpad", "combat", "fightOnly" },
         notes = "Baseline warrior example (minLevel may be refined later).",
     },
 
@@ -198,7 +310,7 @@ local DEFAULT_REGISTRY = {
         classKey = "thief",
         kind = "skill",
         minLevel = 1,
-        tags = { "combat", "fightOnly" },
+        tags = { "actionpad", "combat", "fightOnly" },
     },
 
     -- Paladin / Anti-Paladin baseline examples (seed-level; not exhaustive)
@@ -209,7 +321,7 @@ local DEFAULT_REGISTRY = {
         classKey = "paladin",
         kind = "skill",
         minLevel = 1,
-        tags = { "combat" },
+        tags = { "actionpad", "combat" },
     },
     ["anti-paladin example"] = {
         id = "anti-paladin example",

@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-09A
+-- Version     : v2026-03-09B
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-09A"
+M.VERSION = "v2026-03-09B"
 
 local SUITES = {
     default = {
@@ -140,7 +140,7 @@ local SUITES = {
     skill_registry_smoke = {
         title = "skill_registry_smoke",
         description =
-        "SkillRegistry smoke: assert expanded baseline, canonical kind set, alias lookup, class normalization, validateAll PASS, and seed keys exist. Also confirms dwskills prints without error.",
+        "SkillRegistry smoke: assert expanded ActionPad baseline, canonical kind set, alias lookup, class normalization, validateAll PASS, and ActionPad-backed coverage keys exist. Also confirms dwskills prints without error.",
         delay = 0.20,
         steps = {
             {
@@ -155,26 +155,27 @@ local SUITES = {
             },
             {
                 cmd =
-                'lua do local S=require("dwkit.services.skill_registry_service"); local reg=S.getRegistry(); if type(reg)~="table" then error("Expected registry table") end; if type(reg["heal"])~="table" then error("Expected key heal present") end; if type(reg["power heal"])~="table" then error("Expected key power heal present") end; if type(reg["anti-paladin example"])~="table" then error("Expected key anti-paladin example present") end; local def=reg["anti-paladin example"]; if tostring(def.classKey)~="anti-paladin" then error("Expected classKey anti-paladin; got "..tostring(def.classKey)) end; print("[dwverify-skillreg] PASS seed keys + anti-paladin classKey") end',
-                note = "ASSERT: required keys exist; anti-paladin is hyphen-preserved.",
+                'lua do local S=require("dwkit.services.skill_registry_service"); local reg=S.getRegistry(); if type(reg)~="table" then error("Expected registry table") end; local required={"heal","power heal","refresh","feed","restore","rejuvenate","summon","relocate","group armor","group recall","group heal","group rejuvenate","group power heal","assist","kick","bash","pummel","circle","guard","rescue","anti-paladin example"}; for i=1,#required do local k=required[i]; if type(reg[k])~="table" then error("Expected required registry key present: "..tostring(k)) end end; local def=reg["anti-paladin example"]; if tostring(def.classKey)~="anti-paladin" then error("Expected classKey anti-paladin; got "..tostring(def.classKey)) end; print(string.format("[dwverify-skillreg] PASS required ActionPad coverage keys=%s", tostring(#required))) end',
+                note = "ASSERT: required ActionPad-backed keys exist; anti-paladin remains hyphen-preserved.",
             },
             {
                 cmd =
-                'lua do local S=require("dwkit.services.skill_registry_service"); local def=S.resolveByPracticeKey("Power   Heal"); if not def then error("Expected resolveByPracticeKey Power Heal to find entry") end; if tostring(def.practiceKey)~="power heal" then error("Expected practiceKey power heal; got "..tostring(def.practiceKey)) end; local def2=S.resolveByAlias("PHEAL"); if not def2 then error("Expected resolveByAlias PHEAL to find entry") end; if tostring(def2.practiceKey)~="power heal" then error("Expected alias to resolve to power heal; got "..tostring(def2.practiceKey)) end; print("[dwverify-skillreg] PASS resolveByPracticeKey + resolveByAlias") end',
-                note = "ASSERT: practiceKey normalization and alias lookup work.",
+                'lua do local S=require("dwkit.services.skill_registry_service"); local def=S.resolveByPracticeKey("Power   Heal"); if not def then error("Expected resolveByPracticeKey Power Heal to find entry") end; if tostring(def.practiceKey)~="power heal" then error("Expected practiceKey power heal; got "..tostring(def.practiceKey)) end; local def2=S.resolveByAlias("PHEAL"); if not def2 then error("Expected resolveByAlias PHEAL to find entry") end; if tostring(def2.practiceKey)~="power heal" then error("Expected alias to resolve to power heal; got "..tostring(def2.practiceKey)) end; local def3=S.resolveByAlias("GPH"); if not def3 then error("Expected resolveByAlias GPH to find entry") end; if tostring(def3.practiceKey)~="group power heal" then error("Expected alias to resolve to group power heal; got "..tostring(def3.practiceKey)) end; local def4=S.resolveByAlias("RST"); if not def4 then error("Expected resolveByAlias RST to find entry") end; if tostring(def4.practiceKey)~="restore" then error("Expected alias to resolve to restore; got "..tostring(def4.practiceKey)) end; print("[dwverify-skillreg] PASS resolveByPracticeKey + resolveByAlias") end',
+                note = "ASSERT: practiceKey normalization and alias lookup work for expanded ActionPad entries.",
             },
             {
                 cmd =
-                'lua do local S=require("dwkit.services.skill_registry_service"); local ck,err=S.normalizeClassKey("APAL"); if not ck then error("normalizeClassKey(APAL) failed: "..tostring(err)) end; if ck~="anti-paladin" then error("Expected anti-paladin; got "..tostring(ck)) end; local list=S.listByClass("anti paladin","skill"); if type(list)~="table" then error("Expected list table") end; if #list < 1 then error("Expected >=1 anti-paladin skill entry") end; print(string.format("[dwverify-skillreg] PASS class normalization + listByClass count=%s", tostring(#list))) end',
-                note = "ASSERT: class normalization preserves hyphen and listByClass works.",
+                'lua do local S=require("dwkit.services.skill_registry_service"); local ck,err=S.normalizeClassKey("APAL"); if not ck then error("normalizeClassKey(APAL) failed: "..tostring(err)) end; if ck~="anti-paladin" then error("Expected anti-paladin; got "..tostring(ck)) end; local list=S.listByClass("cleric","spell"); if type(list)~="table" then error("Expected list table") end; if #list < 12 then error("Expected >=12 cleric spell entries; got "..tostring(#list)) end; print(string.format("[dwverify-skillreg] PASS class normalization + cleric spell count=%s", tostring(#list))) end',
+                note = "ASSERT: class normalization preserves hyphen and expanded cleric spell coverage exists.",
             },
             {
                 cmd =
-                'lua do local S=require("dwkit.services.skill_registry_service"); local kinds={"skill","spell","race","weapon"}; for i=1,#kinds do local k=kinds[i]; local list=S.listByKind(k); if type(list)~="table" then error("Expected listByKind("..k..") returns table") end end; local st=S.getStats(); if tonumber(st.entries or 0) < 12 then error("Expected expanded baseline entries >= 12; got "..tostring(st.entries)) end; local s=S.listByKind("spell"); local sk=S.listByKind("skill"); local r=S.listByKind("race"); local w=S.listByKind("weapon"); if #s < 3 then error("Expected >=3 spells; got "..tostring(#s)) end; if #sk < 6 then error("Expected >=6 skills; got "..tostring(#sk)) end; if #r < 1 then error("Expected >=1 race entry; got "..tostring(#r)) end; if #w < 1 then error("Expected >=1 weapon entry; got "..tostring(#w)) end; print(string.format("[dwverify-skillreg] PASS coverage spells=%s skills=%s race=%s weapon=%s", tostring(#s), tostring(#sk), tostring(#r), tostring(#w))) end',
-                note = "ASSERT: minimum coverage counts per kind (starter baseline).",
+                'lua do local S=require("dwkit.services.skill_registry_service"); local kinds={"skill","spell","race","weapon"}; for i=1,#kinds do local k=kinds[i]; local list=S.listByKind(k); if type(list)~="table" then error("Expected listByKind("..k..") returns table") end end; local st=S.getStats(); if tonumber(st.entries or 0) < 30 then error("Expected expanded baseline entries >= 30; got "..tostring(st.entries)) end; local s=S.listByKind("spell"); local sk=S.listByKind("skill"); local r=S.listByKind("race"); local w=S.listByKind("weapon"); if #s < 14 then error("Expected >=14 spells; got "..tostring(#s)) end; if #sk < 10 then error("Expected >=10 skills; got "..tostring(#sk)) end; if #r < 1 then error("Expected >=1 race entry; got "..tostring(#r)) end; if #w < 2 then error("Expected >=2 weapon entries; got "..tostring(#w)) end; print(string.format("[dwverify-skillreg] PASS coverage spells=%s skills=%s race=%s weapon=%s", tostring(#s), tostring(#sk), tostring(#r), tostring(#w))) end',
+                note = "ASSERT: minimum coverage counts per kind for Bucket E baseline.",
             },
-            { cmd = "dwskills",                 note = "Should print SkillRegistryService summary and list keys (SAFE)." },
-            { cmd = "dwskills dump power heal", note = "Optional: dump one entry; should show normalized practiceKey + classKey." },
+            { cmd = "dwskills",                       note = "Should print SkillRegistryService summary and list keys (SAFE)." },
+            { cmd = "dwskills dump power heal",       note = "Should dump one multi-word entry if parser supports it." },
+            { cmd = "dwskills dump group power heal", note = "Should dump one multi-word group entry if parser supports it." },
         },
     },
 
@@ -513,7 +514,7 @@ local SUITES = {
             },
             {
                 cmd =
-                'lua do local P=require("dwkit.services.presence_service"); local st=P.getState(); local my=st.myProfilesInRoom or {}; local ot=st.otherPlayersInRoom or {}; if type(my)~="table" or type(ot)~="table" then error("Expected myProfilesInRoom/otherPlayersInRoom tables") end; local hasMy=false; for i=1,#my do if tostring(my[i])=="FixturePlayer (Ancient-Dev)" then hasMy=true end end; local hasOther=false; for i=1,#ot do if tostring(ot[i])=="OtherGuy" then hasOther=true end end; if hasMy~=true then error("Expected FixturePlayer in My profiles as FixturePlayer (Ancient-Dev)") end; if hasOther~=true then error("Expected OtherGuy in Other players") end; print(string.format("[dwverify-presence] PASS presence split my=%s other=%s", tostring(#my), tostring(#ot))) end',
+                'lua do local P=require("dwkit.services.presence_service"); local st=P.getState(); local my=st.myProfilesInRoom or {}; local ot=st.otherPlayersInRoom or {}; local function has(arr, needle) for i=1,#arr do if tostring(arr[i])==needle then return true end end return false end; if has(my,"FixturePlayer (Ancient-Dev)")~=true then error("Expected FixturePlayer in My profiles as FixturePlayer (Ancient-Dev)") end; if has(ot,"OtherGuy")~=true then error("Expected OtherGuy in Other players") end; print(string.format("[dwverify-presence] PASS presence split my=%s other=%s", tostring(#my), tostring(#ot))) end',
                 note = "ASSERT: PresenceService computed split deterministically.",
             },
             {

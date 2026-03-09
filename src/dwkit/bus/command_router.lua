@@ -3,7 +3,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.command_router
 -- Owner       : Bus
--- Version     : v2026-01-27F
+-- Version     : v2026-03-09C
 -- Purpose     :
 --   - Centralize SAFE command routing (moved out of command_aliases.lua).
 --   - Provide generic dispatch wrapper to:
@@ -25,7 +25,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-01-27F"
+M.VERSION = "v2026-03-09C"
 
 local Ctx = require("dwkit.core.mudlet_ctx")
 local Legacy = require("dwkit.services.legacy_printers")
@@ -36,6 +36,32 @@ local function _sortedKeys(t)
     for k, _ in pairs(t) do keys[#keys + 1] = k end
     table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
     return keys
+end
+
+local function _copyArray(t)
+    local out = {}
+    if type(t) ~= "table" then return out end
+    for i = 1, #t do
+        out[i] = t[i]
+    end
+    return out
+end
+
+local function _attachCommandCtx(ctx, cmd, tokens)
+    if type(ctx) ~= "table" then return end
+
+    local t = _copyArray(tokens)
+    if #t == 0 and tostring(cmd or "") ~= "" then
+        t[1] = tostring(cmd)
+    end
+
+    ctx.tokens = t
+
+    if #t >= 2 then
+        ctx.args = table.concat(t, " ", 2)
+    else
+        ctx.args = ""
+    end
 end
 
 -- Back-compat entry point.
@@ -61,6 +87,10 @@ function M.dispatchGenericCommand(ctx, kit, cmd, tokens)
     tokens = (type(tokens) == "table") and tokens or {}
 
     if cmd == "" then return true end
+
+    -- Ensure split command modules receive the same command payload shape
+    -- expected by the SAFE alias path (ctx.tokens / ctx.args).
+    _attachCommandCtx(ctx, cmd, tokens)
 
     -- ------------------------------------------------------------
     -- Special-case dwcommands (uses DWKit.cmd list methods)
@@ -119,11 +149,14 @@ function M.dispatchGenericCommand(ctx, kit, cmd, tokens)
             local ok1, r1 = pcall(mod.dispatch, ctx, kit, tokens)
             if ok1 and r1 ~= false then return true end
 
-            local ok2, r2 = pcall(mod.dispatch, ctx, tokens)
+            local ok2, r2 = pcall(mod.dispatch, ctx, kit)
             if ok2 and r2 ~= false then return true end
 
-            local ok3, r3 = pcall(mod.dispatch, tokens)
+            local ok3, r3 = pcall(mod.dispatch, ctx, tokens)
             if ok3 and r3 ~= false then return true end
+
+            local ok4, r4 = pcall(mod.dispatch, tokens)
+            if ok4 and r4 ~= false then return true end
         end
     end
 

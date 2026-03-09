@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.commands.dwskills
 -- Owner       : Commands
--- Version     : v2026-03-04B
+-- Version     : v2026-03-09E
 -- Purpose     :
 --   - Handler for "dwskills" command surface.
 --   - SAFE: prints SkillRegistryService snapshot/state.
@@ -13,7 +13,7 @@
 -- #########################################################################
 
 local M = {}
-M.VERSION = "v2026-03-04B"
+M.VERSION = "v2026-03-09E"
 
 local function _fallbackOut(line)
   line = tostring(line or "")
@@ -83,6 +83,75 @@ local function _shortTags(tags)
   return table.concat(tags, ",")
 end
 
+local function _trim(s)
+  s = tostring(s or "")
+  s = s:gsub("^%s+", ""):gsub("%s+$", "")
+  return s
+end
+
+local function _trimKey(s)
+  s = _trim(s)
+  if s == "" then return "" end
+  local q1 = s:sub(1, 1)
+  local q2 = s:sub(-1)
+  if (q1 == '"' and q2 == '"') or (q1 == "'" and q2 == "'") then
+    s = _trim(s:sub(2, -2))
+  end
+  return s
+end
+
+local function _tokensToWords(tokens)
+  local out = {}
+  if type(tokens) ~= "table" then return out end
+  for i = 1, #tokens do
+    out[#out + 1] = tostring(tokens[i] or "")
+  end
+  return out
+end
+
+local function _normalizeWords(words)
+  local out = {}
+  for i = 1, #words do
+    local w = _trim(words[i])
+    if w ~= "" then out[#out + 1] = w end
+  end
+  if #out >= 1 and out[1]:lower() == "dwskills" then
+    table.remove(out, 1)
+  end
+  return out
+end
+
+local function _parseWords(words)
+  words = _normalizeWords(words)
+  if #words == 0 then
+    return "list", nil
+  end
+
+  local cmd = tostring(words[1] or ""):lower()
+  if cmd == "list" then
+    return "list", nil
+  end
+
+  if cmd == "dump" then
+    local key = _trimKey(table.concat(words, " ", 2))
+    if key ~= "" then return "dump", key end
+    return "dump", nil
+  end
+
+  return "list", nil
+end
+
+local function _parseArgsString(s)
+  s = _trim(s)
+  if s == "" then return "list", nil end
+
+  local words = {}
+  for part in s:gmatch("%S+") do
+    words[#words + 1] = part
+  end
+  return _parseWords(words)
+end
+
 local function _printRegistry(C, svc, limit)
   limit = tonumber(limit) or 30
 
@@ -135,7 +204,6 @@ local function _printDumpKey(C, svc, key)
     return true
   end
 
-  -- fallback: try snapshot registry and index
   local okReg, reg, _, _, errReg = _callBestEffort(C, svc, "getRegistry")
   if not okReg then
     C.out("  getRegistry(): ERROR err=" .. tostring(errReg))
@@ -155,31 +223,16 @@ local function _printDumpKey(C, svc, key)
 end
 
 local function _parseMode(C)
-  -- best-effort parse:
-  -- tokens: {"dwskills","dump","heal"} or {"dwskills","list"} etc.
-  if type(C.tokens) == "table" and #C.tokens >= 2 then
-    local a = tostring(C.tokens[2] or ""):lower()
-    if a == "dump" and #C.tokens >= 3 then
-      return "dump", tostring(C.tokens[3])
-    end
-    if a == "list" then
-      return "list", nil
-    end
+  local mode, key
+
+  mode, key = _parseWords(_tokensToWords(C.tokens))
+  if mode ~= "list" or key ~= nil then
+    return mode, key
   end
 
-  -- args string: "dump heal" / "list"
   if type(C.args) == "string" and C.args ~= "" then
-    local s = tostring(C.args)
-    local m = s:match("^%s*(%S+)%s*(.-)%s*$")
-    local cmd = (m and m:lower()) or ""
-    if cmd == "dump" then
-      local key = s:match("^%s*dump%s+(.+)%s*$")
-      if key and key ~= "" then return "dump", _trimKey(key) end
-      return "dump", nil
-    end
-    if cmd == "list" then
-      return "list", nil
-    end
+    mode, key = _parseArgsString(C.args)
+    return mode, key
   end
 
   return "list", nil
@@ -206,19 +259,7 @@ function M.dispatch(ctx, kit)
   C.out("[DWKit Service] SkillRegistryService")
   C.out("  version=" .. tostring(svc.VERSION or "unknown"))
 
-  local mode, key = "list", nil
-  do
-    -- minimal non-breaking parser; default list
-    if type(C.tokens) == "table" and #C.tokens >= 2 then
-      local a = tostring(C.tokens[2] or ""):lower()
-      if a == "dump" then
-        mode = "dump"
-        key = tostring(C.tokens[3] or "")
-      elseif a == "list" then
-        mode = "list"
-      end
-    end
-  end
+  local mode, key = _parseMode(C)
 
   if mode == "dump" then
     if type(key) ~= "string" or key == "" then
