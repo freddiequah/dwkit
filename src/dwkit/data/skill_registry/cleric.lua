@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.data.skill_registry.cleric
 -- Owner       : Data
--- Version     : v2026-03-09D
+-- Version     : v2026-03-09E
 -- Purpose     :
 --   - Data-only SkillRegistry raw declarations for Cleric entries.
 --   - Owns raw entry tables only.
@@ -19,7 +19,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-09D"
+M.VERSION = "v2026-03-09E"
 
 local ENTRIES = {
     armor = {
@@ -38,9 +38,9 @@ local ENTRIES = {
         practiceKey = "heal",
         classKey = "cleric",
         kind = "spell",
-        minLevel = 1,
+        minLevel = 20,
         tags = { "actionpad", "service" },
-        notes = "ActionPad baseline preserved. Dump confirms usage and effect, but no explicit cleric level shown in the current source dump.",
+        notes = "ActionPad baseline preserved. Class help confirms cleric level 20.",
     },
     ["cure light"] = {
         id = "cure light",
@@ -295,10 +295,10 @@ local ENTRIES = {
         practiceKey = "group armor",
         classKey = "cleric",
         kind = "spell",
-        minLevel = 1,
+        minLevel = 16,
         tags = { "actionpad", "group", "buff" },
         aliases = { "garm", "g armor", "garmor" },
-        notes = "ActionPad baseline preserved. Dump confirms usage and group behavior, but no explicit cleric level shown in the current source dump.",
+        notes = "ActionPad baseline preserved. Class help confirms cleric level 16.",
     },
     ["group recall"] = {
         id = "group recall",
@@ -317,10 +317,10 @@ local ENTRIES = {
         practiceKey = "group heal",
         classKey = "cleric",
         kind = "spell",
-        minLevel = 1,
+        minLevel = 37,
         tags = { "actionpad", "group", "service" },
         aliases = { "gh", "gheal", "g heal" },
-        notes = "ActionPad baseline preserved. Dump confirms usage and group behavior, but no explicit cleric level shown in the current source dump.",
+        notes = "ActionPad baseline preserved. Class help confirms cleric level 37.",
     },
     ["group rejuvenate"] = {
         id = "group rejuvenate",
@@ -328,10 +328,10 @@ local ENTRIES = {
         practiceKey = "group rejuvenate",
         classKey = "cleric",
         kind = "spell",
-        minLevel = 1,
+        minLevel = 40,
         tags = { "actionpad", "group", "service" },
         aliases = { "grej", "g rej", "grejuvenate" },
-        notes = "ActionPad baseline preserved. Dump confirms usage and group behavior, but no explicit cleric level shown in the current source dump.",
+        notes = "ActionPad baseline preserved. Class help confirms cleric level 40.",
     },
     ["group power heal"] = {
         id = "group power heal",
@@ -339,10 +339,10 @@ local ENTRIES = {
         practiceKey = "group power heal",
         classKey = "cleric",
         kind = "spell",
-        minLevel = 1,
+        minLevel = 45,
         tags = { "actionpad", "group", "service" },
         aliases = { "gph", "gpheal", "g power heal", "gpowerheal" },
-        notes = "ActionPad baseline preserved. Dump confirms usage and group behavior, but no explicit cleric level shown in the current source dump.",
+        notes = "ActionPad baseline preserved. Class help confirms cleric level 45.",
     },
     ["remove curse"] = {
         id = "remove curse",
@@ -478,9 +478,9 @@ local ENTRIES = {
         practiceKey = "flamestrike",
         classKey = "cleric",
         kind = "spell",
-        minLevel = 1,
+        minLevel = 27,
         tags = { "combat" },
-        notes = "Dump confirms usage and effect, but no explicit cleric level shown in the current source dump.",
+        notes = "Class help confirms cleric level 27.",
     },
     relocate = {
         id = "relocate",

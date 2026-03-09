@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.data.skill_registry.seed_misc
 -- Owner       : Data
--- Version     : v2026-03-09C
+-- Version     : v2026-03-09D
 -- Purpose     :
 --   - Data-only transitional SkillRegistry raw declarations for non-split seed
 --     and placeholder entries.
@@ -21,18 +21,9 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-09C"
+M.VERSION = "v2026-03-09D"
 
 local ENTRIES = {
-    guard = {
-        id = "guard",
-        displayName = "Guard",
-        practiceKey = "guard",
-        classKey = "paladin",
-        kind = "skill",
-        minLevel = 1,
-        tags = { "actionpad", "combat" },
-    },
     ["anti-paladin example"] = {
         id = "anti-paladin example",
         displayName = "Anti-Paladin Example",

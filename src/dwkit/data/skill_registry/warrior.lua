@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.data.skill_registry.warrior
 -- Owner       : Data
--- Version     : v2026-03-09D
+-- Version     : v2026-03-09E
 -- Purpose     :
 --   - Data-only SkillRegistry raw declarations for Warrior entries.
 --   - Owns raw entry tables only.
@@ -19,7 +19,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-09D"
+M.VERSION = "v2026-03-09E"
 
 local ENTRIES = {
     kick = {
@@ -30,7 +30,7 @@ local ENTRIES = {
         kind = "skill",
         minLevel = 1,
         tags = { "actionpad", "combat" },
-        notes = "ActionPad baseline preserved. Dump confirms actionable combat skill, but no explicit warrior level is shown in the current source dump.",
+        notes = "ActionPad baseline preserved. Class help confirms warrior level 1.",
     },
     bash = {
         id = "bash",
@@ -98,9 +98,9 @@ local ENTRIES = {
         practiceKey = "grapple",
         classKey = "warrior",
         kind = "skill",
-        minLevel = 1,
+        minLevel = 15,
         tags = { "combat", "fightOnly" },
-        notes = "Dump confirms actionable skill, but no explicit warrior level is shown in the current source dump.",
+        notes = "Class help confirms warrior level 15.",
     },
     guard = {
         id = "guard",
@@ -108,9 +108,9 @@ local ENTRIES = {
         practiceKey = "guard",
         classKey = "warrior",
         kind = "skill",
-        minLevel = 1,
+        minLevel = 19,
         tags = { "passive", "combat" },
-        notes = "Dump-backed automatic guard behavior with guard command usage described, but no explicit warrior level is shown in the current source dump.",
+        notes = "Class help confirms warrior level 19.",
     },
     block = {
         id = "block",
