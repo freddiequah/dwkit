@@ -2,11 +2,13 @@
 -- #########################################################################
 -- Module Name : dwkit.services.cross_profile_comm_service
 -- Owner       : Services
--- Version     : v2026-02-26D
+-- Version     : v2026-03-10A
 -- Purpose     :
 --   - SAFE cross-profile communication (same Mudlet instance) using raiseGlobalEvent.
 --   - Data/event delivery only. Does NOT execute remote commands. No expandAlias.
 --   - Provides HELLO/BYE presence signals and peer lastSeen tracking (session-only).
+--   - Provides a narrow ROWFACTS transport/store for represented-row facts
+--     (session-only; best-effort; compatibility-conscious addition).
 --   - Emits a registered internal event when peer state changes.
 --
 -- IMPORTANT COMPAT FIX (v2026-02-26B):
@@ -20,6 +22,15 @@
 --     and B would otherwise not see A until A manually republishes HELLO.
 --   - Behavior remains SAFE: no timers, no send(), no polling.
 --
+-- Add v2026-03-10A:
+--   - Adds narrow ROWFACTS transport/store for represented-row facts.
+--   - Adds read API for ActionPadService composition:
+--       * getRowFactsByProfile(profileName) -> table|nil
+--       * publishRowFacts(rowFacts, opts?) -> boolean ok, string|nil err
+--   - Adds session-only test helpers:
+--       * _testSetRowFacts(profileName, rowFacts, opts?) -> boolean ok, string|nil err
+--       * _testClearRowFacts() -> boolean ok
+--
 -- Public API  :
 --   - getVersion() -> string
 --   - getUpdatedEventName() -> string
@@ -29,11 +40,15 @@
 --   - install(opts?) -> boolean ok, string|nil err
 --   - isInstalled() -> boolean
 --   - publish(topic, payload?, opts?) -> boolean ok, string|nil err
+--   - publishRowFacts(rowFacts, opts?) -> boolean ok, string|nil err
 --   - isProfileOnline(profileName) -> boolean
+--   - getRowFactsByProfile(profileName) -> table|nil
 --
 -- Test helpers (SAFE; session-only):
 --   - _testNotePeer(profileName, opts?) -> boolean ok, string|nil err
 --   - _testClearPeers() -> boolean ok
+--   - _testSetRowFacts(profileName, rowFacts, opts?) -> boolean ok, string|nil err
+--   - _testClearRowFacts() -> boolean ok
 --
 -- Events Emitted:
 --   - DWKit:Service:CrossProfileComm:Updated
@@ -44,7 +59,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-02-26D"
+M.VERSION = "v2026-03-10A"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -62,7 +77,8 @@ local STATE = {
     handlerGlobalMsg = nil,
     handlerExit = nil,
 
-    peers = {}, -- key -> { profile=..., instanceId=..., lastSeenTs=..., lastTopic=..., lastPayloadType=... }
+    peers = {},             -- key -> { profile=..., instanceId=..., lastSeenTs=..., lastTopic=..., lastPayloadType=... }
+    rowFactsByProfile = {}, -- profileName -> normalized rowFacts (session-only)
 
     stats = {
         emits = 0,
@@ -82,6 +98,15 @@ local function _shallowCopy(t)
     return out
 end
 
+local function _deepCopy(v)
+    if type(v) ~= "table" then return v end
+    local out = {}
+    for k, val in pairs(v) do
+        out[k] = _deepCopy(val)
+    end
+    return out
+end
+
 local function _copyPeers(peers)
     local out = {}
     if type(peers) ~= "table" then return out end
@@ -97,6 +122,32 @@ local function _copyPeers(peers)
         end
     end
     return out
+end
+
+local function _copyRowFactsMap(src)
+    local out = {}
+    if type(src) ~= "table" then return out end
+    for k, v in pairs(src) do
+        if type(k) == "string" and type(v) == "table" then
+            out[k] = _deepCopy(v)
+        end
+    end
+    return out
+end
+
+local function _trim(s)
+    s = tostring(s or "")
+    return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function _lowerCollapseSpaces(s)
+    s = _trim(s):lower()
+    s = s:gsub("%s+", " ")
+    return s
+end
+
+local function _normalizePracticeKeyLocal(raw)
+    return _lowerCollapseSpaces(raw)
 end
 
 local function _myProfileNameBestEffort()
@@ -209,13 +260,11 @@ local function _encodeEnvelope(env)
         return nil
     end
 
-    -- payload cannot be a table in some Mudlet builds; keep only primitive payload (string/number/boolean)
     local payloadType = type(env.payload)
     local payloadStr = ""
     if payloadType == "string" or payloadType == "number" or payloadType == "boolean" then
         payloadStr = tostring(env.payload)
     else
-        -- for tables / functions / userdata: omit content (not needed for HELLO/BYE presence)
         payloadStr = ""
     end
 
@@ -260,7 +309,6 @@ local function _decodeEnvelope(s)
         source = (t.source ~= "" and t.source) or nil,
     }
 
-    -- restore primitive payload if any
     local pt = tostring(t.payloadType or "")
     local pv = tostring(t.payload or "")
     if pt == "string" then
@@ -303,6 +351,138 @@ local function _looksValidEnvelope(env)
     return true
 end
 
+-- #########################################################################
+-- Narrow ROWFACTS payload codec
+-- #########################################################################
+
+local function _normalizeLearnedMap(map)
+    local out = {}
+    if type(map) ~= "table" then return out end
+    for k, v in pairs(map) do
+        local pk = _normalizePracticeKeyLocal(k)
+        if pk ~= "" and (v == true or v == false) then
+            out[pk] = v
+        end
+    end
+    return out
+end
+
+local function _normalizeRowFacts(rowFacts, profileName)
+    if type(rowFacts) ~= "table" then
+        return nil, "rowFacts must be a table"
+    end
+
+    local out = {
+        name = _trim(rowFacts.name),
+        class = _trim(rowFacts.class),
+        classKey = _trim(rowFacts.classKey),
+        level = tonumber(rowFacts.level),
+        practiceStale = (rowFacts.practiceStale == true),
+        scoreStale = (rowFacts.scoreStale == true),
+        learnedByPracticeKey = _normalizeLearnedMap(rowFacts.learnedByPracticeKey or rowFacts.practiceKeysLearned),
+        sourceProfile = _trim(profileName),
+        sourceTs = os.time(),
+    }
+
+    return out, nil
+end
+
+local function _encodeRowFactsPayload(rowFacts)
+    local rf, err = _normalizeRowFacts(rowFacts, rowFacts and rowFacts.sourceProfile or nil)
+    if type(rf) ~= "table" then
+        return nil, tostring(err or "normalizeRowFacts failed")
+    end
+
+    local parts = {
+        "v=1",
+        "name=" .. _esc(rf.name or ""),
+        "class=" .. _esc(rf.class or ""),
+        "classKey=" .. _esc(rf.classKey or ""),
+        "level=" .. _esc(rf.level or ""),
+        "practiceStale=" .. _esc(rf.practiceStale == true and "1" or "0"),
+        "scoreStale=" .. _esc(rf.scoreStale == true and "1" or "0"),
+    }
+
+    local learnedKeys = {}
+    for k in pairs(rf.learnedByPracticeKey or {}) do
+        learnedKeys[#learnedKeys + 1] = tostring(k)
+    end
+    table.sort(learnedKeys)
+
+    for i = 1, #learnedKeys do
+        local pk = learnedKeys[i]
+        local val = rf.learnedByPracticeKey[pk]
+        parts[#parts + 1] = "learned:" .. _esc(pk) .. "=" .. (val == true and "1" or "0")
+    end
+
+    return table.concat(parts, "|"), nil
+end
+
+local function _decodeRowFactsPayload(s, profileName)
+    if type(s) ~= "string" or s == "" then
+        return nil, "rowFacts payload empty"
+    end
+
+    local raw = {
+        learnedByPracticeKey = {},
+    }
+
+    for part in s:gmatch("([^|]+)") do
+        local learnedKey, learnedVal = part:match("^learned:(.-)=(.*)$")
+        if learnedKey ~= nil then
+            local pk = _normalizePracticeKeyLocal(_unesc(learnedKey))
+            if pk ~= "" then
+                raw.learnedByPracticeKey[pk] = (tostring(learnedVal) == "1")
+            end
+        else
+            local k, v = part:match("^([^=]+)=(.*)$")
+            if k and v then
+                k = _unesc(k)
+                v = _unesc(v)
+                if k == "name" then
+                    raw.name = v
+                elseif k == "class" then
+                    raw.class = v
+                elseif k == "classKey" then
+                    raw.classKey = v
+                elseif k == "level" then
+                    raw.level = tonumber(v)
+                elseif k == "practiceStale" then
+                    raw.practiceStale = (v == "1")
+                elseif k == "scoreStale" then
+                    raw.scoreStale = (v == "1")
+                end
+            end
+        end
+    end
+
+    return _normalizeRowFacts(raw, profileName)
+end
+
+local function _storeRowFacts(profileName, rowFacts, source)
+    profileName = _trim(profileName)
+    if profileName == "" then
+        return false, "profileName required"
+    end
+
+    local rf, err = _normalizeRowFacts(rowFacts, profileName)
+    if type(rf) ~= "table" then
+        return false, tostring(err or "normalizeRowFacts failed")
+    end
+
+    STATE.rowFactsByProfile[profileName] = rf
+
+    local okEmit, errEmit = _emitUpdated(M.getState(), {
+        action = "rowfacts",
+        profile = profileName,
+    }, source or "rowfacts:store")
+    if not okEmit then
+        return false, errEmit
+    end
+
+    return true, nil
+end
+
 local function _receiveEnvelope(envOrString, source)
     source = tostring(source or "cpc:recv")
 
@@ -340,9 +520,16 @@ local function _receiveEnvelope(envOrString, source)
     if tostring(env.topic) == "BYE" then
         if before ~= nil then
             STATE.peers[k] = nil
-            local okEmit, errEmit = _emitUpdated(M.getState(), { peer = k, action = "bye" }, source)
-            if not okEmit then return false, errEmit end
         end
+        STATE.rowFactsByProfile[tostring(env.fromProfile)] = nil
+
+        local okEmit, errEmit = _emitUpdated(M.getState(), {
+            peer = k,
+            action = "bye",
+            profile = tostring(env.fromProfile),
+        }, source)
+        if not okEmit then return false, errEmit end
+
         STATE.stats.receives = (tonumber(STATE.stats.receives) or 0) + 1
         STATE.stats.lastRecvTs = nowTs
         return true, nil
@@ -357,6 +544,27 @@ local function _receiveEnvelope(envOrString, source)
         lastPayloadType = tostring(payloadType),
     }
 
+    if tostring(env.topic) == "ROWFACTS" then
+        local rf, errRf = _decodeRowFactsPayload(tostring(env.payload or ""), tostring(env.fromProfile))
+        if type(rf) ~= "table" then
+            STATE.stats.ignoredBad = (tonumber(STATE.stats.ignoredBad) or 0) + 1
+            return false, "bad ROWFACTS payload: " .. tostring(errRf)
+        end
+
+        STATE.rowFactsByProfile[tostring(env.fromProfile)] = rf
+
+        local okEmit, errEmit = _emitUpdated(M.getState(), {
+            peer = k,
+            action = "rowfacts",
+            profile = tostring(env.fromProfile),
+        }, source)
+        if not okEmit then return false, errEmit end
+
+        STATE.stats.receives = (tonumber(STATE.stats.receives) or 0) + 1
+        STATE.stats.lastRecvTs = nowTs
+        return true, nil
+    end
+
     local changed = false
     if before == nil then
         changed = true
@@ -366,7 +574,8 @@ local function _receiveEnvelope(envOrString, source)
     end
 
     if changed then
-        local okEmit, errEmit = _emitUpdated(M.getState(), { peer = k, action = "seen", topic = tostring(env.topic) }, source)
+        local okEmit, errEmit = _emitUpdated(M.getState(), { peer = k, action = "seen", topic = tostring(env.topic) },
+            source)
         if not okEmit then return false, errEmit end
     end
 
@@ -380,12 +589,10 @@ local function _reannounceHelloBestEffort(source)
     STATE.myProfile = STATE.myProfile or _myProfileNameBestEffort()
     _ensureInstanceId()
 
-    -- Use primitive payload to stay compatible with string-only transport builds.
     pcall(function()
         M.publish("HELLO", "", { source = source })
     end)
 
-    -- Also emit local Updated (consumers recompute immediately).
     pcall(function()
         _emitUpdated(M.getState(), { action = "reannounce", myProfile = STATE.myProfile }, source)
     end)
@@ -413,6 +620,7 @@ function M.getState()
         myProfile = tostring(STATE.myProfile or ""),
         instanceId = tostring(STATE.instanceId or ""),
         peers = _copyPeers(STATE.peers),
+        rowFactsByProfile = _copyRowFactsMap(STATE.rowFactsByProfile),
     }
 end
 
@@ -420,12 +628,16 @@ function M.getStats()
     local peerCount = 0
     for _ in pairs(STATE.peers or {}) do peerCount = peerCount + 1 end
 
+    local rowFactsCount = 0
+    for _ in pairs(STATE.rowFactsByProfile or {}) do rowFactsCount = rowFactsCount + 1 end
+
     return {
         version = M.VERSION,
         installed = (STATE.installed == true),
         myProfile = tostring(STATE.myProfile or ""),
         instanceId = tostring(STATE.instanceId or ""),
         peerCount = peerCount,
+        rowFactsCount = rowFactsCount,
         stats = _shallowCopy(STATE.stats),
         handlers = {
             globalMsg = STATE.handlerGlobalMsg,
@@ -434,7 +646,6 @@ function M.getStats()
     }
 end
 
--- Compat helper for your existing diagnostics script (stable top-level keys).
 function M.status()
     local st = M.getStats()
     return {
@@ -442,6 +653,7 @@ function M.status()
         instanceId = st.instanceId,
         peerCount = st.peerCount,
         peers = M.getState().peers,
+        rowFactsCount = st.rowFactsCount,
         installed = st.installed,
         version = st.version,
     }
@@ -464,7 +676,6 @@ function M.publish(topic, payload, opts)
 
     local env = _mkEnvelope(topic, payload, opts)
 
-    -- encode to string (table args may be rejected by Mudlet)
     local wire = _encodeEnvelope(env)
     if type(wire) ~= "string" or wire == "" then
         return false, "failed to encode envelope"
@@ -478,11 +689,26 @@ function M.publish(topic, payload, opts)
     return false, tostring(errCall)
 end
 
+function M.publishRowFacts(rowFacts, opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    local rf, errRf = _normalizeRowFacts(rowFacts, STATE.myProfile or _myProfileNameBestEffort())
+    if type(rf) ~= "table" then
+        return false, tostring(errRf or "normalizeRowFacts failed")
+    end
+
+    local payload, errPayload = _encodeRowFactsPayload(rf)
+    if type(payload) ~= "string" or payload == "" then
+        return false, tostring(errPayload or "encodeRowFactsPayload failed")
+    end
+
+    return M.publish("ROWFACTS", payload, { source = tostring(opts.source or "publishRowFacts") })
+end
+
 function M.isProfileOnline(profileName)
     profileName = tostring(profileName or "")
     if profileName == "" then return false end
 
-    -- Self is always "online" when this service is installed (local instance truth)
     if profileName == tostring(STATE.myProfile or "") then
         return (STATE.installed == true)
     end
@@ -494,6 +720,14 @@ function M.isProfileOnline(profileName)
     end
 
     return false
+end
+
+function M.getRowFactsByProfile(profileName)
+    profileName = _trim(profileName)
+    if profileName == "" then return nil end
+    local rf = STATE.rowFactsByProfile[profileName]
+    if type(rf) ~= "table" then return nil end
+    return _deepCopy(rf)
 end
 
 function M._testClearPeers()
@@ -525,10 +759,21 @@ function M._testNotePeer(profileName, opts)
     return true, nil
 end
 
+function M._testSetRowFacts(profileName, rowFacts, opts)
+    opts = (type(opts) == "table") and opts or {}
+    return _storeRowFacts(profileName, rowFacts, tostring(opts.source or "test:setRowFacts"))
+end
+
+function M._testClearRowFacts()
+    STATE.rowFactsByProfile = {}
+    local okEmit, errEmit = _emitUpdated(M.getState(), { action = "rowfacts_clear" }, "test:clearRowFacts")
+    if not okEmit then return false, errEmit end
+    return true
+end
+
 function M.install(opts)
     opts = (type(opts) == "table") and opts or {}
 
-    -- If already installed, still re-announce HELLO (best-effort) so late joiners discover us.
     if STATE.installed == true then
         local allowReannounce = (opts.reannounce ~= false)
         if allowReannounce then
@@ -547,11 +792,9 @@ function M.install(opts)
     STATE.myProfile = _myProfileNameBestEffort()
     _ensureInstanceId()
 
-    -- Receive cross-profile envelope messages
     local handlerId = nil
     do
         local okCall, idOrErr = pcall(registerAnonymousEventHandler, GLOBAL_EVENT_NAME, function(_, wire)
-            -- wire is usually a string in your Mudlet build; but accept table too for compatibility.
             _receiveEnvelope(wire, "cpc:recv")
         end)
         if okCall and idOrErr ~= nil then
@@ -563,13 +806,11 @@ function M.install(opts)
 
     STATE.handlerGlobalMsg = handlerId
 
-    -- Best-effort BYE on sysExitEvent (immediate close detection)
     local exitId = nil
     do
         local okCall, idOrErr = pcall(registerAnonymousEventHandler, "sysExitEvent", function()
-            -- best-effort: do not error on exit
             pcall(function()
-                M.publish("BYE", { profile = STATE.myProfile, instanceId = STATE.instanceId }, { source = "sysExitEvent" })
+                M.publish("BYE", "", { source = "sysExitEvent" })
             end)
         end)
         if okCall and idOrErr ~= nil then
@@ -580,12 +821,10 @@ function M.install(opts)
 
     STATE.installed = true
 
-    -- Send HELLO immediately when installed (start detection)
     pcall(function()
         M.publish("HELLO", "", { source = "install" })
     end)
 
-    -- Emit local Updated once (so consumers can recompute immediately)
     _emitUpdated(M.getState(), { action = "install", myProfile = STATE.myProfile }, "install")
 
     return true, nil

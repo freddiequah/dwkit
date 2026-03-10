@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.skill_registry_service
 -- Owner       : Services
--- Version     : v2026-03-10A
+-- Version     : v2026-03-10B
 -- Purpose     :
 --   - SAFE SkillRegistryService (data only).
 --   - Owns skill/spell registry (data-driven), emits updates.
@@ -9,6 +9,7 @@
 --   - Provides lookups by practiceKey and alias, plus list helpers.
 --   - Supports transitional cross-class learn-spec declarations while keeping
 --     legacy classKey + minLevel defs valid.
+--   - Provides class-specific learn requirement resolution from canonical defs.
 --   - No UI, no persistence, no timers, no send().
 --   - Hardened validation: detects duplicate practiceKey + alias collisions.
 --
@@ -25,6 +26,7 @@
 --   - resolveByAlias(alias) -> table|nil
 --   - listByClass(classKey, kind?) -> table (array of defs)
 --   - listByKind(kind) -> table (array of defs)
+--   - getLearnRequirementForClass(defOrKey, classKey?) -> table|nil req, string|nil err
 --   - setRegistry(registry, opts?) -> boolean ok, string|nil err
 --   - upsert(key, def, opts?) -> boolean ok, string|nil err
 --   - remove(key, opts?) -> boolean ok, string|nil err
@@ -39,7 +41,7 @@
 
 local M               = {}
 
-M.VERSION             = "v2026-03-10A"
+M.VERSION             = "v2026-03-10B"
 
 local ID              = require("dwkit.core.identity")
 local BUS             = require("dwkit.bus.event_bus")
@@ -325,6 +327,78 @@ local function _defMatchesClass(def, ck)
     return false
 end
 
+local function _firstLearnSpec(def)
+    if type(def) ~= "table" then return nil end
+    local specs = def.learnSpecs
+    if type(specs) ~= "table" or #specs <= 0 then return nil end
+    local first = specs[1]
+    if type(first) ~= "table" then return nil end
+    return _shallowCopy(first)
+end
+
+local function _legacyLearnRequirement(def)
+    if _hasLegacyLearn(def) ~= true then
+        return nil
+    end
+    return {
+        classKey = tostring(def.classKey),
+        minLevel = tonumber(def.minLevel),
+        tags = _normalizeTags(def.tags or {}),
+        source = "legacy",
+        matched = true,
+    }
+end
+
+local function _matchLearnSpec(def, ck)
+    if type(def) ~= "table" or type(ck) ~= "string" or ck == "" then
+        return nil
+    end
+    local specs = def.learnSpecs
+    if type(specs) ~= "table" then
+        return nil
+    end
+    for i = 1, #specs do
+        local spec = specs[i]
+        if type(spec) == "table" and tostring(spec.classKey or "") == ck then
+            local out = _shallowCopy(spec)
+            out.classKey = tostring(out.classKey or "")
+            out.minLevel = tonumber(out.minLevel or 0) or 0
+            out.tags = _normalizeTags(out.tags or {})
+            out.source = "learnSpecs"
+            out.matched = true
+            out.learnSpecIndex = i
+            return out
+        end
+    end
+    return nil
+end
+
+local function _resolveDefInput(defOrKey)
+    if type(defOrKey) == "table" then
+        return defOrKey, nil
+    end
+    if type(defOrKey) ~= "string" or _trim(defOrKey) == "" then
+        return nil, "getLearnRequirementForClass(defOrKey, classKey): defOrKey invalid"
+    end
+
+    local def = M.getDef(_trim(defOrKey))
+    if type(def) == "table" then
+        return def, nil
+    end
+
+    def = M.resolveByPracticeKey(defOrKey)
+    if type(def) == "table" then
+        return def, nil
+    end
+
+    def = M.resolveByAlias(defOrKey)
+    if type(def) == "table" then
+        return def, nil
+    end
+
+    return nil, "getLearnRequirementForClass(defOrKey, classKey): def not found: " .. tostring(defOrKey)
+end
+
 function M.validateDef(def, opts)
     opts = opts or {}
     if type(def) ~= "table" then
@@ -587,6 +661,50 @@ function M.listByKind(kind)
     end)
 
     return out
+end
+
+function M.getLearnRequirementForClass(defOrKey, classKey)
+    local def, errDef = _resolveDefInput(defOrKey)
+    if type(def) ~= "table" then
+        return nil, tostring(errDef or "def not found")
+    end
+
+    if classKey ~= nil then
+        local ck, errCk = M.normalizeClassKey(classKey)
+        if not ck then
+            return nil, "getLearnRequirementForClass(defOrKey, classKey): classKey invalid: " .. tostring(errCk)
+        end
+
+        local spec = _matchLearnSpec(def, ck)
+        if spec then
+            return spec, nil
+        end
+
+        local legacy = _legacyLearnRequirement(def)
+        if legacy and tostring(legacy.classKey or "") == ck then
+            return legacy, nil
+        end
+
+        return nil, "getLearnRequirementForClass(defOrKey, classKey): no learn requirement for classKey=" .. tostring(ck)
+    end
+
+    local legacy = _legacyLearnRequirement(def)
+    if legacy then
+        return legacy, nil
+    end
+
+    local first = _firstLearnSpec(def)
+    if type(first) == "table" then
+        first.classKey = tostring(first.classKey or "")
+        first.minLevel = tonumber(first.minLevel or 0) or 0
+        first.tags = _normalizeTags(first.tags or {})
+        first.source = "learnSpecs:first"
+        first.matched = true
+        first.learnSpecIndex = 1
+        return first, nil
+    end
+
+    return nil, "getLearnRequirementForClass(defOrKey, classKey): def has no learn requirement"
 end
 
 function M.validateAll(opts)

@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-10A
+-- Version     : v2026-03-10D
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-10A"
+M.VERSION = "v2026-03-10D"
 
 local SUITES = {
     default = {
@@ -62,18 +62,39 @@ local SUITES = {
     cpc_smoke = {
         title = "cpc_smoke",
         description =
-        "CrossProfileComm smoke: print installed state, inject a fake peer (session-only) and assert isProfileOnline works. Then (manual) open/close another Mudlet profile and observe Presence roster change.",
+        "CrossProfileComm smoke: print installed state, inject a fake peer (session-only) and assert isProfileOnline works, then verify ROWFACTS session store helpers for represented-row facts. Then (manual) open/close another Mudlet profile and observe Presence roster change.",
         delay = 0.35,
         steps = {
             {
                 cmd =
-                'lua do local C=require("dwkit.services.cross_profile_comm_service"); local ok,err=C.install({quiet=true}); print(string.format("[dwverify-cpc] install ok=%s err=%s", tostring(ok==true), tostring(err))) local st=C.getStats(); print(string.format("[dwverify-cpc] myProfile=%s instanceId=%s peerCount=%s", tostring(st.myProfile), tostring(st.instanceId), tostring(st.peerCount))) end',
+                'lua do local C=require("dwkit.services.cross_profile_comm_service"); local ok,err=C.install({quiet=true}); print(string.format("[dwverify-cpc] install ok=%s err=%s", tostring(ok==true), tostring(err))) local st=C.getStats(); print(string.format("[dwverify-cpc] myProfile=%s instanceId=%s peerCount=%s rowFactsCount=%s", tostring(st.myProfile), tostring(st.instanceId), tostring(st.peerCount), tostring(st.rowFactsCount or 0))) end',
                 note = "Ensure CPC service installed and print state.",
             },
             {
                 cmd =
-                'lua do local C=require("dwkit.services.cross_profile_comm_service"); C._testClearPeers(); local ok,err=C._testNotePeer("Profile-B",{instanceId="TEST-1"}); if ok==false then error("testNotePeer failed: "..tostring(err)) end; if C.isProfileOnline("Profile-B")~=true then error("Expected Profile-B online after testNotePeer") end; local st=C.getStats(); print(string.format("[dwverify-cpc] PASS test peer online peerCount=%s", tostring(st.peerCount))) end',
+                'lua do local C=require("dwkit.services.cross_profile_comm_service"); local ok1,err1=C._testClearPeers(); if ok1==false then error("testClearPeers failed: "..tostring(err1)) end; local ok2,err2=C._testClearRowFacts(); if ok2==false then error("testClearRowFacts failed: "..tostring(err2)) end; local st=C.getStats(); print(string.format("[dwverify-cpc] cleared fixtures peerCount=%s rowFactsCount=%s", tostring(st.peerCount), tostring(st.rowFactsCount or 0))) if tonumber(st.peerCount or -1)~=0 then error("Expected peerCount=0 after clear") end; if tonumber(st.rowFactsCount or -1)~=0 then error("Expected rowFactsCount=0 after clear") end end',
+                note = "Clear CPC deterministic peer + rowFacts fixtures to known baseline.",
+            },
+            {
+                cmd =
+                'lua do local C=require("dwkit.services.cross_profile_comm_service"); local ok,err=C._testNotePeer("Profile-B",{instanceId="TEST-1"}); if ok==false then error("testNotePeer failed: "..tostring(err)) end; if C.isProfileOnline("Profile-B")~=true then error("Expected Profile-B online after testNotePeer") end; local st=C.getStats(); print(string.format("[dwverify-cpc] PASS test peer online peerCount=%s", tostring(st.peerCount))) end',
                 note = "Deterministic local test: inject a fake peer and assert online=true.",
+            },
+            {
+                cmd =
+                'lua do local C=require("dwkit.services.cross_profile_comm_service"); local ok,err=C._testSetRowFacts("Profile-B",{name="Scynox",class="Cleric",level=20,learnedByPracticeKey={["heal"]=true,["power heal"]=false,["guard"]=false}},{source="dwverify:cpc:rowfacts"}); if ok==false then error("testSetRowFacts failed: "..tostring(err)) end; local rf=C.getRowFactsByProfile("Profile-B"); if type(rf)~="table" then error("Expected rowFacts for Profile-B") end; print(string.format("[dwverify-cpc] rowFacts profile=Profile-B name=%s class=%s level=%s heal=%s powerheal=%s guard=%s", tostring(rf.name or "nil"), tostring(rf.class or rf.classKey or "nil"), tostring(rf.level or "nil"), tostring(rf.learnedByPracticeKey and rf.learnedByPracticeKey["heal"]), tostring(rf.learnedByPracticeKey and rf.learnedByPracticeKey["power heal"]), tostring(rf.learnedByPracticeKey and rf.learnedByPracticeKey["guard"]))) if tostring(rf.name or "")~="Scynox" then error("Expected rowFacts name=Scynox; got "..tostring(rf.name)) end; if tostring(rf.class or "")~="Cleric" then error("Expected rowFacts class=Cleric; got "..tostring(rf.class)) end; if tonumber(rf.level or 0)~=20 then error("Expected rowFacts level=20; got "..tostring(rf.level)) end; if rf.learnedByPracticeKey["heal"]~=true then error("Expected learnedByPracticeKey[heal]=true") end; if rf.learnedByPracticeKey["power heal"]~=false then error("Expected learnedByPracticeKey[power heal]=false") end; if rf.learnedByPracticeKey["guard"]~=false then error("Expected learnedByPracticeKey[guard]=false") end end',
+                note =
+                "ASSERT: ROWFACTS session store accepts deterministic represented-row facts and preserves normalized learnedByPracticeKey values.",
+            },
+            {
+                cmd =
+                'lua do local C=require("dwkit.services.cross_profile_comm_service"); local st=C.getStats(); print(string.format("[dwverify-cpc] stats peerCount=%s rowFactsCount=%s", tostring(st.peerCount), tostring(st.rowFactsCount or 0))) if tonumber(st.rowFactsCount or 0) < 1 then error("Expected rowFactsCount >= 1 after test rowFacts set") end; local s=C.status(); print(string.format("[dwverify-cpc] status installed=%s peerCount=%s rowFactsCount=%s", tostring(s.installed), tostring(s.peerCount), tostring(s.rowFactsCount or 0))) end',
+                note = "ASSERT: stats/status surface rowFactsCount for diagnostics.",
+            },
+            {
+                cmd =
+                'lua do local C=require("dwkit.services.cross_profile_comm_service"); local ok,err=C._testClearRowFacts(); if ok==false then error("testClearRowFacts cleanup failed: "..tostring(err)) end; local rf=C.getRowFactsByProfile("Profile-B"); if rf~=nil then error("Expected rowFacts cleared for Profile-B") end; local st=C.getStats(); print(string.format("[dwverify-cpc] PASS rowFacts cleanup rowFactsCount=%s", tostring(st.rowFactsCount or 0))) if tonumber(st.rowFactsCount or -1)~=0 then error("Expected rowFactsCount=0 after cleanup") end end',
+                note = "Cleanup deterministic ROWFACTS fixture and assert store returns to baseline.",
             },
             {
                 cmd =
@@ -140,7 +161,7 @@ local SUITES = {
     skill_registry_smoke = {
         title = "skill_registry_smoke",
         description =
-        "SkillRegistry smoke: assert baseline cleric/warrior/thief enrichment still passes, then assert transitional cross-class learnSpecs support works without breaking current behavior. Also confirms dwskills prints without error.",
+        "SkillRegistry smoke: assert baseline cleric/warrior/thief enrichment still passes, then assert transitional cross-class learnSpecs support works without breaking current behavior. Also confirms shared canonical class-specific learn requirement resolution and dwskills prints without error.",
         delay = 0.20,
         steps = {
             {
@@ -210,6 +231,11 @@ local SUITES = {
             },
             {
                 cmd =
+                'lua do local S=require("dwkit.services.skill_registry_service"); local req1,err1=S.getLearnRequirementForClass("fixture shared blessing","cleric"); if type(req1)~="table" then error("Expected cleric learn requirement; err="..tostring(err1)) end; if tostring(req1.classKey)~="cleric" then error("Expected req1.classKey=cleric; got "..tostring(req1.classKey)) end; if tonumber(req1.minLevel or -1)~=12 then error("Expected req1.minLevel=12; got "..tostring(req1.minLevel)) end; local req2,err2=S.getLearnRequirementForClass("fixture shared blessing","paladin"); if type(req2)~="table" then error("Expected paladin learn requirement; err="..tostring(err2)) end; if tostring(req2.classKey)~="paladin" then error("Expected req2.classKey=paladin; got "..tostring(req2.classKey)) end; if tonumber(req2.minLevel or -1)~=29 then error("Expected req2.minLevel=29; got "..tostring(req2.minLevel)) end; local req3,err3=S.getLearnRequirementForClass("fixture shared blessing"); if type(req3)~="table" then error("Expected default learn requirement; err="..tostring(err3)) end; if tostring(req3.classKey)~="cleric" then error("Expected default learn requirement to use first spec cleric; got "..tostring(req3.classKey)) end; print("[dwverify-skillreg] PASS getLearnRequirementForClass shared fixture") end',
+                note = "ASSERT: canonical shared def resolves class-specific learn requirements.",
+            },
+            {
+                cmd =
                 'lua do local S=require("dwkit.services.skill_registry_service"); local ok,err=S.remove("fixture shared blessing",{source="dwverify:skillreg:shared_fixture_cleanup"}); print(string.format("[dwverify-skillreg] cleanup shared fixture ok=%s err=%s", tostring(ok==true), tostring(err))) if ok~=true then error("Expected remove shared fixture PASS") end; local gone=S.resolveByPracticeKey("fixture shared blessing"); if gone~=nil then error("Expected shared fixture removed") end; local ok2,issues2=S.validateAll({strictClassList=true}); if ok2~=true then error("Expected validateAll PASS after cleanup; issues="..tostring(type(issues2)=="table" and #issues2 or "nil")) end; print("[dwverify-skillreg] PASS shared fixture cleanup") end',
                 note = "Cleanup transient shared fixture and assert registry returns to clean baseline.",
             },
@@ -268,7 +294,7 @@ local SUITES = {
     actionpad_gating_ui_smoke = {
         title = "actionpad_gating_ui_smoke",
         description =
-        "ActionPad gating UI smoke (Bucket B): deterministic seed (owned_profiles + Presence + ActionPadService rows), ingest Practice+Score fixtures, set AssistBy deterministically, show ActionPad UI, then ASSERT ActionPadService.resolveActionGate returns expected reason codes: ok/not_learned/unknown_stale.practice/unknown_stale.score/below_level/wrong_class. No gameplay sends.",
+        "ActionPad gating UI smoke (Bucket B + represented-row facts): deterministic seed (owned_profiles + Presence + ActionPadService rows), ingest Practice+Score fixtures, set AssistBy deterministically, show ActionPad UI, then ASSERT ActionPadService.resolveActionGate returns expected reason codes for local fallback and represented-row-facts path: ok/not_learned/unknown_stale.practice/unknown_stale.score/below_level/wrong_class. No gameplay sends.",
         delay = 0.25,
         steps = {
             {
@@ -333,8 +359,33 @@ local SUITES = {
             },
             {
                 cmd =
-                'lua do local P=require("dwkit.services.practice_store_service"); local ok,err=P.ingestFixture("basic",{source="dwverify:actionpad_gating_ui:practice_fixture2"}); if ok~=true then error("practice ingestFixture failed: "..tostring(err)) end; local S=require("dwkit.services.score_store_service"); local ok2,err2=S.clear({source="dwverify:actionpad_gating_ui:score_clear"}); if ok2==false then error("score clear failed: "..tostring(err2)) end; local A=require("dwkit.services.actionpad_service"); local g=A.resolveActionGate({kind="spell",practiceKey="heal",displayName="Heal",minLevel=1,classKey="warrior"}); print(string.format("[dwverify-actionpad-gui] gate score stale enabled=%s reason=%s detail=%s", tostring(g.enabled==true), tostring(g.reason), tostring(g.detail))) if g.enabled~=false then error("Expected score stale enabled=false") end; if tostring(g.reason)~="unknown_stale.score" then error("Expected unknown_stale.score; got "..tostring(g.reason)) end; print("[dwverify-actionpad-gui] PASS actionpad_gating_ui_smoke (service gate assertions)") end',
+                'lua do local P=require("dwkit.services.practice_store_service"); local ok,err=P.ingestFixture("basic",{source="dwverify:actionpad_gating_ui:practice_fixture2"}); if ok~=true then error("practice ingestFixture failed: "..tostring(err)) end; local S=require("dwkit.services.score_store_service"); local ok2,err2=S.clear({source="dwverify:actionpad_gating_ui:score_clear"}); if ok2==false then error("score clear failed: "..tostring(err2)) end; local A=require("dwkit.services.actionpad_service"); local g=A.resolveActionGate({kind="spell",practiceKey="heal",displayName="Heal",minLevel=1,classKey="warrior"}); print(string.format("[dwverify-actionpad-gui] gate score stale enabled=%s reason=%s detail=%s", tostring(g.enabled==true), tostring(g.reason), tostring(g.detail))) if g.enabled~=false then error("Expected score stale enabled=false") end; if tostring(g.reason)~="unknown_stale.score" then error("Expected unknown_stale.score; got "..tostring(g.reason)) end; print("[dwverify-actionpad-gui] PASS actionpad_gating_ui_smoke local fallback assertions") end',
                 note = "ASSERT: unknown_stale.score after ScoreStore.clear (with minLevel/classKey forcing scoreNeeded).",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local g=A.resolveActionGate({kind="spell",practiceKey="heal",displayName="Heal",rowFacts={name="Scynox",class="Cleric",level=20,practiceStatusByKey={["heal"]={ok=true,learned=true,reason="ok"}}}}); print(string.format("[dwverify-actionpad-gui] rowFacts heal enabled=%s reason=%s classKey=%s level=%s source=%s", tostring(g.enabled==true), tostring(g.reason), tostring(g.classKey or "nil"), tostring(g.level or "nil"), tostring(g.source or "nil"))) if g.enabled~=true then error("Expected rowFacts heal enabled=true; got reason="..tostring(g.reason)) end; if tostring(g.reason)~="ok" then error("Expected rowFacts heal reason=ok; got "..tostring(g.reason)) end; if tostring(g.classKey or "")~="cleric" then error("Expected rowFacts classKey=cleric; got "..tostring(g.classKey)) end; if tonumber(g.level or 0)~=20 then error("Expected rowFacts level=20; got "..tostring(g.level)) end end',
+                note = "ASSERT: represented-row facts can drive an OK gate independent of viewer-local score.",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local g=A.resolveActionGate({kind="spell",practiceKey="power heal",displayName="Power Heal",rowFacts={name="Scynox",classKey="cleric",level=30,learnedByPracticeKey={["power heal"]=false}}}); print(string.format("[dwverify-actionpad-gui] rowFacts power heal enabled=%s reason=%s source=%s", tostring(g.enabled==true), tostring(g.reason), tostring(g.source or "nil"))) if g.enabled~=false then error("Expected rowFacts power heal enabled=false") end; if tostring(g.reason)~="not_learned" then error("Expected rowFacts power heal reason=not_learned; got "..tostring(g.reason)) end end',
+                note = "ASSERT: represented-row learned=false yields not_learned without local PracticeStore dependency.",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local g=A.resolveActionGate({kind="skill",practiceKey="guard",displayName="Guard",rowFacts={name="Scynox",class="Cleric",level=25,practiceStatusByKey={["guard"]={ok=true,learned=true,reason="ok"}}}}); print(string.format("[dwverify-actionpad-gui] rowFacts shared/wrong_class enabled=%s reason=%s detail=%s", tostring(g.enabled==true), tostring(g.reason), tostring(g.detail))) if g.enabled~=false then error("Expected rowFacts wrong_class enabled=false") end; if tostring(g.reason)~="wrong_class" then error("Expected rowFacts wrong_class reason=wrong_class; got "..tostring(g.reason)) end end',
+                note = "ASSERT: canonical registry class requirement is evaluated against represented-row class facts.",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local g=A.resolveActionGate({kind="spell",practiceKey="heal",displayName="Heal",rowFacts={name="Scynox",class="Cleric",level=20,practiceStale=true}}); print(string.format("[dwverify-actionpad-gui] rowFacts practice stale enabled=%s reason=%s source=%s", tostring(g.enabled==true), tostring(g.reason), tostring(g.source or "nil"))) if g.enabled~=false then error("Expected rowFacts practice stale enabled=false") end; if tostring(g.reason)~="unknown_stale.practice" then error("Expected rowFacts practice stale reason=unknown_stale.practice; got "..tostring(g.reason)) end end',
+                note = "ASSERT: rowFacts practiceStale yields unknown_stale.practice.",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local g=A.resolveActionGate({kind="spell",practiceKey="heal",displayName="Heal",classKey="cleric",minLevel=8,rowFacts={name="Scynox",scoreStale=true,practiceStatusByKey={["heal"]={ok=true,learned=true,reason="ok"}}}}); print(string.format("[dwverify-actionpad-gui] rowFacts score stale enabled=%s reason=%s source=%s", tostring(g.enabled==true), tostring(g.reason), tostring(g.source or "nil"))) if g.enabled~=false then error("Expected rowFacts score stale enabled=false") end; if tostring(g.reason)~="unknown_stale.score" then error("Expected rowFacts score stale reason=unknown_stale.score; got "..tostring(g.reason)) end end',
+                note = "ASSERT: rowFacts scoreStale yields unknown_stale.score when score is required.",
             },
             {
                 cmd =

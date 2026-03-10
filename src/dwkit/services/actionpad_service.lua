@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.actionpad_service
 -- Owner       : Services
--- Version     : v2026-03-09A
+-- Version     : v2026-03-10C
 -- Purpose     :
 --   - SAFE ActionPadService (data only).
 --   - Produces "online-only" roster rows for ActionPad UI, based on PresenceService
@@ -13,6 +13,11 @@
 --     WITHOUT persistence, manual-triggered only.
 --   - Provides deterministic gating helpers for ActionPad UI (Practice/Score/Registry),
 --     WITHOUT sending.
+--   - Supports represented-row facts for gating when provided by caller
+--     (for example CPC-fed row facts), while preserving current local-store
+--     fallback behavior when row facts are absent.
+--   - Provides best-effort row-facts lookup by represented character using existing
+--     owned_profiles + CPC composition.
 --   - Provides deterministic assistBy/healer selection helpers for ActionPad UI (Bucket C),
 --     WITHOUT sending, WITHOUT persistence.
 --   - No UI, no persistence, no timers.
@@ -25,6 +30,7 @@
 --   - recompute(opts?) -> boolean ok, string|nil err
 --   - getRowsOnlineOnly() -> array of row records (copy)
 --   - resolveOwnedProfileLabel(name) -> string|nil profileLabel, string|nil err
+--   - getRowFactsForCharacter(name) -> table|nil
 --
 -- AssistBy / Healer selection (NO SEND):
 --   - getAssistByState() -> table (copy)
@@ -59,10 +65,19 @@
 --
 -- Gating (NO SEND):
 --   - resolveActionGate(spec, opts?) -> table gate
---       spec: { kind, practiceKey, displayName?, minLevel?, classKey? }
+--       spec: { kind, practiceKey, displayName?, minLevel?, classKey?, rowFacts? }
 --       opts:
 --         - honorSpec=true: if spec explicitly provides classKey/minLevel, do not override
 --           those fields from SkillRegistry def. (Default false; UI uses default behavior.)
+--         - rowFacts=table: represented-row facts override local viewer facts when provided.
+--           Supported best-effort fields:
+--             * name
+--             * classKey or class
+--             * level
+--             * practiceStatusByKey[practiceKey] = { ok, learned, reason, ... }
+--             * learnedByPracticeKey[practiceKey] = true|false
+--             * practiceStale=true
+--             * scoreStale=true
 --       gate: { enabled, reason, detail, learned?, tier?, cost?, percent?, level?, classKey? }
 --
 -- Events Emitted:
@@ -79,7 +94,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-09A"
+M.VERSION = "v2026-03-10C"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -112,6 +127,15 @@ local function _shallowCopy(t)
     local out = {}
     if type(t) ~= "table" then return out end
     for k, v in pairs(t) do out[k] = v end
+    return out
+end
+
+local function _deepCopy(v)
+    if type(v) ~= "table" then return v end
+    local out = {}
+    for k, val in pairs(v) do
+        out[k] = _deepCopy(val)
+    end
     return out
 end
 
@@ -234,6 +258,19 @@ function M.resolveOwnedProfileLabel(name)
         return nil, "resolveOwnedProfileLabel(name): not mapped in owned_profiles: " .. tostring(name)
     end
     return _trim(label), nil
+end
+
+local function _findOnlineRowByName(name)
+    name = _trim(name)
+    if name == "" then return nil end
+    local rows = (type(STATE.rowsOnline) == "table") and STATE.rowsOnline or {}
+    for i = 1, #rows do
+        local r = rows[i]
+        if type(r) == "table" and tostring(r.name or "") == name then
+            return r
+        end
+    end
+    return nil
 end
 
 -- -------------------------------------------------------------------------
@@ -566,6 +603,55 @@ function M.cycleAssistBy(delta, opts)
 end
 
 -- -------------------------------------------------------------------------
+-- Represented-row facts helpers
+-- -------------------------------------------------------------------------
+
+local function _getCrossProfileRowFactsBestEffort(profileLabel)
+    profileLabel = _trim(profileLabel)
+    if profileLabel == "" then return nil end
+
+    local okC, C = _safeRequire("dwkit.services.cross_profile_comm_service")
+    if not okC or type(C) ~= "table" then
+        return nil
+    end
+    if type(C.getRowFactsByProfile) ~= "function" then
+        return nil
+    end
+
+    local ok, rf = pcall(C.getRowFactsByProfile, profileLabel)
+    if not ok or type(rf) ~= "table" then
+        return nil
+    end
+    return _deepCopy(rf)
+end
+
+function M.getRowFactsForCharacter(name)
+    name = _trim(name)
+    if name == "" then return nil end
+
+    local row = _findOnlineRowByName(name)
+    if type(row) ~= "table" then
+        return nil
+    end
+
+    local profileLabel = _trim(row.profileLabel)
+    if profileLabel == "" then
+        return nil
+    end
+
+    local rf = _getCrossProfileRowFactsBestEffort(profileLabel)
+    if type(rf) ~= "table" then
+        return nil
+    end
+
+    if _trim(rf.name) == "" then
+        rf.name = name
+    end
+    rf.profileLabel = profileLabel
+    return rf
+end
+
+-- -------------------------------------------------------------------------
 -- Gating helpers
 -- -------------------------------------------------------------------------
 
@@ -578,6 +664,18 @@ local function _normalizePracticeKeyBestEffort(raw)
         end
     end
     return _trim(raw)
+end
+
+local function _normalizeClassKeyBestEffort(displayClass)
+    local okR, R = _safeRequire("dwkit.services.skill_registry_service")
+    if okR and type(R) == "table" and type(R.normalizeClassKey) == "function" then
+        local ok, ck, err = pcall(R.normalizeClassKey, tostring(displayClass or ""))
+        if ok and type(ck) == "string" and ck ~= "" then
+            return ck, nil
+        end
+        return nil, tostring(err or "normalizeClassKey failed")
+    end
+    return nil, "skill_registry_service.normalizeClassKey not available"
 end
 
 local function _skillRegistryResolveBestEffort(kind, practiceKey)
@@ -616,6 +714,61 @@ local function _skillRegistryResolveBestEffort(kind, practiceKey)
     return def
 end
 
+local function _skillRegistryLearnReqBestEffort(def, rowClassKey)
+    if type(def) ~= "table" then
+        return nil
+    end
+
+    local okS, S = _safeRequire("dwkit.services.skill_registry_service")
+    if okS and type(S) == "table" and type(S.getLearnRequirementForClass) == "function" then
+        local ok, req, err = pcall(S.getLearnRequirementForClass, def, rowClassKey)
+        if ok and type(req) == "table" then
+            return req
+        end
+    end
+
+    if type(rowClassKey) == "string" and rowClassKey ~= "" then
+        local specs = def.learnSpecs
+        if type(specs) == "table" then
+            for i = 1, #specs do
+                local spec = specs[i]
+                if type(spec) == "table" and tostring(spec.classKey or "") == rowClassKey then
+                    return {
+                        classKey = tostring(spec.classKey or ""),
+                        minLevel = tonumber(spec.minLevel or 0) or 0,
+                        tags = type(spec.tags) == "table" and spec.tags or {},
+                        source = "learnSpecs:fallback",
+                        matched = true,
+                    }
+                end
+            end
+        end
+    end
+
+    if _trim(def.classKey) ~= "" and tonumber(def.minLevel) ~= nil then
+        return {
+            classKey = _trim(def.classKey),
+            minLevel = tonumber(def.minLevel),
+            tags = type(def.tags) == "table" and def.tags or {},
+            source = "legacy:fallback",
+            matched = true,
+        }
+    end
+
+    local specs = def.learnSpecs
+    if type(specs) == "table" and #specs == 1 and type(specs[1]) == "table" then
+        return {
+            classKey = tostring(specs[1].classKey or ""),
+            minLevel = tonumber(specs[1].minLevel or 0) or 0,
+            tags = type(specs[1].tags) == "table" and specs[1].tags or {},
+            source = "learnSpecs:first_fallback",
+            matched = true,
+        }
+    end
+
+    return nil
+end
+
 local function _scoreCoreBestEffort()
     local okS, S = _safeRequire("dwkit.services.score_store_service")
     if not okS or type(S) ~= "table" or type(S.getCore) ~= "function" then
@@ -626,18 +779,6 @@ local function _scoreCoreBestEffort()
         return { ok = false, reason = "unknown_stale" }
     end
     return core
-end
-
-local function _normalizeClassKeyBestEffort(displayClass)
-    local okR, R = _safeRequire("dwkit.services.skill_registry_service")
-    if okR and type(R) == "table" and type(R.normalizeClassKey) == "function" then
-        local ok, ck, err = pcall(R.normalizeClassKey, tostring(displayClass or ""))
-        if ok and type(ck) == "string" and ck ~= "" then
-            return ck, nil
-        end
-        return nil, tostring(err or "normalizeClassKey failed")
-    end
-    return nil, "skill_registry_service.normalizeClassKey not available"
 end
 
 local function _practiceLearnStatusBestEffort(kind, practiceKey)
@@ -662,6 +803,152 @@ local function _practiceLearnStatusBestEffort(kind, practiceKey)
         }
     end
     return st
+end
+
+local function _resolveRowFacts(spec, opts)
+    spec = (type(spec) == "table") and spec or {}
+    opts = (type(opts) == "table") and opts or {}
+    local rowFacts = nil
+
+    if type(opts.rowFacts) == "table" then
+        rowFacts = opts.rowFacts
+    elseif type(spec.rowFacts) == "table" then
+        rowFacts = spec.rowFacts
+    end
+
+    if type(rowFacts) ~= "table" then
+        return nil
+    end
+
+    return rowFacts
+end
+
+local function _practiceStatusFromRowFacts(rowFacts, kind, practiceKey)
+    if type(rowFacts) ~= "table" then
+        return nil
+    end
+
+    if rowFacts.practiceStale == true or tostring(rowFacts.practiceState or "") == "stale" then
+        return {
+            ok = false,
+            learned = false,
+            reason = "unknown_stale",
+            hasSnapshot = false,
+            hasParsed = false,
+            source = "rowFacts",
+        }
+    end
+
+    local map = nil
+    if type(rowFacts.practiceStatusByKey) == "table" then
+        map = rowFacts.practiceStatusByKey
+    elseif type(rowFacts.practiceStatuses) == "table" then
+        map = rowFacts.practiceStatuses
+    end
+
+    if type(map) == "table" then
+        local st = map[practiceKey] or map[tostring(kind or "") .. ":" .. tostring(practiceKey or "")]
+        if type(st) == "table" then
+            local out = _shallowCopy(st)
+            if out.ok == nil and out.learned == true and _trim(out.reason) == "" then
+                out.ok = true
+                out.reason = "ok"
+            elseif out.ok == nil and out.learned == false and _trim(out.reason) == "" then
+                out.ok = true
+                out.reason = "not_learned"
+            end
+            if _trim(out.reason) == "" then
+                out.reason = "ok"
+            end
+            out.source = "rowFacts"
+            return out
+        end
+    end
+
+    local learnedMap = nil
+    if type(rowFacts.learnedByPracticeKey) == "table" then
+        learnedMap = rowFacts.learnedByPracticeKey
+    elseif type(rowFacts.practiceKeysLearned) == "table" then
+        learnedMap = rowFacts.practiceKeysLearned
+    end
+
+    if type(learnedMap) == "table" then
+        local v = learnedMap[practiceKey]
+        if v == true then
+            return {
+                ok = true,
+                learned = true,
+                reason = "ok",
+                hasSnapshot = true,
+                hasParsed = true,
+                source = "rowFacts",
+            }
+        elseif v == false then
+            return {
+                ok = true,
+                learned = false,
+                reason = "not_learned",
+                hasSnapshot = true,
+                hasParsed = true,
+                source = "rowFacts",
+            }
+        end
+    end
+
+    return nil
+end
+
+local function _rowFactsClassKey(rowFacts)
+    if type(rowFacts) ~= "table" then
+        return nil
+    end
+
+    local ck = _trim(rowFacts.classKey)
+    if ck ~= "" then
+        local norm, err = _normalizeClassKeyBestEffort(ck)
+        if norm then return norm end
+    end
+
+    local cls = _trim(rowFacts.class)
+    if cls ~= "" then
+        local norm, err = _normalizeClassKeyBestEffort(cls)
+        if norm then return norm end
+    end
+
+    return nil
+end
+
+local function _rowFactsScoreCore(rowFacts)
+    if type(rowFacts) ~= "table" then
+        return nil
+    end
+
+    if rowFacts.scoreStale == true or tostring(rowFacts.scoreState or "") == "stale" then
+        return {
+            ok = false,
+            reason = "unknown_stale",
+            source = "rowFacts",
+        }
+    end
+
+    local level = tonumber(rowFacts.level)
+    local classKey = _rowFactsClassKey(rowFacts)
+    local classDisplay = _trim(rowFacts.class)
+    local name = _trim(rowFacts.name)
+
+    if level ~= nil or classKey ~= nil or classDisplay ~= "" or name ~= "" then
+        return {
+            ok = true,
+            reason = "ok",
+            source = "rowFacts",
+            level = level,
+            classKey = classKey,
+            class = classDisplay ~= "" and classDisplay or classKey,
+            name = name,
+        }
+    end
+
+    return nil
 end
 
 local function _mkGate(enabled, reason, detail)
@@ -689,22 +976,38 @@ function M.resolveActionGate(spec, opts)
         return _mkGate(false, "bad_spec", "missing kind/practiceKey")
     end
 
+    local rowFacts = _resolveRowFacts(spec, opts)
+    local rowClassKey = _rowFactsClassKey(rowFacts)
+
     local def = _skillRegistryResolveBestEffort(kind, practiceKey)
     if type(def) == "table" then
         local honorSpec = (opts.honorSpec == true)
+        local learnReq = _skillRegistryLearnReqBestEffort(def, rowClassKey)
 
         if honorSpec ~= true or rawSpecMin == nil then
-            if tonumber(def.minLevel) ~= nil then wantMinLevel = tonumber(def.minLevel) end
+            if type(learnReq) == "table" and tonumber(learnReq.minLevel) ~= nil then
+                wantMinLevel = tonumber(learnReq.minLevel)
+            elseif tonumber(def.minLevel) ~= nil then
+                wantMinLevel = tonumber(def.minLevel)
+            end
         end
+
         if honorSpec ~= true or rawSpecClass == nil then
-            if _trim(def.classKey) ~= "" then wantClassKey = _trim(def.classKey) end
+            if type(learnReq) == "table" and _trim(learnReq.classKey) ~= "" then
+                wantClassKey = _trim(learnReq.classKey)
+            elseif _trim(def.classKey) ~= "" then
+                wantClassKey = _trim(def.classKey)
+            end
         end
 
         if displayName == "" and _trim(def.displayName) ~= "" then displayName = _trim(def.displayName) end
     end
     if displayName == "" then displayName = practiceKey end
 
-    local pst = _practiceLearnStatusBestEffort(kind, practiceKey)
+    local pst = _practiceStatusFromRowFacts(rowFacts, kind, practiceKey)
+    if type(pst) ~= "table" then
+        pst = _practiceLearnStatusBestEffort(kind, practiceKey)
+    end
 
     if tostring(pst.reason or "") == "unknown_stale" then
         local g = _mkGate(false, "unknown_stale.practice", "Practice snapshot missing/stale")
@@ -712,6 +1015,7 @@ function M.resolveActionGate(spec, opts)
         g.tier = pst.tier
         g.cost = pst.cost
         g.percent = pst.percent
+        g.source = pst.source
         return g
     end
 
@@ -721,6 +1025,7 @@ function M.resolveActionGate(spec, opts)
         g.tier = pst.tier
         g.cost = pst.cost
         g.percent = pst.percent
+        g.source = pst.source
         return g
     end
 
@@ -730,6 +1035,7 @@ function M.resolveActionGate(spec, opts)
         g.tier = pst.tier
         g.cost = pst.cost
         g.percent = pst.percent
+        g.source = pst.source
         return g
     end
 
@@ -742,18 +1048,28 @@ function M.resolveActionGate(spec, opts)
     local level = nil
 
     if scoreNeeded then
-        core = _scoreCoreBestEffort()
+        core = _rowFactsScoreCore(rowFacts)
+        if type(core) ~= "table" then
+            core = _scoreCoreBestEffort()
+        end
+
         if tostring(core.reason or "") == "unknown_stale" or core.ok ~= true then
             local g = _mkGate(false, "unknown_stale.score", "Score snapshot missing/stale")
             g.learned = true
             g.level = core.level
             g.class = core.class
+            g.classKey = core.classKey
+            g.name = core.name
+            g.source = core.source
             return g
         end
 
         level = tonumber(core.level or 0) or 0
-        local ck, errCk = _normalizeClassKeyBestEffort(core.class)
-        classKey = ck
+        classKey = _trim(core.classKey)
+        if classKey == "" then
+            local ck, errCk = _normalizeClassKeyBestEffort(core.class)
+            classKey = ck
+        end
 
         if wantClassKey ~= "" and classKey ~= wantClassKey then
             local got = tostring(classKey or "unknown")
@@ -763,6 +1079,8 @@ function M.resolveActionGate(spec, opts)
             g.level = level
             g.classKey = classKey
             g.class = core.class
+            g.name = core.name
+            g.source = core.source
             return g
         end
 
@@ -773,6 +1091,8 @@ function M.resolveActionGate(spec, opts)
             g.level = level
             g.classKey = classKey
             g.class = core.class
+            g.name = core.name
+            g.source = core.source
             return g
         end
     end
@@ -784,9 +1104,13 @@ function M.resolveActionGate(spec, opts)
     g.percent = pst.percent
     g.level = level
     g.classKey = classKey
+    g.name = type(rowFacts) == "table" and _trim(rowFacts.name) or nil
     if type(core) == "table" then
         g.class = core.class
-        g.name = core.name
+        g.name = g.name or core.name
+        g.source = core.source or pst.source
+    else
+        g.source = pst.source
     end
     return g
 end
