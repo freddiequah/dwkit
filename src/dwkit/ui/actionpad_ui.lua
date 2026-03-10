@@ -2,11 +2,14 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.actionpad_ui
 -- Owner       : UI
--- Version     : v2026-03-09B
+-- Version     : v2026-03-10A
 -- Purpose     :
 --   - ActionPad UI (Bucket A): online-only owned roster view with real button groups.
 --   - Consumes ActionPadService rowsOnlineOnly.
 --   - Bucket B: wires deterministic enable/disable gating (Practice/Score/Registry) + disabled reasons.
+--   - Bucket B represented-row-facts path: when ActionPadService provides row facts
+--     for a represented character, UI passes those facts into resolveActionGate so
+--     gating reflects the represented row instead of only the local viewer.
 --   - Bucket C: assistBy/healer selection rule (session-only) wired to ActionPadService.
 --   - Bucket D: dispatches owned-only RemoteExec for real non-placeholder commands, while
 --     placeholder actions remain PLAN-only.
@@ -30,7 +33,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-09B"
+M.VERSION = "v2026-03-10A"
 M.UI_ID = "actionpad_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -304,12 +307,17 @@ local function _layoutRightButtons(parent, y, rowH, btnW, gap, specs, namePrefix
     return out
 end
 
-local function _gateBestEffort(kind, practiceKey, displayName)
+local function _gateBestEffort(kind, practiceKey, displayName, rowFacts)
     local okA, A = pcall(require, "dwkit.services.actionpad_service")
     if not okA or type(A) ~= "table" or type(A.resolveActionGate) ~= "function" then
         return { enabled = false, reason = "service_missing", detail = "ActionPadService.resolveActionGate not available" }
     end
-    local g = A.resolveActionGate({ kind = kind, practiceKey = practiceKey, displayName = displayName }, {})
+    local g = A.resolveActionGate({
+        kind = kind,
+        practiceKey = practiceKey,
+        displayName = displayName,
+        rowFacts = rowFacts,
+    }, {})
     if type(g) ~= "table" then
         return { enabled = false, reason = "gate_error", detail = "resolveActionGate returned invalid gate" }
     end
@@ -338,6 +346,18 @@ local function _getAssistBy()
         }
     end
     return st
+end
+
+local function _getRowFactsForCharacter(name)
+    local okA, A = pcall(require, "dwkit.services.actionpad_service")
+    if not okA or type(A) ~= "table" or type(A.getRowFactsForCharacter) ~= "function" then
+        return nil
+    end
+    local ok, rf = pcall(A.getRowFactsForCharacter, tostring(name or ""))
+    if not ok or type(rf) ~= "table" then
+        return nil
+    end
+    return rf
 end
 
 local function _assistGate(g, assistState)
@@ -553,6 +573,7 @@ _render = function()
         local name = tostring(r.name or "?")
         local profileLabel = tostring(r.profileLabel or "?")
         local here = (r.here == true)
+        local rowFacts = _getRowFactsForCharacter(name)
 
         local blockTop = yCursor
         local line1Y = blockTop
@@ -570,6 +591,17 @@ _render = function()
 
         if type(nameLabel) == "table" then
             local txt = string.format("%s  (%s)%s", name, profileLabel, here and "  [HERE]" or "")
+            if type(rowFacts) == "table" then
+                local rk = tostring(rowFacts.classKey or rowFacts.class or "")
+                local rl = tonumber(rowFacts.level)
+                if rk ~= "" or rl ~= nil then
+                    txt = txt .. string.format("  [RF:%s%s]",
+                        rk ~= "" and rk or "?",
+                        rl ~= nil and (" L" .. tostring(rl)) or "")
+                else
+                    txt = txt .. "  [RF]"
+                end
+            end
             pcall(function() nameLabel:echo(ListKit.toPreHtml(txt)) end)
             pcall(ListKit.applyRowTextStyle, nameLabel)
         end
@@ -615,12 +647,12 @@ _render = function()
         local ctrlBtns = _layoutRightButtons(_state.widgets.listRoot, line1Y, rowH, btnW, gap, ctrlSpecs,
             "DWKit_ActionPad_Ctrl_" .. tostring(i))
 
-        local gBless = _gateBestEffort("spell", "bless", "Bless")
-        local gFeed = _gateBestEffort("spell", "feed", "Feed")
-        local gHeal = _gateBestEffort("spell", "heal", "Heal")
-        local gPHeal = _gateBestEffort("spell", "power heal", "Power Heal")
-        local gRestore = _gateBestEffort("spell", "restore", "Restore")
-        local gRej = _gateBestEffort("spell", "rejuvenate", "Rejuvenate")
+        local gBless = _gateBestEffort("spell", "bless", "Bless", rowFacts)
+        local gFeed = _gateBestEffort("spell", "feed", "Feed", rowFacts)
+        local gHeal = _gateBestEffort("spell", "heal", "Heal", rowFacts)
+        local gPHeal = _gateBestEffort("spell", "power heal", "Power Heal", rowFacts)
+        local gRestore = _gateBestEffort("spell", "restore", "Restore", rowFacts)
+        local gRej = _gateBestEffort("spell", "rejuvenate", "Rejuvenate", rowFacts)
 
         local gateBuff = _assistGate(gBless, assist)
         local gateFeed = _assistGate(gFeed, assist)
@@ -723,13 +755,13 @@ _render = function()
         local moveBtns = _layoutRightButtons(_state.widgets.listRoot, line3Y, rowH, btnW, gap, moveSpecs,
             "DWKit_ActionPad_Move_" .. tostring(i))
 
-        local gAssist = _gateBestEffort("skill", "assist", "Assist")
-        local gKick = _gateBestEffort("skill", "kick", "Kick")
-        local gBash = _gateBestEffort("skill", "bash", "Bash")
-        local gPummel = _gateBestEffort("skill", "pummel", "Pummel")
-        local gCircle = _gateBestEffort("skill", "circle", "Circle")
-        local gGuard = _gateBestEffort("skill", "guard", "Guard")
-        local gRescue = _gateBestEffort("skill", "rescue", "Rescue")
+        local gAssist = _gateBestEffort("skill", "assist", "Assist", rowFacts)
+        local gKick = _gateBestEffort("skill", "kick", "Kick", rowFacts)
+        local gBash = _gateBestEffort("skill", "bash", "Bash", rowFacts)
+        local gPummel = _gateBestEffort("skill", "pummel", "Pummel", rowFacts)
+        local gCircle = _gateBestEffort("skill", "circle", "Circle", rowFacts)
+        local gGuard = _gateBestEffort("skill", "guard", "Guard", rowFacts)
+        local gRescue = _gateBestEffort("skill", "rescue", "Rescue", rowFacts)
 
         local combatSpecs = {
             {
