@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-09E
+-- Version     : v2026-03-10A
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-09E"
+M.VERSION = "v2026-03-10A"
 
 local SUITES = {
     default = {
@@ -140,7 +140,7 @@ local SUITES = {
     skill_registry_smoke = {
         title = "skill_registry_smoke",
         description =
-        "SkillRegistry smoke: assert Phase 2 dump-backed cleric/warrior/thief enrichment baseline, canonical kind set, alias lookup, class normalization, validateAll PASS, and ActionPad-backed coverage keys exist. Also confirms dwskills prints without error.",
+        "SkillRegistry smoke: assert baseline cleric/warrior/thief enrichment still passes, then assert transitional cross-class learnSpecs support works without breaking current behavior. Also confirms dwskills prints without error.",
         delay = 0.20,
         steps = {
             {
@@ -151,42 +151,67 @@ local SUITES = {
             {
                 cmd =
                 'lua do local C=require("dwkit.data.skill_registry.cleric"); local W=require("dwkit.data.skill_registry.warrior"); local T=require("dwkit.data.skill_registry.thief"); local X=require("dwkit.data.skill_registry.seed_misc"); local c=C.getEntries(); local w=W.getEntries(); local t=T.getEntries(); local x=X.getEntries(); local function cnt(m) local n=0; for _ in pairs(m or {}) do n=n+1 end; return n end; print(string.format("[dwverify-skillreg] data modules cleric=%s warrior=%s thief=%s seed_misc=%s", tostring(cnt(c)), tostring(cnt(w)), tostring(cnt(t)), tostring(cnt(x)))) if cnt(c) < 35 then error("Expected cleric module entries >= 35") end; if cnt(w) < 13 then error("Expected warrior module entries >= 13") end; if cnt(t) < 13 then error("Expected thief module entries >= 13") end; if cnt(x) < 5 then error("Expected seed_misc module entries >= 5") end; print("[dwverify-skillreg] PASS data modules load") end',
-                note = "ASSERT: Phase 2 class modules load and contain expected dump-backed content.",
+                note = "ASSERT: current class modules still load with expected baseline content.",
             },
             {
                 cmd =
                 'lua do local S=require("dwkit.services.skill_registry_service"); local ok,issues=S.validateAll({strictClassList=true}); print(string.format("[dwverify-skillreg] validateAll ok=%s issues=%s", tostring(ok==true), tostring(type(issues)=="table" and #issues or "nil"))) if ok~=true then for i=1,math.min(10,#issues) do local it=issues[i]; print(string.format("[dwverify-skillreg] issue[%s] key=%s err=%s", tostring(i), tostring(it.key), tostring(it.error))) end; error("validateAll expected PASS") end; print("[dwverify-skillreg] PASS validateAll") end',
-                note = "ASSERT: validateAll(strictClassList=true) must PASS.",
+                note = "ASSERT: validateAll(strictClassList=true) must still PASS on current baseline.",
             },
             {
                 cmd =
                 'lua do local S=require("dwkit.services.skill_registry_service"); local reg=S.getRegistry(); if type(reg)~="table" then error("Expected registry table") end; local required={"heal","power heal","refresh","feed","restore","rejuvenate","summon","relocate","group armor","group recall","group heal","group rejuvenate","group power heal","assist","kick","bash","pummel","circle","guard","rescue","backstab","detect traps","dual wield","dodge","anti-paladin example"}; for i=1,#required do local k=required[i]; if type(reg[k])~="table" then error("Expected required registry key present: "..tostring(k)) end end; local def=reg["anti-paladin example"]; if tostring(def.classKey)~="anti-paladin" then error("Expected classKey anti-paladin; got "..tostring(def.classKey)) end; print(string.format("[dwverify-skillreg] PASS required coverage keys=%s", tostring(#required))) end',
-                note = "ASSERT: required baseline and new dump-backed keys exist; anti-paladin remains hyphen-preserved.",
+                note = "ASSERT: required baseline keys still exist; anti-paladin remains hyphen-preserved.",
             },
             {
                 cmd =
                 'lua do local S=require("dwkit.services.skill_registry_service"); local def=S.resolveByPracticeKey("Power   Heal"); if not def then error("Expected resolveByPracticeKey Power Heal to find entry") end; if tostring(def.practiceKey)~="power heal" then error("Expected practiceKey power heal; got "..tostring(def.practiceKey)) end; local def2=S.resolveByAlias("PHEAL"); if not def2 then error("Expected resolveByAlias PHEAL to find entry") end; if tostring(def2.practiceKey)~="power heal" then error("Expected alias to resolve to power heal; got "..tostring(def2.practiceKey)) end; local def3=S.resolveByAlias("GPH"); if not def3 then error("Expected resolveByAlias GPH to find entry") end; if tostring(def3.practiceKey)~="group power heal" then error("Expected alias to resolve to group power heal; got "..tostring(def3.practiceKey)) end; local def4=S.resolveByAlias("RST"); if not def4 then error("Expected resolveByAlias RST to find entry") end; if tostring(def4.practiceKey)~="restore" then error("Expected alias to resolve to restore; got "..tostring(def4.practiceKey)) end; local def5=S.resolveByAlias("REJUVINATE"); if not def5 then error("Expected resolveByAlias REJUVINATE to find entry") end; if tostring(def5.practiceKey)~="rejuvenate" then error("Expected alias to resolve to rejuvenate; got "..tostring(def5.practiceKey)) end; local def6=S.resolveByAlias("DUALWIELD"); if not def6 then error("Expected resolveByAlias DUALWIELD to find entry") end; if tostring(def6.practiceKey)~="dual wield" then error("Expected alias to resolve to dual wield; got "..tostring(def6.practiceKey)) end; print("[dwverify-skillreg] PASS resolveByPracticeKey + resolveByAlias") end',
-                note = "ASSERT: practiceKey normalization and alias lookup work for cleric and thief enrichments.",
+                note = "ASSERT: current practiceKey normalization and alias lookup still work.",
             },
             {
                 cmd =
                 'lua do local S=require("dwkit.services.skill_registry_service"); local ck,err=S.normalizeClassKey("APAL"); if not ck then error("normalizeClassKey(APAL) failed: "..tostring(err)) end; if ck~="anti-paladin" then error("Expected anti-paladin; got "..tostring(ck)) end; local list=S.listByClass("cleric","spell"); if type(list)~="table" then error("Expected list table") end; if #list < 35 then error("Expected >=35 cleric spell entries; got "..tostring(#list)) end; local list2=S.listByClass("thief","skill"); if type(list2)~="table" then error("Expected thief list table") end; if #list2 < 13 then error("Expected >=13 thief skill entries; got "..tostring(#list2)) end; print(string.format("[dwverify-skillreg] PASS class normalization + cleric spells=%s thief skills=%s", tostring(#list), tostring(#list2))) end',
-                note = "ASSERT: class normalization preserves hyphen and dump-backed cleric/thief coverage exists.",
+                note = "ASSERT: baseline listByClass behavior still works.",
             },
             {
                 cmd =
                 'lua do local S=require("dwkit.services.skill_registry_service"); local kinds={"skill","spell","race","weapon"}; for i=1,#kinds do local k=kinds[i]; local list=S.listByKind(k); if type(list)~="table" then error("Expected listByKind("..k..") returns table") end end; local st=S.getStats(); if tonumber(st.entries or 0) < 55 then error("Expected expanded baseline entries >= 55; got "..tostring(st.entries)) end; local s=S.listByKind("spell"); local sk=S.listByKind("skill"); local r=S.listByKind("race"); local w=S.listByKind("weapon"); if #s < 35 then error("Expected >=35 spells; got "..tostring(#s)) end; if #sk < 20 then error("Expected >=20 skills; got "..tostring(#sk)) end; if #r < 1 then error("Expected >=1 race entry; got "..tostring(#r)) end; if #w < 2 then error("Expected >=2 weapon entries; got "..tostring(#w)) end; print(string.format("[dwverify-skillreg] PASS coverage spells=%s skills=%s race=%s weapon=%s", tostring(#s), tostring(#sk), tostring(#r), tostring(#w))) end',
-                note = "ASSERT: minimum coverage counts per kind for Phase 2 baseline.",
+                note = "ASSERT: baseline coverage counts per kind still hold.",
             },
             {
                 cmd =
                 'lua do local S=require("dwkit.services.skill_registry_service"); local d=S.getDef("double"); local t=S.getDef("triple"); local dw=S.getDef("dual wield"); local dt=S.getDef("detect traps"); if type(d)~="table" or type(t)~="table" or type(dw)~="table" or type(dt)~="table" then error("Expected double/triple/dual wield/detect traps defs") end; if tostring(d.practiceKey)~="double" then error("Expected double def practiceKey=double") end; if tostring(t.practiceKey)~="triple" then error("Expected triple def practiceKey=triple") end; if tostring(dw.practiceKey)~="dual wield" then error("Expected dual wield practiceKey") end; if tostring(dt.practiceKey)~="detect traps" then error("Expected detect traps practiceKey") end; local function hasTag(def,needle) local tags=def.tags or {}; for i=1,#tags do if tostring(tags[i])==needle then return true end end return false end; if hasTag(d,"progression")~=true then error("Expected double progression tag") end; if hasTag(t,"progression")~=true then error("Expected triple progression tag") end; if hasTag(dw,"passive")~=true then error("Expected dual wield passive tag") end; if hasTag(dt,"passive")~=true then error("Expected detect traps passive tag") end; print("[dwverify-skillreg] PASS progression/passive modeling checks") end',
-                note = "ASSERT: progression and passive entries are represented as separate canonical defs.",
+                note = "ASSERT: progression and passive entries remain represented as separate canonical defs.",
             },
             {
                 cmd =
                 'lua do local S=require("dwkit.services.skill_registry_service"); local g=S.getDef("guard"); if type(g)~="table" then error("Expected guard def") end; if tostring(g.classKey)~="warrior" then error("Expected guard classKey=warrior; got "..tostring(g.classKey)) end; if tonumber(g.minLevel or -1)~=19 then error("Expected guard minLevel=19; got "..tostring(g.minLevel)) end; print("[dwverify-skillreg] PASS guard canonical def checks") end',
-                note = "ASSERT: guard resolves to the warrior canonical entry after seed collision removal.",
+                note = "ASSERT: guard still resolves to the warrior canonical entry.",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.skill_registry_service"); local ok,err=S.validateDef({id="fixture shared blessing",displayName="Fixture Shared Blessing",practiceKey="fixture shared blessing",kind="spell",tags={"fixture","crossclass"},learnSpecs={{classKey="cleric",minLevel=12},{classKey="paladin",minLevel=29}}},{strictClassList=true}); print(string.format("[dwverify-skillreg] validateDef shared fixture ok=%s err=%s", tostring(ok==true), tostring(err))) if ok~=true then error("Expected validateDef shared fixture PASS") end end',
+                note = "ASSERT: new transitional learnSpecs-only def shape validates.",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.skill_registry_service"); local ok,err=S.upsert("fixture shared blessing",{id="fixture shared blessing",displayName="Fixture Shared Blessing",practiceKey="fixture shared blessing",kind="spell",tags={"fixture","crossclass"},aliases={"fsb"},learnSpecs={{classKey="cleric",minLevel=12},{classKey="paladin",minLevel=29}}},{source="dwverify:skillreg:shared_fixture"}); print(string.format("[dwverify-skillreg] upsert shared fixture ok=%s err=%s", tostring(ok==true), tostring(err))) if ok~=true then error("Expected upsert shared fixture PASS") end end',
+                note = "Inject one shared canonical ability with learnSpecs for cleric + paladin.",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.skill_registry_service"); local def=S.resolveByPracticeKey("fixture   shared blessing"); if type(def)~="table" then error("Expected resolveByPracticeKey fixture shared blessing") end; if tostring(def.practiceKey)~="fixture shared blessing" then error("Expected canonical practiceKey fixture shared blessing") end; local def2=S.resolveByAlias("FSB"); if type(def2)~="table" then error("Expected resolveByAlias FSB") end; if tostring(def2.practiceKey)~="fixture shared blessing" then error("Expected alias FSB -> fixture shared blessing") end; print("[dwverify-skillreg] PASS resolveByPracticeKey + resolveByAlias for shared fixture") end',
+                note = "ASSERT: shared fixture resolves by practiceKey and alias.",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.skill_registry_service"); local c=S.listByClass("cleric","spell"); local p=S.listByClass("paladin","spell"); local function has(list,pk) for i=1,#list do local def=list[i]; if tostring(def.practiceKey or "")==pk then return true end end return false end; if has(c,"fixture shared blessing")~=true then error("Expected shared fixture in cleric spell list") end; if has(p,"fixture shared blessing")~=true then error("Expected shared fixture in paladin spell list") end; local ok,issues=S.validateAll({strictClassList=true}); if ok~=true then error("Expected validateAll PASS after shared fixture upsert; issues="..tostring(type(issues)=="table" and #issues or "nil")) end; print(string.format("[dwverify-skillreg] PASS shared fixture visible via cleric=%s paladin=%s", tostring(has(c,"fixture shared blessing")), tostring(has(p,"fixture shared blessing")))) end',
+                note = "ASSERT: one canonical def is visible from multiple classes via learnSpecs.",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.skill_registry_service"); local ok,err=S.remove("fixture shared blessing",{source="dwverify:skillreg:shared_fixture_cleanup"}); print(string.format("[dwverify-skillreg] cleanup shared fixture ok=%s err=%s", tostring(ok==true), tostring(err))) if ok~=true then error("Expected remove shared fixture PASS") end; local gone=S.resolveByPracticeKey("fixture shared blessing"); if gone~=nil then error("Expected shared fixture removed") end; local ok2,issues2=S.validateAll({strictClassList=true}); if ok2~=true then error("Expected validateAll PASS after cleanup; issues="..tostring(type(issues2)=="table" and #issues2 or "nil")) end; print("[dwverify-skillreg] PASS shared fixture cleanup") end',
+                note = "Cleanup transient shared fixture and assert registry returns to clean baseline.",
             },
             { cmd = "dwskills",                       note = "Should print SkillRegistryService summary and list keys (SAFE)." },
             { cmd = "dwskills dump power heal",       note = "Should dump one multi-word entry if parser supports it." },

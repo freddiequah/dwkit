@@ -1,12 +1,14 @@
 -- #########################################################################
 -- Module Name : dwkit.services.skill_registry_service
 -- Owner       : Services
--- Version     : v2026-03-09C
+-- Version     : v2026-03-10A
 -- Purpose     :
 --   - SAFE SkillRegistryService (data only).
 --   - Owns skill/spell registry (data-driven), emits updates.
 --   - Provides class normalization + schema validation for ActionPad needs.
 --   - Provides lookups by practiceKey and alias, plus list helpers.
+--   - Supports transitional cross-class learn-spec declarations while keeping
+--     legacy classKey + minLevel defs valid.
 --   - No UI, no persistence, no timers, no send().
 --   - Hardened validation: detects duplicate practiceKey + alias collisions.
 --
@@ -35,22 +37,22 @@
 --                    dwkit.data.skill_registry.*
 -- #########################################################################
 
-local M                = {}
+local M               = {}
 
-M.VERSION              = "v2026-03-09C"
+M.VERSION             = "v2026-03-10A"
 
-local ID               = require("dwkit.core.identity")
-local BUS              = require("dwkit.bus.event_bus")
+local ID              = require("dwkit.core.identity")
+local BUS             = require("dwkit.bus.event_bus")
 
-local CLERIC_DATA      = require("dwkit.data.skill_registry.cleric")
-local WARRIOR_DATA     = require("dwkit.data.skill_registry.warrior")
-local THIEF_DATA       = require("dwkit.data.skill_registry.thief")
-local SEED_MISC_DATA   = require("dwkit.data.skill_registry.seed_misc")
+local CLERIC_DATA     = require("dwkit.data.skill_registry.cleric")
+local WARRIOR_DATA    = require("dwkit.data.skill_registry.warrior")
+local THIEF_DATA      = require("dwkit.data.skill_registry.thief")
+local SEED_MISC_DATA  = require("dwkit.data.skill_registry.seed_misc")
 
-local EV_UPDATED       = tostring(ID.eventPrefix or "DWKit:") .. "Service:SkillRegistry:Updated"
+local EV_UPDATED      = tostring(ID.eventPrefix or "DWKit:") .. "Service:SkillRegistry:Updated"
 
 -- Locked class keys (ActionPad agreement)
-local CLASS_KEYS       = {
+local CLASS_KEYS      = {
     ["cleric"] = true,
     ["thief"] = true,
     ["warrior"] = true,
@@ -64,7 +66,7 @@ local CLASS_KEYS       = {
 }
 
 -- Alias mapping: compact form (lower, strip spaces + hyphen) -> canonical classKey
-local CLASS_ALIASES    = {
+local CLASS_ALIASES   = {
     ["cleric"] = "cleric",
     ["thief"] = "thief",
     ["warrior"] = "warrior",
@@ -80,7 +82,7 @@ local CLASS_ALIASES    = {
 }
 
 -- Canonical kinds (ActionPad agreement)
-local KIND_KEYS        = {
+local KIND_KEYS       = {
     ["skill"] = true,
     ["spell"] = true,
     ["race"] = true,
@@ -88,12 +90,12 @@ local KIND_KEYS        = {
 }
 
 -- Legacy kind mapping (backward compatible with earlier seeds)
-local LEGACY_KIND_MAP  = {
+local LEGACY_KIND_MAP = {
     ["race-skill"] = "race",
     ["weapon-prof"] = "weapon",
 }
 
-local STATE            = {
+local STATE           = {
     registry = {}, -- key -> def table
     lastTs = nil,
     updates = 0,
@@ -258,6 +260,71 @@ local function _pushIssue(issues, key, err, meta)
     issues[#issues + 1] = it
 end
 
+local function _normalizeLearnSpecs(t)
+    if t == nil then return nil end
+    if type(t) ~= "table" then return nil end
+
+    local out = {}
+    local seen = {}
+
+    for i = 1, #t do
+        local spec = t[i]
+        if type(spec) == "table" then
+            local row = _shallowCopy(spec)
+
+            if row.classKey ~= nil then
+                local ckNorm, _ = M.normalizeClassKey(row.classKey)
+                if ckNorm then row.classKey = ckNorm end
+            end
+
+            if row.tags ~= nil then
+                row.tags = _normalizeTags(row.tags)
+            end
+
+            local sig = tostring(row.classKey or "") .. "|" .. tostring(row.minLevel or "")
+            if seen[sig] ~= true then
+                seen[sig] = true
+                out[#out + 1] = row
+            end
+        end
+    end
+
+    if #out == 0 then return nil end
+    return out
+end
+
+local function _hasLearnSpecs(def)
+    return type(def) == "table" and type(def.learnSpecs) == "table" and #def.learnSpecs > 0
+end
+
+local function _hasLegacyLearn(def)
+    return type(def) == "table"
+        and type(def.classKey) == "string" and _trim(def.classKey) ~= ""
+        and type(def.minLevel) == "number"
+end
+
+local function _defMatchesClass(def, ck)
+    if type(def) ~= "table" or type(ck) ~= "string" or ck == "" then
+        return false
+    end
+
+    if tostring(def.classKey or "") == ck then
+        return true
+    end
+
+    local specs = def.learnSpecs
+    if type(specs) == "table" then
+        for i = 1, #specs do
+            local spec = specs[i]
+            if type(spec) == "table" and tostring(spec.classKey or "") == ck then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
 function M.validateDef(def, opts)
     opts = opts or {}
     if type(def) ~= "table" then
@@ -273,9 +340,6 @@ function M.validateDef(def, opts)
     if type(def.practiceKey) ~= "string" or _trim(def.practiceKey) == "" then
         return false, "validateDef(def): missing/invalid required field: practiceKey"
     end
-    if type(def.classKey) ~= "string" or _trim(def.classKey) == "" then
-        return false, "validateDef(def): missing/invalid required field: classKey"
-    end
     if type(def.kind) ~= "string" or _trim(def.kind) == "" then
         return false, "validateDef(def): missing/invalid required field: kind"
     end
@@ -285,9 +349,6 @@ function M.validateDef(def, opts)
         return false, "validateDef(def): invalid kind: " .. tostring(def.kind)
     end
 
-    if type(def.minLevel) ~= "number" or _isInt(def.minLevel) ~= true or def.minLevel < 0 then
-        return false, "validateDef(def): missing/invalid required field: minLevel (int >= 0)"
-    end
     if type(def.tags) ~= "table" then
         return false, "validateDef(def): missing/invalid required field: tags (array)"
     end
@@ -297,18 +358,65 @@ function M.validateDef(def, opts)
         end
     end
 
-    local ck, ckErr = M.normalizeClassKey(def.classKey)
-    if not ck then
-        return false, "validateDef(def): classKey invalid: " .. tostring(ckErr)
-    end
-
     local pk, pkErr = M.normalizePracticeKey(def.practiceKey)
     if not pk then
         return false, "validateDef(def): practiceKey invalid: " .. tostring(pkErr)
     end
 
-    if opts.strictClassList == true and CLASS_KEYS[ck] ~= true then
-        return false, "validateDef(def): classKey not in locked class list: " .. tostring(ck)
+    local hasLegacy = _hasLegacyLearn(def)
+    local hasSpecs = _hasLearnSpecs(def)
+
+    if hasLegacy ~= true and hasSpecs ~= true then
+        return false,
+            "validateDef(def): must provide legacy classKey+minLevel or learnSpecs[]"
+    end
+
+    if hasLegacy == true then
+        local ck, ckErr = M.normalizeClassKey(def.classKey)
+        if not ck then
+            return false, "validateDef(def): classKey invalid: " .. tostring(ckErr)
+        end
+
+        if type(def.minLevel) ~= "number" or _isInt(def.minLevel) ~= true or def.minLevel < 0 then
+            return false, "validateDef(def): missing/invalid required field: minLevel (int >= 0)"
+        end
+
+        if opts.strictClassList == true and CLASS_KEYS[ck] ~= true then
+            return false, "validateDef(def): classKey not in locked class list: " .. tostring(ck)
+        end
+    end
+
+    if hasSpecs == true then
+        local specs = def.learnSpecs
+        for i = 1, #specs do
+            local spec = specs[i]
+            if type(spec) ~= "table" then
+                return false, "validateDef(def): learnSpecs must be array of tables"
+            end
+            if type(spec.classKey) ~= "string" or _trim(spec.classKey) == "" then
+                return false, "validateDef(def): learnSpecs[].classKey is required"
+            end
+            local ck, ckErr = M.normalizeClassKey(spec.classKey)
+            if not ck then
+                return false, "validateDef(def): learnSpecs[].classKey invalid: " .. tostring(ckErr)
+            end
+            if type(spec.minLevel) ~= "number" or _isInt(spec.minLevel) ~= true or spec.minLevel < 0 then
+                return false, "validateDef(def): learnSpecs[].minLevel must be int >= 0"
+            end
+            if spec.tags ~= nil then
+                if type(spec.tags) ~= "table" then
+                    return false, "validateDef(def): learnSpecs[].tags must be array (when present)"
+                end
+                for j = 1, #spec.tags do
+                    if type(spec.tags[j]) ~= "string" then
+                        return false, "validateDef(def): learnSpecs[].tags must be array of strings"
+                    end
+                end
+            end
+            if opts.strictClassList == true and CLASS_KEYS[ck] ~= true then
+                return false, "validateDef(def): learnSpecs[].classKey not in locked class list: " .. tostring(ck)
+            end
+        end
     end
 
     if def.aliases ~= nil then
@@ -328,9 +436,10 @@ end
 local function _normalizeDef(def)
     local out = _shallowCopy(def)
 
-    local ck = out.classKey
-    local ckNorm, _ = M.normalizeClassKey(ck)
-    if ckNorm then out.classKey = ckNorm end
+    if out.classKey ~= nil then
+        local ckNorm, _ = M.normalizeClassKey(out.classKey)
+        if ckNorm then out.classKey = ckNorm end
+    end
 
     local pk = out.practiceKey
     local pkNorm, _ = M.normalizePracticeKey(pk)
@@ -339,6 +448,7 @@ local function _normalizeDef(def)
     out.kind = _normalizeKind(out.kind)
     out.aliases = _normalizeAliases(out.aliases)
     out.tags = _normalizeTags(out.tags)
+    out.learnSpecs = _normalizeLearnSpecs(out.learnSpecs)
 
     return out
 end
@@ -445,7 +555,7 @@ function M.listByClass(classKey, kind)
 
     local out = {}
     for _, def in pairs(STATE.registry) do
-        if type(def) == "table" and tostring(def.classKey) == ck then
+        if type(def) == "table" and _defMatchesClass(def, ck) == true then
             if kindNorm == nil or tostring(def.kind) == kindNorm then
                 out[#out + 1] = _shallowCopy(def)
             end
