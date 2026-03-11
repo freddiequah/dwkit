@@ -1,4 +1,4 @@
-# docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.15.md
+# docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.16.md
 ============================================================
 FULL ANCHOR PACK - MUDLET KIT GOVERNANCE (STORE IN PROJECT)
 UPDATED: + Mudlet Input Line Paste Safety (single-line lua do...end)
@@ -7,7 +7,7 @@ UPDATED: + Automation Policy: Passive Capture vs Active Polling + Essential Defa
 UPDATED: + Mudlet Verification Runner Standard: dwverify + verification.lua suites (scripted verification steps; Lua steps must be single-line)
 UPDATED: + Verification Plan Split: verification.lua (stable runner engine) + verification_plan.lua (per-change suites)
 UPDATED: + UI Architecture Contracts: Shared Frame + Content Kits, and UI semantics (ActionPad/Presence_UI/RoomEntities_UI) + ui_smoke console verification
-UPDATED: + Full-File Return Rule hardening: batched multi-file delivery + large-file single delivery + per-batch APPLY gate + final verification only after final batch
+UPDATED: + Full-File Return Rule hardening: batched multi-file delivery + large-file single delivery + combined 2-file batch-size override + per-batch APPLY gate + split sub-batch APPLY gate + final verification only after final batch
 UPDATED: + Mojibake cleanup: normalize punctuation/quotes to avoid UTF-8 decode artifacts in this standard.
 UPDATED (NEW): + UI Cross-Profile Consistency Policy (layout invariants vs per-profile workspace persistence)
 
@@ -68,6 +68,32 @@ Rule:
 If size is unknown:
 - When the assistant cannot reliably determine the line count, it MUST treat the file as large and deliver 1 file per message until proven otherwise.
 
+C.1) Combined batch-size override (LOCKED)
+If a delivery message would contain 2 files, and the combined total line count of those 2 files exceeds 2000 lines (> 2000), the assistant MUST split that delivery into two single-file batches.
+
+Purpose:
+- Prevent message overload even when neither file individually qualifies as a "large file".
+- Reduce rendering, truncation, copy/paste, and apply-risk for dense two-file deliveries.
+
+Rule:
+- Default delivery may remain 2 files per message only when the combined total line count is 2000 or less (<= 2000).
+- If a planned 2-file delivery exceeds 2000 combined lines, it MUST be split into two single-file sub-batches.
+
+Batch labeling rule:
+- When a planned 2-file batch is split due to this override, the assistant SHOULD preserve the parent batch number and use sub-batch labels.
+- Example:
+  - planned Batch 2 (2 files) becomes:
+    - Batch 2A: first file
+    - Batch 2B: second file
+
+Examples:
+- File A = 1100 lines, File B = 950 lines -> combined 2050 -> MUST split into Batch 2A and Batch 2B.
+- File A = 1000 lines, File B = 1000 lines -> combined 2000 -> may remain a 2-file batch.
+- File A = 2100 lines -> already governed by the Large-file override and MUST be delivered alone.
+
+If combined size is unknown:
+- When the assistant cannot reliably determine the combined line count for a 2-file delivery, it MUST treat that delivery as over the limit and deliver the files as single-file batches until proven otherwise.
+
 D) Per-batch APPLY gate: Version Probe (LOCKED)
 Batched delivery requires a proof-of-apply gate between batches.
 This gate is NOT full functional verification; it only proves the user applied the exact file versions delivered.
@@ -94,11 +120,30 @@ If a file lacks a usable version identifier:
   a) add a minimal version identifier in the file header (only if consistent with that file type and scope), OR
   b) use git verification as the primary proof for that file.
 
+D.1) APPLY gate for split sub-batches (LOCKED)
+When a planned 2-file batch is split into single-file sub-batches due to the Combined batch-size override, each resulting sub-batch is treated as its own APPLY-gated delivery.
+
+Rule:
+- Batch NA requires:
+  - Version Probe output for that file
+  - explicit user confirmation: APPLIED Batch NA
+- Batch NB requires:
+  - Version Probe output for that file
+  - explicit user confirmation: APPLIED Batch NB
+
+Delivery order:
+- The assistant MUST NOT deliver Batch NB until Batch NA has been confirmed applied.
+- The assistant MUST NOT deliver any later batch until Batch NB has also been confirmed applied.
+
+Purpose:
+- Ensure each delivered file is independently proven applied on the user's side.
+- Avoid ambiguity when an originally planned 2-file batch is split for safety.
+
 E) Final VERIFICATION gate (LOCKED)
 Full functional verification is performed ONLY ONCE, after ALL files for the change have been delivered.
 
 Rule:
-- Between batches: APPLY gate only (Version Probe + APPLIED Batch N).
+- Between batches: APPLY gate only (Version Probe + APPLIED Batch N, or APPLIED Batch NA / NB for split sub-batches).
 - After the final batch is applied: run the actual verification steps for the change (Mudlet dwverify suite and any required manual checks).
 
 User confirmation requirement (FINAL verification):
@@ -179,7 +224,7 @@ The Anchor Pack MUST match docs/PACKAGE_IDENTITY.md.
 If identity values ever change, docs/PACKAGE_IDENTITY.md MUST be version-bumped and the decision recorded there.
 
 ==================================================
-MUDLET PACKAGE DEVELOPMENT STANDARD v1.15 (FINALIZED)
+MUDLET PACKAGE DEVELOPMENT STANDARD v1.16 (FINALIZED)
 
 Baseline additions included:
 
@@ -233,10 +278,11 @@ NEW: UI Cross-Profile Consistency Policy:
 - Defines strict persistence boundaries for UI state (geometry only; never persist layout internals).
 - Adds verification expectations to prevent regressions (dwverify suite must assert invariants).
 
-NEW: Full-File Return hardening (v1.15):
+NEW: Full-File Return hardening (v1.16):
 - Batched multi-file delivery (3+ files)
 - Large-file override (>= 2000 lines => 1 file per message)
-- Per-batch APPLY gate via Version Probe (user must confirm APPLIED Batch N with proof output)
+- Combined 2-file batch-size override (> 2000 combined lines => split into Batch NA / NB single-file sub-batches)
+- Per-batch APPLY gate via Version Probe (user must confirm APPLIED Batch N or APPLIED Batch NA / NB with proof output)
 - Final VERIFICATION gate only once after all files delivered (user must confirm PASS Verification with dwverify outputs)
 
 ==================================================
@@ -351,6 +397,11 @@ Console-first UI verification gate:
 - Added Large-file override: >= 2000 lines requires single-file delivery per message.
 - Replaced per-batch PASS gate with per-batch APPLY gate (APPLIED Batch N) using Version Probe proof.
 - Added Final VERIFICATION gate only once after all files are delivered (PASS Verification with dwverify outputs).
+
+2026-03-11: Enhanced Full-File Return Workflow again:
+- Added Combined 2-file batch-size override: if a 2-file delivery exceeds 2000 combined lines, it must be split.
+- Added split sub-batch labeling guidance (Batch NA / NB).
+- Added explicit APPLY-gate handling for split sub-batches so each delivered file must be independently proven applied before the next file is delivered.
 
 ==================================================
 SECTION A - BOOTSTRAP (ALWAYS APPLIES)
@@ -677,7 +728,7 @@ docs/Self_Test_Runner_v1.0.md
 
 docs/DOCS_SYNC_CHECKLIST.md
 
-docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.15.md (this file; versioned by content header)
+docs/MUDLET_PACKAGE_DEVELOPMENT_STANDARD_v1.16.md (this file; versioned by content header)
 
 ==================================================
 SECTION D - CORE DEVELOPMENT STANDARD
