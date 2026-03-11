@@ -2,13 +2,16 @@
 -- #########################################################################
 -- Module Name : dwkit.services.cross_profile_comm_service
 -- Owner       : Services
--- Version     : v2026-03-10A
+-- Version     : v2026-03-11C
 -- Purpose     :
 --   - SAFE cross-profile communication (same Mudlet instance) using raiseGlobalEvent.
 --   - Data/event delivery only. Does NOT execute remote commands. No expandAlias.
 --   - Provides HELLO/BYE presence signals and peer lastSeen tracking (session-only).
 --   - Provides a narrow ROWFACTS transport/store for represented-row facts
 --     (session-only; best-effort; compatibility-conscious addition).
+--   - Provides publisher-side local row-facts composition/publication using
+--     existing local ScoreStore + PracticeStore state, triggered by their
+--     update events (manual/passive only; no timers, no send()).
 --   - Emits a registered internal event when peer state changes.
 --
 -- IMPORTANT COMPAT FIX (v2026-02-26B):
@@ -31,6 +34,21 @@
 --       * _testSetRowFacts(profileName, rowFacts, opts?) -> boolean ok, string|nil err
 --       * _testClearRowFacts() -> boolean ok
 --
+-- Add v2026-03-11A:
+--   - Adds publisher-side local row-facts composition/publication:
+--       * getLocalRowFacts() -> table|nil
+--       * publishLocalRowFacts(opts?) -> boolean ok, string|nil err
+--   - Wires best-effort subscriptions to:
+--       * DWKit:Service:ScoreStore:Updated
+--       * DWKit:Service:PracticeStore:Updated
+--     so local represented-row facts are republished when manual/passive
+--     store updates occur.
+--
+-- Fix v2026-03-11C:
+--   - Hardens publisher subscription state so false is NOT treated as a live handle.
+--   - BUS.on(...) failures that return false no longer appear as hasScoreSub/hasPracticeSub=true.
+--   - Repeated install() calls can now repair a previously failed score/practice subscription.
+--
 -- Public API  :
 --   - getVersion() -> string
 --   - getUpdatedEventName() -> string
@@ -41,8 +59,10 @@
 --   - isInstalled() -> boolean
 --   - publish(topic, payload?, opts?) -> boolean ok, string|nil err
 --   - publishRowFacts(rowFacts, opts?) -> boolean ok, string|nil err
+--   - publishLocalRowFacts(opts?) -> boolean ok, string|nil err
 --   - isProfileOnline(profileName) -> boolean
 --   - getRowFactsByProfile(profileName) -> table|nil
+--   - getLocalRowFacts() -> table|nil
 --
 -- Test helpers (SAFE; session-only):
 --   - _testNotePeer(profileName, opts?) -> boolean ok, string|nil err
@@ -52,14 +72,18 @@
 --
 -- Events Emitted:
 --   - DWKit:Service:CrossProfileComm:Updated
+-- Events Consumed:
+--   - DWKit:Service:ScoreStore:Updated (best-effort; publisher-side only)
+--   - DWKit:Service:PracticeStore:Updated (best-effort; publisher-side only)
 -- Automation Policy:
---   - Manual only. Uses Mudlet lifecycle events sysExitEvent (best-effort) but no timers, no send().
+--   - Manual only. Uses Mudlet lifecycle events sysExitEvent (best-effort) and
+--     passive/manual service update events; no timers, no send().
 -- Dependencies     : dwkit.core.identity, dwkit.bus.event_bus
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-03-10A"
+M.VERSION = "v2026-03-11C"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -78,7 +102,18 @@ local STATE = {
     handlerExit = nil,
 
     peers = {},             -- key -> { profile=..., instanceId=..., lastSeenTs=..., lastTopic=..., lastPayloadType=... }
-    rowFactsByProfile = {}, -- profileName -> normalized rowFacts (session-only)
+    rowFactsByProfile = {}, -- profileName -> normalized rowFacts (session-only; peers only)
+    localRowFacts = nil,    -- normalized rowFacts last composed/published locally
+
+    publisher = {
+        wired = false,
+        scoreSub = nil,
+        practiceSub = nil,
+        lastPublishTs = nil,
+        lastPublishOk = nil,
+        lastPublishErr = nil,
+        lastSource = nil,
+    },
 
     stats = {
         emits = 0,
@@ -135,6 +170,23 @@ local function _copyRowFactsMap(src)
     return out
 end
 
+local function _hasLiveSubscription(handle)
+    return not (handle == nil or handle == false)
+end
+
+local function _copyPublisherStatus(src)
+    src = (type(src) == "table") and src or {}
+    return {
+        wired = (src.wired == true),
+        hasScoreSub = _hasLiveSubscription(src.scoreSub),
+        hasPracticeSub = _hasLiveSubscription(src.practiceSub),
+        lastPublishTs = src.lastPublishTs,
+        lastPublishOk = src.lastPublishOk,
+        lastPublishErr = src.lastPublishErr,
+        lastSource = tostring(src.lastSource or ""),
+    }
+end
+
 local function _trim(s)
     s = tostring(s or "")
     return (s:gsub("^%s+", ""):gsub("%s+$", ""))
@@ -148,6 +200,12 @@ end
 
 local function _normalizePracticeKeyLocal(raw)
     return _lowerCollapseSpaces(raw)
+end
+
+local function _safeRequire(modName)
+    local ok, mod = pcall(require, modName)
+    if ok then return true, mod end
+    return false, mod
 end
 
 local function _myProfileNameBestEffort()
@@ -483,6 +541,230 @@ local function _storeRowFacts(profileName, rowFacts, source)
     return true, nil
 end
 
+-- #########################################################################
+-- Local publisher helpers (ScoreStore + PracticeStore -> ROWFACTS)
+-- #########################################################################
+
+local function _normalizeClassKeyBestEffort(raw)
+    raw = _trim(raw)
+    if raw == "" then return "" end
+
+    local okS, S = _safeRequire("dwkit.services.skill_registry_service")
+    if okS and type(S) == "table" and type(S.normalizeClassKey) == "function" then
+        local ok, ck = pcall(S.normalizeClassKey, raw)
+        if ok and type(ck) == "string" and ck ~= "" then
+            return ck
+        end
+    end
+
+    return _lowerCollapseSpaces(raw)
+end
+
+local function _getLocalScoreCoreBestEffort()
+    local okS, S = _safeRequire("dwkit.services.score_store_service")
+    if not okS or type(S) ~= "table" or type(S.getCore) ~= "function" then
+        return {
+            ok = false,
+            reason = "unknown_stale",
+        }
+    end
+
+    local ok, core = pcall(S.getCore)
+    if not ok or type(core) ~= "table" then
+        return {
+            ok = false,
+            reason = "unknown_stale",
+        }
+    end
+
+    return core
+end
+
+local function _getLocalPracticeSnapshotBestEffort()
+    local okP, P = _safeRequire("dwkit.services.practice_store_service")
+    if not okP or type(P) ~= "table" or type(P.getSnapshot) ~= "function" then
+        return nil
+    end
+
+    local ok, snap = pcall(P.getSnapshot)
+    if not ok or type(snap) ~= "table" then
+        return nil
+    end
+
+    return snap
+end
+
+local function _buildLearnedMapFromPracticeSnapshot(snap)
+    local out = {}
+
+    if type(snap) ~= "table" or type(snap.parsed) ~= "table" then
+        return out
+    end
+
+    local parsed = snap.parsed
+    local sections = { "skills", "spells", "raceSkills", "weaponProfs" }
+
+    for i = 1, #sections do
+        local secName = sections[i]
+        local sec = parsed[secName]
+        if type(sec) == "table" then
+            for k, v in pairs(sec) do
+                local pk = ""
+                if type(v) == "table" then
+                    pk = _normalizePracticeKeyLocal(v.key or v.practiceKey or k)
+                    if pk ~= "" then
+                        out[pk] = (v.learned == true)
+                    end
+                else
+                    pk = _normalizePracticeKeyLocal(k)
+                    if pk ~= "" then
+                        out[pk] = false
+                    end
+                end
+            end
+        end
+    end
+
+    return out
+end
+
+local function _composeLocalRowFacts()
+    local core = _getLocalScoreCoreBestEffort()
+    local snap = _getLocalPracticeSnapshotBestEffort()
+
+    local learnedMap = {}
+    local practiceStale = true
+    if type(snap) == "table" and type(snap.parsed) == "table" then
+        learnedMap = _buildLearnedMapFromPracticeSnapshot(snap)
+        practiceStale = false
+    end
+
+    local name = ""
+    local classDisplay = ""
+    local classKey = ""
+    local level = nil
+    local scoreStale = true
+
+    if type(core) == "table" and core.ok == true and tostring(core.reason or "") == "ok" then
+        name = _trim(core.name)
+        classDisplay = _trim(core.class)
+        classKey = _trim(core.classKey)
+        if classKey == "" and classDisplay ~= "" then
+            classKey = _normalizeClassKeyBestEffort(classDisplay)
+        end
+        level = tonumber(core.level)
+        scoreStale = false
+    end
+
+    return _normalizeRowFacts({
+        name = name,
+        class = classDisplay,
+        classKey = classKey,
+        level = level,
+        practiceStale = practiceStale,
+        scoreStale = scoreStale,
+        learnedByPracticeKey = learnedMap,
+    }, STATE.myProfile or _myProfileNameBestEffort())
+end
+
+local function _setLocalRowFacts(rowFacts)
+    if type(rowFacts) ~= "table" then
+        STATE.localRowFacts = nil
+        return
+    end
+    STATE.localRowFacts = _deepCopy(rowFacts)
+end
+
+local function _publishLocalRowFactsOnUpdate(source)
+    local ok, err = pcall(function()
+        local okPub, errPub = M.publishLocalRowFacts({ source = source })
+        if okPub ~= true then
+            STATE.publisher.lastPublishOk = false
+            STATE.publisher.lastPublishErr = tostring(errPub or "publishLocalRowFacts failed")
+            STATE.publisher.lastPublishTs = os.time()
+            STATE.publisher.lastSource = tostring(source or "")
+        end
+    end)
+
+    if ok ~= true then
+        STATE.publisher.lastPublishOk = false
+        STATE.publisher.lastPublishErr = tostring(err)
+        STATE.publisher.lastPublishTs = os.time()
+        STATE.publisher.lastSource = tostring(source or "")
+    end
+end
+
+local function _wirePublisherBestEffort()
+    local haveScoreSub = _hasLiveSubscription(STATE.publisher.scoreSub)
+    local havePracticeSub = _hasLiveSubscription(STATE.publisher.practiceSub)
+
+    if haveScoreSub and havePracticeSub then
+        STATE.publisher.wired = true
+        STATE.publisher.lastPublishErr = nil
+        return true, nil
+    end
+
+    local scoreEvent = nil
+    if not haveScoreSub then
+        local okS, S = _safeRequire("dwkit.services.score_store_service")
+        if okS and type(S) == "table" and type(S.getUpdatedEventName) == "function" then
+            local ok, ev = pcall(S.getUpdatedEventName)
+            if ok and type(ev) == "string" and ev ~= "" then
+                scoreEvent = ev
+            end
+        end
+    end
+
+    local practiceEvent = nil
+    if not havePracticeSub then
+        local okP, P = _safeRequire("dwkit.services.practice_store_service")
+        if okP and type(P) == "table" and type(P.getUpdatedEventName) == "function" then
+            local ok, ev = pcall(P.getUpdatedEventName)
+            if ok and type(ev) == "string" and ev ~= "" then
+                practiceEvent = ev
+            end
+        end
+    end
+
+    if not haveScoreSub and type(scoreEvent) == "string" and scoreEvent ~= "" and type(BUS.on) == "function" then
+        local okCall, subHandle, regErr = pcall(BUS.on, scoreEvent, function(payload, meta)
+            _publishLocalRowFactsOnUpdate("publisher:score_updated")
+        end)
+        if okCall and _hasLiveSubscription(subHandle) then
+            STATE.publisher.scoreSub = subHandle
+        else
+            STATE.publisher.scoreSub = nil
+        end
+    end
+
+    if not havePracticeSub and type(practiceEvent) == "string" and practiceEvent ~= "" and type(BUS.on) == "function" then
+        local okCall, subHandle, regErr = pcall(BUS.on, practiceEvent, function(payload, meta)
+            _publishLocalRowFactsOnUpdate("publisher:practice_updated")
+        end)
+        if okCall and _hasLiveSubscription(subHandle) then
+            STATE.publisher.practiceSub = subHandle
+        else
+            STATE.publisher.practiceSub = nil
+        end
+    end
+
+    haveScoreSub = _hasLiveSubscription(STATE.publisher.scoreSub)
+    havePracticeSub = _hasLiveSubscription(STATE.publisher.practiceSub)
+    STATE.publisher.wired = (haveScoreSub and havePracticeSub)
+
+    if STATE.publisher.wired == true then
+        STATE.publisher.lastPublishErr = nil
+        return true, nil
+    end
+
+    STATE.publisher.lastPublishErr = string.format(
+        "publisher wiring incomplete (scoreSub=%s, practiceSub=%s)",
+        tostring(haveScoreSub),
+        tostring(havePracticeSub)
+    )
+    return false, STATE.publisher.lastPublishErr
+end
+
 local function _receiveEnvelope(envOrString, source)
     source = tostring(source or "cpc:recv")
 
@@ -594,6 +876,10 @@ local function _reannounceHelloBestEffort(source)
     end)
 
     pcall(function()
+        M.publishLocalRowFacts({ source = source .. ":rowfacts" })
+    end)
+
+    pcall(function()
         _emitUpdated(M.getState(), { action = "reannounce", myProfile = STATE.myProfile }, source)
     end)
 
@@ -621,6 +907,8 @@ function M.getState()
         instanceId = tostring(STATE.instanceId or ""),
         peers = _copyPeers(STATE.peers),
         rowFactsByProfile = _copyRowFactsMap(STATE.rowFactsByProfile),
+        localRowFacts = _deepCopy(STATE.localRowFacts),
+        publisher = _copyPublisherStatus(STATE.publisher),
     }
 end
 
@@ -638,7 +926,9 @@ function M.getStats()
         instanceId = tostring(STATE.instanceId or ""),
         peerCount = peerCount,
         rowFactsCount = rowFactsCount,
+        localRowFactsPresent = (type(STATE.localRowFacts) == "table"),
         stats = _shallowCopy(STATE.stats),
+        publisher = _copyPublisherStatus(STATE.publisher),
         handlers = {
             globalMsg = STATE.handlerGlobalMsg,
             exit = STATE.handlerExit,
@@ -654,6 +944,8 @@ function M.status()
         peerCount = st.peerCount,
         peers = M.getState().peers,
         rowFactsCount = st.rowFactsCount,
+        localRowFactsPresent = st.localRowFactsPresent,
+        publisherWired = (type(st.publisher) == "table" and st.publisher.wired == true),
         installed = st.installed,
         version = st.version,
     }
@@ -705,6 +997,45 @@ function M.publishRowFacts(rowFacts, opts)
     return M.publish("ROWFACTS", payload, { source = tostring(opts.source or "publishRowFacts") })
 end
 
+function M.publishLocalRowFacts(opts)
+    opts = (type(opts) == "table") and opts or {}
+    local source = tostring(opts.source or "publishLocalRowFacts")
+
+    STATE.myProfile = STATE.myProfile or _myProfileNameBestEffort()
+    _ensureInstanceId()
+
+    local rf, errRf = _composeLocalRowFacts()
+    if type(rf) ~= "table" then
+        STATE.publisher.lastPublishOk = false
+        STATE.publisher.lastPublishErr = tostring(errRf or "composeLocalRowFacts failed")
+        STATE.publisher.lastPublishTs = os.time()
+        STATE.publisher.lastSource = source
+        return false, STATE.publisher.lastPublishErr
+    end
+
+    _setLocalRowFacts(rf)
+
+    local okPub, errPub = M.publishRowFacts(rf, { source = source })
+    STATE.publisher.lastPublishOk = (okPub == true)
+    STATE.publisher.lastPublishErr = errPub
+    STATE.publisher.lastPublishTs = os.time()
+    STATE.publisher.lastSource = source
+
+    pcall(function()
+        _emitUpdated(M.getState(), {
+            action = "local_rowfacts_publish",
+            profile = tostring(STATE.myProfile or ""),
+            ok = (okPub == true),
+        }, source)
+    end)
+
+    if okPub ~= true then
+        return false, tostring(errPub or "publishLocalRowFacts failed")
+    end
+
+    return true, nil
+end
+
 function M.isProfileOnline(profileName)
     profileName = tostring(profileName or "")
     if profileName == "" then return false end
@@ -728,6 +1059,11 @@ function M.getRowFactsByProfile(profileName)
     local rf = STATE.rowFactsByProfile[profileName]
     if type(rf) ~= "table" then return nil end
     return _deepCopy(rf)
+end
+
+function M.getLocalRowFacts()
+    if type(STATE.localRowFacts) ~= "table" then return nil end
+    return _deepCopy(STATE.localRowFacts)
 end
 
 function M._testClearPeers()
@@ -775,6 +1111,8 @@ function M.install(opts)
     opts = (type(opts) == "table") and opts or {}
 
     if STATE.installed == true then
+        _wirePublisherBestEffort()
+
         local allowReannounce = (opts.reannounce ~= false)
         if allowReannounce then
             _reannounceHelloBestEffort("install:reannounce")
@@ -821,11 +1159,17 @@ function M.install(opts)
 
     STATE.installed = true
 
+    _wirePublisherBestEffort()
+
     pcall(function()
         M.publish("HELLO", "", { source = "install" })
     end)
 
     _emitUpdated(M.getState(), { action = "install", myProfile = STATE.myProfile }, "install")
+
+    pcall(function()
+        M.publishLocalRowFacts({ source = "install:init" })
+    end)
 
     return true, nil
 end

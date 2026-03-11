@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-10D
+-- Version     : v2026-03-11A
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-10D"
+M.VERSION = "v2026-03-11A"
 
 local SUITES = {
     default = {
@@ -62,18 +62,40 @@ local SUITES = {
     cpc_smoke = {
         title = "cpc_smoke",
         description =
-        "CrossProfileComm smoke: print installed state, inject a fake peer (session-only) and assert isProfileOnline works, then verify ROWFACTS session store helpers for represented-row facts. Then (manual) open/close another Mudlet profile and observe Presence roster change.",
+        "CrossProfileComm smoke: install CPC, verify publisher wiring, assert local represented-row-facts publication from ScoreStore/PracticeStore update events, then assert peer ROWFACTS session store helpers for represented-row facts. Then (manual) open/close another Mudlet profile and observe Presence roster change.",
         delay = 0.35,
         steps = {
             {
                 cmd =
-                'lua do local C=require("dwkit.services.cross_profile_comm_service"); local ok,err=C.install({quiet=true}); print(string.format("[dwverify-cpc] install ok=%s err=%s", tostring(ok==true), tostring(err))) local st=C.getStats(); print(string.format("[dwverify-cpc] myProfile=%s instanceId=%s peerCount=%s rowFactsCount=%s", tostring(st.myProfile), tostring(st.instanceId), tostring(st.peerCount), tostring(st.rowFactsCount or 0))) end',
-                note = "Ensure CPC service installed and print state.",
+                'lua do local C=require("dwkit.services.cross_profile_comm_service"); local ok,err=C.install({quiet=true}); print(string.format("[dwverify-cpc] install ok=%s err=%s", tostring(ok==true), tostring(err))) local st=C.getStats(); print(string.format("[dwverify-cpc] myProfile=%s instanceId=%s peerCount=%s rowFactsCount=%s publisherWired=%s localRowFactsPresent=%s", tostring(st.myProfile), tostring(st.instanceId), tostring(st.peerCount), tostring(st.rowFactsCount or 0), tostring(st.publisher and st.publisher.wired==true), tostring(st.localRowFactsPresent==true))) end',
+                note = "Ensure CPC service installed and print state, including publisher wiring.",
             },
             {
                 cmd =
                 'lua do local C=require("dwkit.services.cross_profile_comm_service"); local ok1,err1=C._testClearPeers(); if ok1==false then error("testClearPeers failed: "..tostring(err1)) end; local ok2,err2=C._testClearRowFacts(); if ok2==false then error("testClearRowFacts failed: "..tostring(err2)) end; local st=C.getStats(); print(string.format("[dwverify-cpc] cleared fixtures peerCount=%s rowFactsCount=%s", tostring(st.peerCount), tostring(st.rowFactsCount or 0))) if tonumber(st.peerCount or -1)~=0 then error("Expected peerCount=0 after clear") end; if tonumber(st.rowFactsCount or -1)~=0 then error("Expected rowFactsCount=0 after clear") end end',
                 note = "Clear CPC deterministic peer + rowFacts fixtures to known baseline.",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.practice_store_service"); local S=require("dwkit.services.score_store_service"); local ok1,err1=P.clear({source="dwverify:cpc:practice_clear"}); if ok1==false then error("practice clear failed: "..tostring(err1)) end; local ok2,err2=S.clear({source="dwverify:cpc:score_clear"}); if ok2==false then error("score clear failed: "..tostring(err2)) end; local C=require("dwkit.services.cross_profile_comm_service"); local rf=C.getLocalRowFacts(); if type(rf)~="table" then error("Expected localRowFacts after clear-driven publisher update") end; print(string.format("[dwverify-cpc] local stale rowFacts name=%s class=%s level=%s practiceStale=%s scoreStale=%s", tostring(rf.name or "nil"), tostring(rf.class or rf.classKey or "nil"), tostring(rf.level or "nil"), tostring(rf.practiceStale==true), tostring(rf.scoreStale==true))) if rf.practiceStale~=true then error("Expected local practiceStale=true after clear") end; if rf.scoreStale~=true then error("Expected local scoreStale=true after clear") end end',
+                note =
+                "ASSERT: publisher recomposes local rowFacts on PracticeStore/ScoreStore clear, yielding stale flags.",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.score_store_service"); local ok,err=S.ingestFixture("score_table_short",{source="dwverify:cpc:score_fixture"}); if ok~=true then error("score ingestFixture failed: "..tostring(err)) end; local C=require("dwkit.services.cross_profile_comm_service"); local rf=C.getLocalRowFacts(); if type(rf)~="table" then error("Expected localRowFacts after score ingest") end; print(string.format("[dwverify-cpc] local score rowFacts name=%s class=%s classKey=%s level=%s practiceStale=%s scoreStale=%s", tostring(rf.name or "nil"), tostring(rf.class or "nil"), tostring(rf.classKey or "nil"), tostring(rf.level or "nil"), tostring(rf.practiceStale==true), tostring(rf.scoreStale==true))) if tostring(rf.name or "")~="Vzae" then error("Expected local rowFacts name=Vzae; got "..tostring(rf.name)) end; if tostring(rf.class or "")~="Warrior" then error("Expected local rowFacts class=Warrior; got "..tostring(rf.class)) end; if tostring(rf.classKey or "")~="warrior" then error("Expected local rowFacts classKey=warrior; got "..tostring(rf.classKey)) end; if tonumber(rf.level or 0)~=48 then error("Expected local rowFacts level=48; got "..tostring(rf.level)) end; if rf.scoreStale~=false then error("Expected local scoreStale=false after score ingest") end end',
+                note = "ASSERT: publisher recomposes local rowFacts from ScoreStore update event.",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.practice_store_service"); local ok,err=P.ingestFixture("basic",{source="dwverify:cpc:practice_fixture"}); if ok~=true then error("practice ingestFixture failed: "..tostring(err)) end; local C=require("dwkit.services.cross_profile_comm_service"); local rf=C.getLocalRowFacts(); if type(rf)~="table" then error("Expected localRowFacts after practice ingest") end; local st=C.getStats(); print(string.format("[dwverify-cpc] local practice rowFacts practiceStale=%s heal=%s powerheal=%s lastPublishOk=%s lastSource=%s", tostring(rf.practiceStale==true), tostring(rf.learnedByPracticeKey and rf.learnedByPracticeKey["heal"]), tostring(rf.learnedByPracticeKey and rf.learnedByPracticeKey["power heal"]), tostring(st.publisher and st.publisher.lastPublishOk==true), tostring(st.publisher and st.publisher.lastSource or "nil"))) if rf.practiceStale~=false then error("Expected local practiceStale=false after practice ingest") end; if rf.learnedByPracticeKey["heal"]~=true then error("Expected local learnedByPracticeKey[heal]=true") end; if rf.learnedByPracticeKey["power heal"]~=false then error("Expected local learnedByPracticeKey[power heal]=false") end; if not (type(st.publisher)=="table" and st.publisher.lastPublishOk==true) then error("Expected publisher lastPublishOk=true after practice ingest") end end',
+                note =
+                "ASSERT: publisher recomposes local rowFacts from PracticeStore update event and preserves learnedByPracticeKey values.",
+            },
+            {
+                cmd =
+                'lua do local C=require("dwkit.services.cross_profile_comm_service"); local ok,err=C.publishLocalRowFacts({source="dwverify:cpc:manual_publish"}); print(string.format("[dwverify-cpc] manual publishLocalRowFacts ok=%s err=%s", tostring(ok==true), tostring(err))) if ok~=true then error("Expected publishLocalRowFacts PASS") end; local st=C.getStats(); print(string.format("[dwverify-cpc] local publish stats rowFactsCount=%s localRowFactsPresent=%s lastSource=%s", tostring(st.rowFactsCount or 0), tostring(st.localRowFactsPresent==true), tostring(st.publisher and st.publisher.lastSource or "nil"))) if tonumber(st.rowFactsCount or -1)~=0 then error("Expected peer rowFactsCount to remain 0 for local publish-only path") end end',
+                note = "ASSERT: explicit local publish succeeds and does not pollute peer rowFacts store.",
             },
             {
                 cmd =
@@ -84,22 +106,22 @@ local SUITES = {
                 cmd =
                 'lua do local C=require("dwkit.services.cross_profile_comm_service"); local ok,err=C._testSetRowFacts("Profile-B",{name="Scynox",class="Cleric",level=20,learnedByPracticeKey={["heal"]=true,["power heal"]=false,["guard"]=false}},{source="dwverify:cpc:rowfacts"}); if ok==false then error("testSetRowFacts failed: "..tostring(err)) end; local rf=C.getRowFactsByProfile("Profile-B"); if type(rf)~="table" then error("Expected rowFacts for Profile-B") end; print(string.format("[dwverify-cpc] rowFacts profile=Profile-B name=%s class=%s level=%s heal=%s powerheal=%s guard=%s", tostring(rf.name or "nil"), tostring(rf.class or rf.classKey or "nil"), tostring(rf.level or "nil"), tostring(rf.learnedByPracticeKey and rf.learnedByPracticeKey["heal"]), tostring(rf.learnedByPracticeKey and rf.learnedByPracticeKey["power heal"]), tostring(rf.learnedByPracticeKey and rf.learnedByPracticeKey["guard"]))) if tostring(rf.name or "")~="Scynox" then error("Expected rowFacts name=Scynox; got "..tostring(rf.name)) end; if tostring(rf.class or "")~="Cleric" then error("Expected rowFacts class=Cleric; got "..tostring(rf.class)) end; if tonumber(rf.level or 0)~=20 then error("Expected rowFacts level=20; got "..tostring(rf.level)) end; if rf.learnedByPracticeKey["heal"]~=true then error("Expected learnedByPracticeKey[heal]=true") end; if rf.learnedByPracticeKey["power heal"]~=false then error("Expected learnedByPracticeKey[power heal]=false") end; if rf.learnedByPracticeKey["guard"]~=false then error("Expected learnedByPracticeKey[guard]=false") end end',
                 note =
-                "ASSERT: ROWFACTS session store accepts deterministic represented-row facts and preserves normalized learnedByPracticeKey values.",
+                "ASSERT: ROWFACTS peer session store accepts deterministic represented-row facts and preserves normalized learnedByPracticeKey values.",
             },
             {
                 cmd =
-                'lua do local C=require("dwkit.services.cross_profile_comm_service"); local st=C.getStats(); print(string.format("[dwverify-cpc] stats peerCount=%s rowFactsCount=%s", tostring(st.peerCount), tostring(st.rowFactsCount or 0))) if tonumber(st.rowFactsCount or 0) < 1 then error("Expected rowFactsCount >= 1 after test rowFacts set") end; local s=C.status(); print(string.format("[dwverify-cpc] status installed=%s peerCount=%s rowFactsCount=%s", tostring(s.installed), tostring(s.peerCount), tostring(s.rowFactsCount or 0))) end',
-                note = "ASSERT: stats/status surface rowFactsCount for diagnostics.",
+                'lua do local C=require("dwkit.services.cross_profile_comm_service"); local st=C.getStats(); print(string.format("[dwverify-cpc] stats peerCount=%s rowFactsCount=%s localRowFactsPresent=%s publisherWired=%s", tostring(st.peerCount), tostring(st.rowFactsCount or 0), tostring(st.localRowFactsPresent==true), tostring(st.publisher and st.publisher.wired==true))) if tonumber(st.rowFactsCount or 0) < 1 then error("Expected rowFactsCount >= 1 after test rowFacts set") end; local s=C.status(); print(string.format("[dwverify-cpc] status installed=%s peerCount=%s rowFactsCount=%s localRowFactsPresent=%s publisherWired=%s", tostring(s.installed), tostring(s.peerCount), tostring(s.rowFactsCount or 0), tostring(s.localRowFactsPresent==true), tostring(s.publisherWired==true))) end',
+                note = "ASSERT: stats/status surfaces local publisher state plus peer rowFacts diagnostics.",
             },
             {
                 cmd =
-                'lua do local C=require("dwkit.services.cross_profile_comm_service"); local ok,err=C._testClearRowFacts(); if ok==false then error("testClearRowFacts cleanup failed: "..tostring(err)) end; local rf=C.getRowFactsByProfile("Profile-B"); if rf~=nil then error("Expected rowFacts cleared for Profile-B") end; local st=C.getStats(); print(string.format("[dwverify-cpc] PASS rowFacts cleanup rowFactsCount=%s", tostring(st.rowFactsCount or 0))) if tonumber(st.rowFactsCount or -1)~=0 then error("Expected rowFactsCount=0 after cleanup") end end',
-                note = "Cleanup deterministic ROWFACTS fixture and assert store returns to baseline.",
+                'lua do local C=require("dwkit.services.cross_profile_comm_service"); local ok,err=C._testClearRowFacts(); if ok==false then error("testClearRowFacts cleanup failed: "..tostring(err)) end; local rf=C.getRowFactsByProfile("Profile-B"); if rf~=nil then error("Expected peer rowFacts cleared for Profile-B") end; local st=C.getStats(); print(string.format("[dwverify-cpc] PASS peer rowFacts cleanup rowFactsCount=%s localRowFactsPresent=%s", tostring(st.rowFactsCount or 0), tostring(st.localRowFactsPresent==true))) if tonumber(st.rowFactsCount or -1)~=0 then error("Expected rowFactsCount=0 after peer cleanup") end end',
+                note = "Cleanup deterministic peer ROWFACTS fixture and assert peer store returns to baseline.",
             },
             {
                 cmd =
-                'lua do print("[dwverify-cpc] MANUAL: open another Mudlet profile tab whose profile name matches one of your owned_profiles labels (e.g., Profile-B). Expect Presence roster to flip it to [ONLINE] immediately. Close it and expect it to flip to [OFFLINE] immediately (sysExitEvent best-effort).") end',
-                note = "Human live behavior check (same instance).",
+                'lua do print("[dwverify-cpc] MANUAL: open another Mudlet profile tab whose profile name matches one of your owned_profiles labels (e.g., Profile-B). On that profile, update score/practice manually. Expect local publisher to republish ROWFACTS and the receiving profile to reflect peer rowFacts/state updates.") end',
+                note = "Human live publisher/receiver behavior check (same instance).",
             },
         },
     },
