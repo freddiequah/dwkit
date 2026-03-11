@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.score_store_service
 -- Owner       : Services
--- Version     : v2026-03-04H
+-- Version     : v2026-03-11B
 -- Purpose     :
 --   - Provide a SAFE, manual-only score text snapshot store (No-GMCP).
 --   - Ingest score-like text via explicit API calls (no send(), no timers).
@@ -13,9 +13,12 @@
 --       * score -l (table long)
 --       * score -r (report text)
 --   - Provide SAFE query helpers for ActionPad gating (level/class/name + unknown-stale).
+--   - Provide best-effort CPC fallback publish when ScoreStore update event
+--     subscription is unavailable in the current runtime.
 --
 -- Public API  :
 --   - getVersion() -> string
+--   - getUpdatedEventName() -> string
 --   - getSnapshot() -> table|nil
 --   - getHistory() -> table (array; shallow-copied; oldest->newest)
 --   - configurePersistence(opts) -> boolean ok, string|nil err
@@ -64,12 +67,15 @@
 --     - snapshot: table|nil
 --     - history:  array of snapshot tables (bounded)
 -- Automation Policy: Manual only
--- Dependencies     : dwkit.core.identity (optional best-effort persist via DWKit.persist.store)
+-- Dependencies     :
+--   - dwkit.core.identity
+--   - optional best-effort persist via DWKit.persist.store
+--   - optional best-effort CPC fallback via dwkit.services.cross_profile_comm_service
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-03-04H"
+M.VERSION = "v2026-03-11B"
 
 local ID = require("dwkit.core.identity")
 
@@ -111,6 +117,39 @@ end
 
 local function _isNonEmptyString(s)
     return type(s) == "string" and s ~= ""
+end
+
+local function _safeRequire(modName)
+    local ok, mod = pcall(require, modName)
+    if ok then return true, mod end
+    return false, mod
+end
+
+local function _notifyCrossProfilePublisherFallback(source)
+    local okC, C = _safeRequire("dwkit.services.cross_profile_comm_service")
+    if not okC or type(C) ~= "table" then return end
+
+    if type(C.isInstalled) == "function" and C.isInstalled() ~= true then
+        return
+    end
+
+    local hasScoreSub = false
+    if type(C.getStats) == "function" then
+        local ok, st = pcall(C.getStats)
+        if ok and type(st) == "table" and type(st.publisher) == "table" then
+            hasScoreSub = (st.publisher.hasScoreSub == true)
+        end
+    end
+
+    if hasScoreSub == true then
+        return
+    end
+
+    if type(C.publishLocalRowFacts) == "function" then
+        pcall(C.publishLocalRowFacts, {
+            source = tostring(source or "score_store:fallback_publish"),
+        })
+    end
 end
 
 local function _shallowCopy(t)
@@ -781,6 +820,10 @@ function M.getVersion()
     return tostring(M.VERSION or "unknown")
 end
 
+function M.getUpdatedEventName()
+    return tostring(EV_UPDATED)
+end
+
 function M.getSnapshot()
     return _copySnapshot(_snapshot)
 end
@@ -907,6 +950,7 @@ function M.ingestFromText(text, meta)
     end
 
     _emitUpdated(_snapshot, source)
+    _notifyCrossProfilePublisherFallback("score_store:ingest")
     return true, nil
 end
 
@@ -921,6 +965,7 @@ function M.clear(meta)
     end
 
     _emitUpdated({ schemaVersion = SCHEMA_VERSION, ts = os.time(), source = source, raw = "", parsed = nil }, source)
+    _notifyCrossProfilePublisherFallback("score_store:clear")
     return true, nil
 end
 
@@ -955,6 +1000,7 @@ function M.wipe(meta)
     end
 
     _emitUpdated({ schemaVersion = SCHEMA_VERSION, ts = os.time(), source = source, raw = "", parsed = nil }, source)
+    _notifyCrossProfilePublisherFallback("score_store:wipe")
     return true, nil
 end
 
