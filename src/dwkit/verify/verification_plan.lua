@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-11A
+-- Version     : v2026-03-11B
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-11A"
+M.VERSION = "v2026-03-11B"
 
 local SUITES = {
     default = {
@@ -316,7 +316,7 @@ local SUITES = {
     actionpad_gating_ui_smoke = {
         title = "actionpad_gating_ui_smoke",
         description =
-        "ActionPad gating UI smoke (Bucket B + represented-row facts): deterministic seed (owned_profiles + Presence + ActionPadService rows), ingest Practice+Score fixtures, set AssistBy deterministically, show ActionPad UI, then ASSERT ActionPadService.resolveActionGate returns expected reason codes for local fallback and represented-row-facts path: ok/not_learned/unknown_stale.practice/unknown_stale.score/below_level/wrong_class. No gameplay sends.",
+        "ActionPad gating UI smoke (Bucket B + represented-row facts): deterministic seed (owned_profiles + Presence + ActionPadService rows), ingest Practice+Score fixtures, set AssistBy deterministically, show ActionPad UI, then ASSERT ActionPadService.resolveActionGate returns expected reason codes for local fallback and represented-row-facts path: ok/not_learned/unknown_stale.practice/unknown_stale.score/below_level/wrong_class. Also asserts incomplete represented-row facts do not fall back to viewer-local PracticeStore/ScoreStore state. No gameplay sends.",
         delay = 0.25,
         steps = {
             {
@@ -408,6 +408,17 @@ local SUITES = {
                 cmd =
                 'lua do local A=require("dwkit.services.actionpad_service"); local g=A.resolveActionGate({kind="spell",practiceKey="heal",displayName="Heal",classKey="cleric",minLevel=8,rowFacts={name="Scynox",scoreStale=true,practiceStatusByKey={["heal"]={ok=true,learned=true,reason="ok"}}}}); print(string.format("[dwverify-actionpad-gui] rowFacts score stale enabled=%s reason=%s source=%s", tostring(g.enabled==true), tostring(g.reason), tostring(g.source or "nil"))) if g.enabled~=false then error("Expected rowFacts score stale enabled=false") end; if tostring(g.reason)~="unknown_stale.score" then error("Expected rowFacts score stale reason=unknown_stale.score; got "..tostring(g.reason)) end end',
                 note = "ASSERT: rowFacts scoreStale yields unknown_stale.score when score is required.",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local g=A.resolveActionGate({kind="spell",practiceKey="heal",displayName="Heal",rowFacts={name="Scynox"}}); print(string.format("[dwverify-actionpad-gui] rowFacts incomplete practice enabled=%s reason=%s source=%s", tostring(g.enabled==true), tostring(g.reason), tostring(g.source or "nil"))) if g.enabled~=false then error("Expected incomplete rowFacts practice gate enabled=false") end; if tostring(g.reason)~="unknown_stale.practice" then error("Expected incomplete rowFacts practice reason=unknown_stale.practice; got "..tostring(g.reason)) end; if tostring(g.source or "")~="rowFacts:missing_practice" then error("Expected incomplete rowFacts practice source=rowFacts:missing_practice; got "..tostring(g.source)) end end',
+                note = "ASSERT: incomplete rowFacts do not fall back to viewer-local PracticeStore state.",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local g=A.resolveActionGate({kind="spell",practiceKey="heal",displayName="Heal",classKey="cleric",minLevel=8,rowFacts={name="Scynox",practiceStatusByKey={["heal"]={ok=true,learned=true,reason="ok"}}}}); print(string.format("[dwverify-actionpad-gui] rowFacts incomplete score enabled=%s reason=%s source=%s", tostring(g.enabled==true), tostring(g.reason), tostring(g.source or "nil"))) if g.enabled~=false then error("Expected incomplete rowFacts score gate enabled=false") end; if tostring(g.reason)~="unknown_stale.score" then error("Expected incomplete rowFacts score reason=unknown_stale.score; got "..tostring(g.reason)) end; if tostring(g.source or "")~="rowFacts:missing_score" then error("Expected incomplete rowFacts score source=rowFacts:missing_score; got "..tostring(g.source)) end end',
+                note =
+                "ASSERT: incomplete rowFacts do not fall back to viewer-local ScoreStore state when score is required.",
             },
             {
                 cmd =

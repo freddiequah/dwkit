@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.actionpad_service
 -- Owner       : Services
--- Version     : v2026-03-10C
+-- Version     : v2026-03-11A
 -- Purpose     :
 --   - SAFE ActionPadService (data only).
 --   - Produces "online-only" roster rows for ActionPad UI, based on PresenceService
@@ -16,6 +16,8 @@
 --   - Supports represented-row facts for gating when provided by caller
 --     (for example CPC-fed row facts), while preserving current local-store
 --     fallback behavior when row facts are absent.
+--   - When represented-row facts are present but incomplete, does NOT leak
+--     viewer-local PracticeStore/ScoreStore state into that row's gate result.
 --   - Provides best-effort row-facts lookup by represented character using existing
 --     owned_profiles + CPC composition.
 --   - Provides deterministic assistBy/healer selection helpers for ActionPad UI (Bucket C),
@@ -94,7 +96,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-10C"
+M.VERSION = "v2026-03-11A"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -898,6 +900,17 @@ local function _practiceStatusFromRowFacts(rowFacts, kind, practiceKey)
     return nil
 end
 
+local function _missingPracticeStatusFromRowFacts(rowFacts)
+    return {
+        ok = false,
+        learned = false,
+        reason = "unknown_stale",
+        hasSnapshot = false,
+        hasParsed = false,
+        source = "rowFacts:missing_practice",
+    }
+end
+
 local function _rowFactsClassKey(rowFacts)
     if type(rowFacts) ~= "table" then
         return nil
@@ -918,6 +931,19 @@ local function _rowFactsClassKey(rowFacts)
     return nil
 end
 
+local function _missingScoreCoreFromRowFacts(rowFacts)
+    rowFacts = (type(rowFacts) == "table") and rowFacts or {}
+    return {
+        ok = false,
+        reason = "unknown_stale",
+        source = "rowFacts:missing_score",
+        name = _trim(rowFacts.name),
+        class = _trim(rowFacts.class),
+        classKey = _rowFactsClassKey(rowFacts),
+        level = tonumber(rowFacts.level),
+    }
+end
+
 local function _rowFactsScoreCore(rowFacts)
     if type(rowFacts) ~= "table" then
         return nil
@@ -935,8 +961,9 @@ local function _rowFactsScoreCore(rowFacts)
     local classKey = _rowFactsClassKey(rowFacts)
     local classDisplay = _trim(rowFacts.class)
     local name = _trim(rowFacts.name)
+    local hasClass = (classKey ~= nil) or (classDisplay ~= "")
 
-    if level ~= nil or classKey ~= nil or classDisplay ~= "" or name ~= "" then
+    if level ~= nil and hasClass then
         return {
             ok = true,
             reason = "ok",
@@ -977,6 +1004,7 @@ function M.resolveActionGate(spec, opts)
     end
 
     local rowFacts = _resolveRowFacts(spec, opts)
+    local rowFactsActive = (type(rowFacts) == "table")
     local rowClassKey = _rowFactsClassKey(rowFacts)
 
     local def = _skillRegistryResolveBestEffort(kind, practiceKey)
@@ -1006,7 +1034,11 @@ function M.resolveActionGate(spec, opts)
 
     local pst = _practiceStatusFromRowFacts(rowFacts, kind, practiceKey)
     if type(pst) ~= "table" then
-        pst = _practiceLearnStatusBestEffort(kind, practiceKey)
+        if rowFactsActive == true then
+            pst = _missingPracticeStatusFromRowFacts(rowFacts)
+        else
+            pst = _practiceLearnStatusBestEffort(kind, practiceKey)
+        end
     end
 
     if tostring(pst.reason or "") == "unknown_stale" then
@@ -1050,7 +1082,11 @@ function M.resolveActionGate(spec, opts)
     if scoreNeeded then
         core = _rowFactsScoreCore(rowFacts)
         if type(core) ~= "table" then
-            core = _scoreCoreBestEffort()
+            if rowFactsActive == true then
+                core = _missingScoreCoreFromRowFacts(rowFacts)
+            else
+                core = _scoreCoreBestEffort()
+            end
         end
 
         if tostring(core.reason or "") == "unknown_stale" or core.ok ~= true then
