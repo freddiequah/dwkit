@@ -1,7 +1,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.skill_registry_service
 -- Owner       : Services
--- Version     : v2026-03-10B
+-- Version     : v2026-03-11A
 -- Purpose     :
 --   - SAFE SkillRegistryService (data only).
 --   - Owns skill/spell registry (data-driven), emits updates.
@@ -10,6 +10,8 @@
 --   - Supports transitional cross-class learn-spec declarations while keeping
 --     legacy classKey + minLevel defs valid.
 --   - Provides class-specific learn requirement resolution from canonical defs.
+--   - Preserves service ownership for nested def data by deep-copying
+--     aliases/tags/learnSpecs on ingest/output.
 --   - No UI, no persistence, no timers, no send().
 --   - Hardened validation: detects duplicate practiceKey + alias collisions.
 --
@@ -41,7 +43,7 @@
 
 local M               = {}
 
-M.VERSION             = "v2026-03-10B"
+M.VERSION             = "v2026-03-11A"
 
 local ID              = require("dwkit.core.identity")
 local BUS             = require("dwkit.bus.event_bus")
@@ -114,12 +116,23 @@ local function _shallowCopy(t)
     return out
 end
 
+local function _deepCopy(v)
+    if type(v) ~= "table" then
+        return v
+    end
+    local out = {}
+    for k, val in pairs(v) do
+        out[k] = _deepCopy(val)
+    end
+    return out
+end
+
 local function _copyRegistry(r)
     local out = {}
     if type(r) ~= "table" then return out end
     for k, def in pairs(r) do
         if type(def) == "table" then
-            out[k] = _shallowCopy(def)
+            out[k] = _deepCopy(def)
         else
             out[k] = def
         end
@@ -333,7 +346,7 @@ local function _firstLearnSpec(def)
     if type(specs) ~= "table" or #specs <= 0 then return nil end
     local first = specs[1]
     if type(first) ~= "table" then return nil end
-    return _shallowCopy(first)
+    return _deepCopy(first)
 end
 
 local function _legacyLearnRequirement(def)
@@ -582,7 +595,7 @@ function M.getDef(key)
     if type(key) ~= "string" or key == "" then return nil end
     local def = STATE.registry[key]
     if type(def) ~= "table" then return nil end
-    return _shallowCopy(def)
+    return _deepCopy(def)
 end
 
 function M.getKeysSorted()
@@ -631,7 +644,7 @@ function M.listByClass(classKey, kind)
     for _, def in pairs(STATE.registry) do
         if type(def) == "table" and _defMatchesClass(def, ck) == true then
             if kindNorm == nil or tostring(def.kind) == kindNorm then
-                out[#out + 1] = _shallowCopy(def)
+                out[#out + 1] = _deepCopy(def)
             end
         end
     end
@@ -652,7 +665,7 @@ function M.listByKind(kind)
     local out = {}
     for _, def in pairs(STATE.registry) do
         if type(def) == "table" and tostring(def.kind) == kindNorm then
-            out[#out + 1] = _shallowCopy(def)
+            out[#out + 1] = _deepCopy(def)
         end
     end
 
@@ -795,7 +808,7 @@ function M.setRegistry(registry, opts)
         if not okV then
             return false, "setRegistry(registry): invalid def for key=" .. tostring(k) .. " err=" .. tostring(errV)
         end
-        nextReg[k] = _shallowCopy(norm)
+        nextReg[k] = _deepCopy(norm)
     end
 
     STATE.registry = nextReg
@@ -836,7 +849,7 @@ function M.upsert(key, def, opts)
         return false, "upsert(key, def): invalid def err=" .. tostring(errV)
     end
 
-    STATE.registry[key] = _shallowCopy(norm)
+    STATE.registry[key] = _deepCopy(norm)
     _rebuildIndexes()
 
     local okAll, issues = M.validateAll({ strictClassList = true })
@@ -903,7 +916,7 @@ do
             else
                 local okV = M.validateDef(norm, { strictClassList = true })
                 if okV then
-                    nextReg[k] = _shallowCopy(norm)
+                    nextReg[k] = _deepCopy(norm)
                 end
             end
         end
