@@ -2,13 +2,17 @@
 -- #########################################################################
 -- Module Name : dwkit.services.presence_service
 -- Owner       : Services
--- Version     : v2026-02-26E
+-- Version     : v2026-03-12A
 -- Purpose     :
 --   - SAFE, profile-portable PresenceService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
 --   - Emits a registered internal event when state changes.
 --   - Service-layer bridge: listens to RoomEntities Updated (and WhoStore Updated)
 --     and updates Presence state.
+--   - CPC bridge hardening:
+--     only peer-presence CPC actions may recompute Presence roster truth.
+--     CPC ROWFACTS/non-roster updates must NOT rewrite Presence online/offline
+--     state, because ROWFACTS are represented-row facts, not roster-composition truth.
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -38,11 +42,16 @@
 -- Fix v2026-02-26E:
 --   - Also hide "self" from backward-compat myProfilesInRoom field.
 --     Some UIs may still fallback to myProfilesInRoom; self must never appear there.
+--
+-- Fix v2026-03-12A:
+--   - CPC ROWFACTS updates must NOT trigger Presence roster recompute.
+--   - Presence only recomputes from CPC when the CPC delta action is roster-related
+--     (seen/bye/install/reannounce/testSeen).
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-26E"
+M.VERSION = "v2026-03-12A"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -319,6 +328,44 @@ local function _getLocalProfileNameBestEffort()
     end
 
     return ""
+end
+
+local function _extractCpcAction(payload)
+    payload = (type(payload) == "table") and payload or {}
+
+    if type(payload.delta) == "table" then
+        local action = _trim(tostring(payload.delta.action or ""))
+        if action ~= "" then
+            return action
+        end
+    end
+
+    local action = _trim(tostring(payload.action or ""))
+    if action ~= "" then
+        return action
+    end
+
+    return ""
+end
+
+local function _shouldRecomputeForCpcPayload(payload)
+    local action = _extractCpcAction(payload)
+
+    if action == "seen" then return true end
+    if action == "bye" then return true end
+    if action == "install" then return true end
+    if action == "reannounce" then return true end
+    if action == "testSeen" then return true end
+
+    if action == "rowfacts" then return false end
+    if action == "rowfacts_clear" then return false end
+    if action == "local_rowfacts_publish" then return false end
+
+    if action ~= "" then
+        return false
+    end
+
+    return false
 end
 
 -- -------------------------------------------------------------------------
@@ -679,7 +726,11 @@ local function _onWhoStoreUpdated(payload)
     _bridge.running = false
 end
 
-local function _onCpcUpdated(_payload)
+local function _onCpcUpdated(payload)
+    if _shouldRecomputeForCpcPayload(payload) ~= true then
+        return
+    end
+
     if _bridge.running == true then
         return
     end
