@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-11D
+-- Version     : v2026-03-12A
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-11D"
+M.VERSION = "v2026-03-12A"
 
 local SUITES = {
     default = {
@@ -790,14 +790,19 @@ local SUITES = {
     roomentities_whostore_gate = {
         title = "roomentities_whostore_gate",
         description =
-        "RoomEntities WhoStore gate regression: seed WhoStore as players set-map, ingest titled room lines via roomfeed_capture._testIngestSnapshot (SAFE; no sends), and assert titled labels promote to players (not stuck in unknown).",
+        "RoomEntities player-promotion gate regression: seed owned_profiles and WhoStore, ingest titled room lines via roomfeed_capture._testIngestSnapshot (SAFE; no sends), and assert player promotion stays conservative. WhoStore set-map confirms titled/non-titled players; owned_profiles narrow fallback confirms titled owned alt when WhoStore does not name it; stranger/object lines must remain unknown.",
         delay = 0.30,
         steps = {
             {
                 cmd =
+                'lua do local O=require("dwkit.config.owned_profiles"); local ok,err=O.setMap({["Scynox"]="Scynox - Dev",["Alpha"]="Alpha - Dev"},{noSave=true}); if ok==false then error("owned_profiles.setMap failed: "..tostring(err)) end; local st=O.status(); print(string.format("[dwverify-roomentities] seeded owned_profiles count=%s", tostring(st.count))) end',
+                note = "Seed deterministic owned_profiles for narrow owned-alt fallback.",
+            },
+            {
+                cmd =
                 'lua do local W=require("dwkit.services.whostore_service"); local ok1,err1=W.clear({source="dwverify:roomentities:whoclear"}); if ok1==false then error("WhoStore.clear failed: "..tostring(err1)) end; local ok2,err2=W.setState({players={Alpha=true,Beta=true}},{source="dwverify:roomentities:whoseed_players_set"}); if ok2==false then error("WhoStore.setState failed: "..tostring(err2)) end; local names=W.getAllNames(); print(string.format("[dwverify-roomentities] seeded WhoStore players-set names=%s count=%s", tostring(table.concat(names,",")), tostring(#names))) end',
                 note =
-                "Seed WhoStore using players set-map shape (this is the path that previously could not produce 'exact').",
+                "Seed WhoStore using players set-map shape. Alpha/Beta should promote from WhoStore; Scynox must rely on owned_profiles fallback only.",
             },
             {
                 cmd =
@@ -806,13 +811,20 @@ local SUITES = {
             },
             {
                 cmd =
-                'lua do local C=require("dwkit.capture.roomfeed_capture"); local ok,err=C._testIngestSnapshot({"Some Room (#1) [ INDOORS ]","Alpha the adventurer is standing here.","Beta is standing here.","A small bulletin board designed for Quests is here.","Obvious exits:","North - Somewhere"},{hasExits=true,startKind="strong"}); if ok==false then error("roomfeed _testIngestSnapshot failed: "..tostring(err)) end; print("[dwverify-roomentities] ingested deterministic snapshot via roomfeed_capture") end',
-                note = "Ingest snapshot with titled + plain players and an object line.",
+                'lua do local C=require("dwkit.capture.roomfeed_capture"); local ok,err=C._testIngestSnapshot({"Some Room (#1) [ INDOORS ]","Alpha the adventurer is standing here.","Beta is standing here.","Scynox the adventurer is standing here.","Stranger the adventurer is standing here.","A small bulletin board designed for Quests is here.","Obvious exits:","North - Somewhere"},{hasExits=true,startKind="strong"}); if ok==false then error("roomfeed _testIngestSnapshot failed: "..tostring(err)) end; print("[dwverify-roomentities] ingested deterministic snapshot via roomfeed_capture") end',
+                note =
+                "Ingest snapshot with WhoStore-backed players, one owned-only titled alt, one stranger, and one object.",
             },
             {
                 cmd =
-                'lua do local R=require("dwkit.services.roomentities_service"); local v=R.getSnapshotV2 and R.getSnapshotV2() or {}; local function cnt(t) local n=0; if type(t)=="table" then for _ in pairs(t) do n=n+1 end end; return n end; local function has(t,k) return (type(t)=="table" and t[k]~=nil) and true or false end; if cnt(v.players) < 2 then error("Expected at least 2 players in v2.players; got "..tostring(cnt(v.players))) end; if has(v.players,"Alpha the adventurer")~=true then error("Expected titled label in players: Alpha the adventurer") end; if has(v.players,"Beta")~=true then error("Expected Beta in players") end; if has(v.unknown,"A small bulletin board designed for Quests")~=true then error("Expected object line in unknown") end; print(string.format("[dwverify-roomentities] PASS v2.players=%s v2.unknown=%s", tostring(cnt(v.players)), tostring(cnt(v.unknown)))) end',
-                note = "ASSERT: titled label promotes to players; object remains unknown.",
+                'lua do local R=require("dwkit.services.roomentities_service"); local v=R.getSnapshotV2 and R.getSnapshotV2() or {}; local function cnt(t) local n=0; if type(t)=="table" then for _ in pairs(t) do n=n+1 end end; return n end; local function has(t,k) return (type(t)=="table" and t[k]~=nil) and true or false end; if cnt(v.players) < 3 then error("Expected at least 3 players in v2.players; got "..tostring(cnt(v.players))) end; if has(v.players,"Alpha the adventurer")~=true then error("Expected titled label in players: Alpha the adventurer") end; if has(v.players,"Beta")~=true then error("Expected Beta in players") end; if has(v.players,"Scynox the adventurer")~=true then error("Expected owned titled label in players via owned_profiles fallback: Scynox the adventurer") end; if has(v.unknown,"Stranger the adventurer")~=true then error("Expected stranger titled line to remain unknown") end; if has(v.unknown,"A small bulletin board designed for Quests")~=true then error("Expected object line in unknown") end; print(string.format("[dwverify-roomentities] PASS v2.players=%s v2.unknown=%s", tostring(cnt(v.players)), tostring(cnt(v.unknown)))) end',
+                note = "ASSERT: owned titled alt promotes; stranger/object remain unknown.",
+            },
+            {
+                cmd =
+                'lua do local R=require("dwkit.services.roomentities_service"); local d=R.getDebugSnapshot({useWhoStore=true,useOwnedProfiles=true,maxEntities=10,maxRawsPerEntity=2}); local u=((d.bucketsV2 or {}).unknown or {}).items or {}; local p=((d.bucketsV2 or {}).players or {}).items or {}; local function find(items,label) for i=1,#items do local it=items[i]; if tostring(it.label or "")==label then return it end end return nil end; local owned=find(p,"Scynox the adventurer"); local stranger=find(u,"Stranger the adventurer"); if type(owned)~="table" then error("Expected debug entry for Scynox the adventurer in players bucket") end; if not (owned.diag and owned.diag.owned and owned.diag.owned.candidateExact==true) then error("Expected owned candidateExact=true for Scynox debug diag") end; if type(stranger)~="table" then error("Expected debug entry for Stranger the adventurer in unknown bucket") end; if stranger.diag and stranger.diag.owned and stranger.diag.owned.candidateExact==true then error("Did not expect owned candidateExact=true for stranger") end; print(string.format("[dwverify-roomentities] PASS debug ownedCandidateExact=%s strangerOwnedCandidateExact=%s", tostring(owned.diag and owned.diag.owned and owned.diag.owned.candidateExact==true), tostring(stranger.diag and stranger.diag.owned and stranger.diag.owned.candidateExact==true))) end',
+                note =
+                "ASSERT: debug snapshot exposes narrow owned-profile promotion evidence without matching the stranger.",
             },
         },
     },

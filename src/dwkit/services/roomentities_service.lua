@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.roomentities_service
 -- Owner       : Services
--- Version     : v2026-02-27A
+-- Version     : v2026-03-12B
 -- Purpose     :
 --   - SAFE, profile-portable RoomEntitiesService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
@@ -35,11 +35,21 @@
 --   - WhoStore state may expose online players as a set-map: wState.players = { ["Name"]=true }.
 --     That path must populate canonByLower so confidence gate can return "exact" (not only "candidate"),
 --     otherwise titled room labels (e.g., "Name the adventurer") can never promote to players.
+--
+-- FIX v2026-03-12A:
+--   - Add a narrow owned-profile promotion path using owned_profiles character-name keys.
+--   - This preserves unknown-first behavior for strangers/objects while allowing titled owned
+--     room labels (e.g., "Scynox the adventurer") to promote to players even when WhoStore
+--     is not the confirming source for that line.
+--
+-- FIX v2026-03-12B:
+--   - Resolve local helper ordering bug: owned-profile promotion helpers must not call
+--     _extractCandidateName before it is declared in local scope.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-02-27A"
+M.VERSION = "v2026-03-12B"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -358,6 +368,35 @@ local function _isArrayTable(t)
 end
 
 -- ############################################################
+-- Diagnostics helpers needed by promotion logic
+-- ############################################################
+
+local function _extractCandidateName(labelOrKey)
+    if type(labelOrKey) ~= "string" then return nil end
+    local s = _trim(labelOrKey)
+    if s == "" then return nil end
+
+    s = _asKey(s) or s
+    s = _trim(s)
+    if s == "" then return nil end
+
+    local n = s:match("^([A-Za-z][A-Za-z0-9']*)")
+    if type(n) ~= "string" or n == "" then return nil end
+    return n
+end
+
+local function _boundedCopyRaws(raws, maxN)
+    local out = {}
+    if type(raws) ~= "table" then return out end
+    maxN = tonumber(maxN) or 0
+    if maxN <= 0 then maxN = 3 end
+    for i = 1, math.min(#raws, maxN) do
+        out[i] = tostring(raws[i] or "")
+    end
+    return out
+end
+
+-- ############################################################
 -- Confidence gate helpers (exact display-name match required)
 -- ############################################################
 
@@ -464,6 +503,91 @@ local function _confidenceForName(name, idx)
     end
 
     return "candidate"
+end
+
+local function _extractKnownPlayersIndexFromOwnedProfilesMap(map)
+    local idx = _newNameIndex()
+    if type(map) ~= "table" then
+        return idx
+    end
+
+    for charName in pairs(map) do
+        if type(charName) == "string" and charName ~= "" then
+            _indexAdd(idx, charName)
+        end
+    end
+
+    return idx
+end
+
+local function _getOwnedProfilesKnownPlayersIndexBestEffort(opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    if opts.useOwnedProfiles ~= nil and opts.useOwnedProfiles ~= true then
+        return _newNameIndex()
+    end
+
+    if type(opts.ownedProfiles) == "table" then
+        if _isArrayTable(opts.ownedProfiles) then
+            local idx = _newNameIndex()
+            _absorbNamesToIndex(idx, opts.ownedProfiles)
+            return idx
+        end
+        return _extractKnownPlayersIndexFromOwnedProfilesMap(opts.ownedProfiles)
+    end
+
+    local okO, O = _safeRequire("dwkit.config.owned_profiles")
+    if not okO or type(O) ~= "table" then
+        return _newNameIndex()
+    end
+    if type(O.getMap) ~= "function" then
+        return _newNameIndex()
+    end
+
+    local okM, map = pcall(O.getMap)
+    if not okM or type(map) ~= "table" then
+        return _newNameIndex()
+    end
+
+    return _extractKnownPlayersIndexFromOwnedProfilesMap(map)
+end
+
+local function _tryExactPromotionByIndex(label, idx)
+    if type(label) ~= "string" or label == "" then
+        return false, nil, nil
+    end
+    idx = (type(idx) == "table") and idx or _newNameIndex()
+
+    local confLabel = _confidenceForName(label, idx)
+    if confLabel == "exact" then
+        local canon = _asKey(label) or label
+        return true, "label", canon
+    end
+
+    local cand = _extractCandidateName(label)
+    if cand ~= nil then
+        local confCand = _confidenceForName(cand, idx)
+        if confCand == "exact" then
+            local canon = idx.canonByLower[_normName(cand)] or cand
+            return true, "candidate", canon
+        end
+    end
+
+    return false, nil, nil
+end
+
+local function _shouldPromoteToPlayer(label, knownIdx, ownedIdx)
+    local okKnown, matchByKnown, canonKnown = _tryExactPromotionByIndex(label, knownIdx)
+    if okKnown == true then
+        return true, "known", matchByKnown, canonKnown
+    end
+
+    local okOwned, matchByOwned, canonOwned = _tryExactPromotionByIndex(label, ownedIdx)
+    if okOwned == true then
+        return true, "owned", matchByOwned, canonOwned
+    end
+
+    return false, nil, nil, nil
 end
 
 -- ############################################################
@@ -745,35 +869,6 @@ local function _shouldIgnoreByCallerRules(trimmed, opts)
     return false
 end
 
--- ############################################################
--- Diagnostics helpers (SAFE)
--- ############################################################
-
-local function _extractCandidateName(labelOrKey)
-    if type(labelOrKey) ~= "string" then return nil end
-    local s = _trim(labelOrKey)
-    if s == "" then return nil end
-
-    s = _asKey(s) or s
-    s = _trim(s)
-    if s == "" then return nil end
-
-    local n = s:match("^([A-Za-z][A-Za-z0-9']*)")
-    if type(n) ~= "string" or n == "" then return nil end
-    return n
-end
-
-local function _boundedCopyRaws(raws, maxN)
-    local out = {}
-    if type(raws) ~= "table" then return out end
-    maxN = tonumber(maxN) or 0
-    if maxN <= 0 then maxN = 3 end
-    for i = 1, math.min(#raws, maxN) do
-        out[i] = tostring(raws[i] or "")
-    end
-    return out
-end
-
 function M.getDebugSnapshot(opts)
     opts = (type(opts) == "table") and opts or {}
 
@@ -791,6 +886,10 @@ function M.getDebugSnapshot(opts)
     local knownIdx = _getKnownPlayersIndexCombined({
         usePresence = (opts.usePresence == true),
         useWhoStore = (opts.useWhoStore ~= false),
+    })
+    local ownedIdx = _getOwnedProfilesKnownPlayersIndexBestEffort({
+        useOwnedProfiles = (opts.useOwnedProfiles ~= false),
+        ownedProfiles = opts.ownedProfiles,
     })
 
     local st = _ensureBucketsPresent(STATE.state)
@@ -851,6 +950,17 @@ function M.getDebugSnapshot(opts)
                     end
                 end
 
+                local ownedLabelConf = _confidenceForName(label, ownedIdx)
+                local ownedCandidateConf = (candidate and _confidenceForName(candidate, ownedIdx)) or "none"
+
+                local ownedCanon = nil
+                if candidate then
+                    local lowerOwned = _normName(candidate)
+                    if lowerOwned ~= "" then
+                        ownedCanon = ownedIdx.canonByLower[lowerOwned]
+                    end
+                end
+
                 out.items[#out.items + 1] = {
                     key = key,
                     label = label,
@@ -866,22 +976,43 @@ function M.getDebugSnapshot(opts)
                             candidateExact = (confCandidate == "exact"),
                             canonByCandidate = whoCanon,
                         },
+                        owned = {
+                            labelConfidence = ownedLabelConf,
+                            labelExact = (ownedLabelConf == "exact"),
+                            candidateConfidence = ownedCandidateConf,
+                            candidateExact = (ownedCandidateConf == "exact"),
+                            canonByCandidate = ownedCanon,
+                        },
                     },
                 }
             else
+                local label = tostring(k)
+                local candidate = _extractCandidateName(label)
+                local labelConf = _confidenceForName(label, knownIdx)
+                local ownedLabelConf = _confidenceForName(label, ownedIdx)
+                local candidateConf = (candidate and _confidenceForName(candidate, knownIdx)) or "none"
+                local ownedCandidateConf = (candidate and _confidenceForName(candidate, ownedIdx)) or "none"
+
                 out.items[#out.items + 1] = {
-                    key = tostring(k),
-                    label = tostring(k),
+                    key = label,
+                    label = label,
                     count = 1,
                     raws = {},
                     diag = {
-                        candidateName = _extractCandidateName(tostring(k)),
+                        candidateName = candidate,
                         who = {
-                            labelConfidence = _confidenceForName(tostring(k), knownIdx),
-                            labelExact = (_confidenceForName(tostring(k), knownIdx) == "exact"),
-                            candidateConfidence = "none",
-                            candidateExact = false,
-                            canonByCandidate = nil,
+                            labelConfidence = labelConf,
+                            labelExact = (labelConf == "exact"),
+                            candidateConfidence = candidateConf,
+                            candidateExact = (candidateConf == "exact"),
+                            canonByCandidate = (candidate and knownIdx.canonByLower[_normName(candidate)]) or nil,
+                        },
+                        owned = {
+                            labelConfidence = ownedLabelConf,
+                            labelExact = (ownedLabelConf == "exact"),
+                            candidateConfidence = ownedCandidateConf,
+                            candidateExact = (ownedCandidateConf == "exact"),
+                            canonByCandidate = (candidate and ownedIdx.canonByLower[_normName(candidate)]) or nil,
                         },
                     },
                 }
@@ -921,6 +1052,7 @@ function M.getDebugSnapshot(opts)
                 maxRawsPerEntity = maxRawsPerEntity,
                 usePresence = (opts.usePresence == true),
                 useWhoStore = (opts.useWhoStore ~= false),
+                useOwnedProfiles = (opts.useOwnedProfiles ~= false),
             },
         },
         bucketsV2 = bucketsV2,
@@ -953,9 +1085,10 @@ local function _resolveWhoStoreUpdatedEventName(W)
     return nil
 end
 
-local function _reclassifyUnknownToPlayersOnly(current, knownIdx)
+local function _reclassifyUnknownToPlayersOnly(current, knownIdx, ownedIdx)
     current = _ensureBucketsPresent((type(current) == "table") and current or {})
     knownIdx = (type(knownIdx) == "table") and knownIdx or _newNameIndex()
+    ownedIdx = (type(ownedIdx) == "table") and ownedIdx or _newNameIndex()
 
     local next = _newBuckets()
     local moved = 0
@@ -966,21 +1099,11 @@ local function _reclassifyUnknownToPlayersOnly(current, knownIdx)
     local function placeNameFromUnknown(label)
         if type(label) ~= "string" or label == "" then return end
 
-        local confLabel = _confidenceForName(label, knownIdx)
-        if confLabel == "exact" then
+        local promote = _shouldPromoteToPlayer(label, knownIdx, ownedIdx)
+        if promote == true then
             next.players[label] = true
             moved = moved + 1
             return
-        end
-
-        local cand = _extractCandidateName(label)
-        if cand then
-            local confCand = _confidenceForName(cand, knownIdx)
-            if confCand == "exact" then
-                next.players[label] = true
-                moved = moved + 1
-                return
-            end
         end
 
         next.unknown[label] = true
@@ -1045,9 +1168,10 @@ local function _applyReclassifyNow(opts)
     _who.reclassifyRunning = true
 
     local knownIdx = _getWhoStoreKnownPlayersIndexBestEffort()
+    local ownedIdx = _getOwnedProfilesKnownPlayersIndexBestEffort()
     local before = _copyOneLevel(_ensureBucketsPresent(STATE.state))
 
-    local next, moved = _reclassifyUnknownToPlayersOnly(before, knownIdx)
+    local next, moved = _reclassifyUnknownToPlayersOnly(before, knownIdx, ownedIdx)
 
     if opts.forceEmit ~= true and _statesEqual(before, next) then
         STATE.suppressedEmits = STATE.suppressedEmits + 1
@@ -1397,6 +1521,7 @@ function M.ingestLookLines(lines, opts)
     _ensureWhoStoreSubscription()
 
     local knownPlayersIdx = _getKnownPlayersIndexCombined(opts)
+    local ownedPlayersIdx = _getOwnedProfilesKnownPlayersIndexBestEffort(opts)
 
     local buckets = _newBuckets()
     local v2 = _newEntitiesV2()
@@ -1434,22 +1559,14 @@ function M.ingestLookLines(lines, opts)
                 if phrase ~= nil then
                     local label = _asKey(phrase) or phrase
                     if label ~= "" then
-                        local confLabel = _confidenceForName(label, knownPlayersIdx)
+                        local promote = _shouldPromoteToPlayer(label, knownPlayersIdx, ownedPlayersIdx)
 
-                        if confLabel == "exact" then
+                        if promote == true then
                             _addBucket(buckets.players, label)
                             addV2(v2.players, label, label, trimmed)
                         else
-                            local cand = _extractCandidateName(label)
-                            local confCand = (cand and _confidenceForName(cand, knownPlayersIdx)) or "none"
-
-                            if confCand == "exact" then
-                                _addBucket(buckets.players, label)
-                                addV2(v2.players, label, label, trimmed)
-                            else
-                                _addBucket(buckets.unknown, label)
-                                addV2(v2.unknown, label, label, trimmed)
-                            end
+                            _addBucket(buckets.unknown, label)
+                            addV2(v2.unknown, label, label, trimmed)
                         end
                     end
                 end
