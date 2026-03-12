@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.actionpad_service
 -- Owner       : Services
--- Version     : v2026-03-11A
+-- Version     : v2026-03-12B
 -- Purpose     :
 --   - SAFE ActionPadService (data only).
 --   - Produces "online-only" roster rows for ActionPad UI, based on PresenceService
@@ -22,6 +22,19 @@
 --     owned_profiles + CPC composition.
 --   - Provides deterministic assistBy/healer selection helpers for ActionPad UI (Bucket C),
 --     WITHOUT sending, WITHOUT persistence.
+--   - Best-effort live composition owner wiring:
+--     subscribes to Presence/CPC/PracticeStore/ScoreStore update events and emits
+--     DWKit:Service:ActionPad:Updated so the existing UI can re-render without
+--     manual drift.
+--   - Presence remains roster-composition owner:
+--     Presence updates may recompute roster composition, while CPC rowFacts refresh
+--     is refresh-only and must not mutate roster composition.
+--   - Refresh-only hardening:
+--     PracticeStore/ScoreStore refresh events are not allowed to mutate roster
+--     composition; preserve current rowsOnline across refresh-only emits.
+--   - Nested refresh hardening:
+--     suppress roster-mutating auto recompute during refresh-only cascades and
+--     always restore preserved roster state after refresh-only event chains.
 --   - No UI, no persistence, no timers.
 --
 -- Public API  :
@@ -96,7 +109,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-11A"
+M.VERSION = "v2026-03-12B"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -118,6 +131,21 @@ local STATE = {
         resolvedOnline = false,
         candidates = {},
         lastReason = nil,
+    },
+
+    subscriptions = {
+        presence = { eventName = nil, token = nil },
+        cpc = { eventName = nil, token = nil },
+        practice = { eventName = nil, token = nil },
+        score = { eventName = nil, token = nil },
+        lastErr = nil,
+    },
+
+    refreshFreeze = {
+        depth = 0,
+        rowsOnline = nil,
+        lastSource = nil,
+        source = nil,
     },
 }
 
@@ -229,6 +257,306 @@ local function _getRemoteExecBestEffort()
     return R, nil
 end
 
+local function _hasLiveSubscription(token)
+    return not (token == nil or token == false)
+end
+
+local function _copySubscriptionsStatus()
+    local subs = (type(STATE.subscriptions) == "table") and STATE.subscriptions or {}
+    local function _one(slot)
+        slot = (type(slot) == "table") and slot or {}
+        return {
+            subscribed = _hasLiveSubscription(slot.token),
+            eventName = slot.eventName,
+            hasToken = _hasLiveSubscription(slot.token),
+        }
+    end
+
+    return {
+        presence = _one(subs.presence),
+        cpc = _one(subs.cpc),
+        practice = _one(subs.practice),
+        score = _one(subs.score),
+        lastErr = subs.lastErr,
+    }
+end
+
+local function _normalizeBusOnResult(okCall, a, b, c)
+    if okCall ~= true then
+        return nil, tostring(a)
+    end
+
+    if a == true and _hasLiveSubscription(b) then
+        return b, nil
+    end
+
+    if a == false then
+        return nil, tostring(c or b or "subscribe failed")
+    end
+
+    if _hasLiveSubscription(a) then
+        return a, nil
+    end
+
+    if _hasLiveSubscription(b) then
+        return b, nil
+    end
+
+    return nil, tostring(c or b or a or "subscribe failed")
+end
+
+local function _resolveUpdatedEventNameBestEffort(modName, fallbackSuffix)
+    local okM, Mod = _safeRequire(modName)
+    if okM and type(Mod) == "table" then
+        if type(Mod.getUpdatedEventName) == "function" then
+            local ok, ev = pcall(Mod.getUpdatedEventName)
+            if ok and type(ev) == "string" and ev ~= "" then
+                return ev
+            end
+        end
+        if type(Mod.EV_UPDATED) == "string" and Mod.EV_UPDATED ~= "" then
+            return Mod.EV_UPDATED
+        end
+    end
+
+    return tostring(ID.eventPrefix or "DWKit:") .. tostring(fallbackSuffix or "")
+end
+
+local function _subscribeBusEvent(slotName, evName, handlerFn)
+    local subs = (type(STATE.subscriptions) == "table") and STATE.subscriptions or {}
+    local slot = subs[slotName]
+    if type(slot) ~= "table" then
+        slot = { eventName = nil, token = nil }
+        subs[slotName] = slot
+    end
+
+    slot.eventName = evName
+
+    if _hasLiveSubscription(slot.token) then
+        return true, nil
+    end
+
+    if type(BUS) ~= "table" or type(BUS.on) ~= "function" then
+        slot.token = nil
+        return false, "event bus .on not available"
+    end
+
+    if type(evName) ~= "string" or evName == "" then
+        slot.token = nil
+        return false, "updated event name not available"
+    end
+
+    local okCall, a, b, c = pcall(BUS.on, evName, handlerFn)
+    local token, err = _normalizeBusOnResult(okCall, a, b, c)
+    if not token then
+        slot.token = nil
+        return false, tostring(err or "subscribe failed")
+    end
+
+    slot.token = token
+    return true, nil
+end
+
+local _assistByResolve
+
+local function _getRefreshFreezeState()
+    local rf = STATE.refreshFreeze
+    if type(rf) ~= "table" then
+        rf = {
+            depth = 0,
+            rowsOnline = nil,
+            lastSource = nil,
+            source = nil,
+        }
+        STATE.refreshFreeze = rf
+    end
+    return rf
+end
+
+local function _isRefreshFreezeActive()
+    local rf = _getRefreshFreezeState()
+    return ((tonumber(rf.depth or 0) or 0) > 0)
+end
+
+local function _beginRefreshFreeze(source)
+    local rf = _getRefreshFreezeState()
+    local depth = (tonumber(rf.depth or 0) or 0)
+
+    if depth <= 0 then
+        rf.rowsOnline = _copyArrayOfTables(STATE.rowsOnline)
+        rf.lastSource = STATE.lastSource
+        rf.source = tostring(source or "")
+    end
+
+    rf.depth = depth + 1
+    return rf.depth
+end
+
+local function _restoreRefreshFreezeState()
+    local rf = _getRefreshFreezeState()
+
+    if type(rf.rowsOnline) == "table" then
+        STATE.rowsOnline = _copyArrayOfTables(rf.rowsOnline)
+    end
+    STATE.lastSource = rf.lastSource
+
+    if type(_assistByResolve) == "function" then
+        _assistByResolve()
+    end
+end
+
+local function _endRefreshFreeze()
+    local rf = _getRefreshFreezeState()
+    local depth = (tonumber(rf.depth or 0) or 0)
+
+    if depth <= 0 then
+        _restoreRefreshFreezeState()
+        rf.depth = 0
+        rf.rowsOnline = nil
+        rf.lastSource = nil
+        rf.source = nil
+        return 0
+    end
+
+    depth = depth - 1
+    rf.depth = depth
+
+    if depth <= 0 then
+        _restoreRefreshFreezeState()
+        rf.depth = 0
+        rf.rowsOnline = nil
+        rf.lastSource = nil
+        rf.source = nil
+        return 0
+    end
+
+    return depth
+end
+
+local function _shouldSuppressRecomputeDuringRefresh(source)
+    if _isRefreshFreezeActive() ~= true then
+        return false
+    end
+
+    source = tostring(source or "")
+    if source == "actionpad:auto:presence" then
+        return true
+    end
+    if source == "actionpad:auto:cpc" then
+        return true
+    end
+
+    return false
+end
+
+local function _emitRefreshOnly(changed, source)
+    _beginRefreshFreeze(source)
+
+    local okRun, emitOk, emitErr = xpcall(function()
+        STATE.lastTs = os.time()
+        STATE.updates = (tonumber(STATE.updates) or 0) + 1
+        STATE.lastErr = nil
+
+        if type(_assistByResolve) == "function" then
+            _assistByResolve()
+        end
+
+        return _emit(changed, source)
+    end, debug.traceback)
+
+    _endRefreshFreeze()
+
+    if not okRun then
+        STATE.lastErr = tostring(emitOk)
+        return false, STATE.lastErr
+    end
+
+    if emitOk ~= true then
+        STATE.lastErr = tostring(emitErr)
+        return false, STATE.lastErr
+    end
+
+    return true, nil
+end
+
+local function _handlePresenceUpdated(_payload, _meta)
+    local ok, err = M.recompute({ source = "actionpad:auto:presence" })
+    if ok ~= true then
+        STATE.lastErr = tostring(err)
+    end
+end
+
+local function _handleCpcUpdated(_payload, _meta)
+    local ok, err = _emitRefreshOnly({
+        refresh = "cpc",
+        representedTruth = "preserved",
+    }, "actionpad:auto:cpc")
+    if ok ~= true then
+        STATE.lastErr = tostring(err)
+    end
+end
+
+local function _handlePracticeUpdated(_payload, _meta)
+    local ok, err = _emitRefreshOnly({
+        refresh = "practice",
+        representedTruth = "preserved",
+    }, "actionpad:auto:practice")
+    if ok ~= true then
+        STATE.lastErr = tostring(err)
+    end
+end
+
+local function _handleScoreUpdated(_payload, _meta)
+    local ok, err = _emitRefreshOnly({
+        refresh = "score",
+        representedTruth = "preserved",
+    }, "actionpad:auto:score")
+    if ok ~= true then
+        STATE.lastErr = tostring(err)
+    end
+end
+
+local function _ensureSubscriptionsBestEffort()
+    local errs = {}
+
+    local ok1, err1 = _subscribeBusEvent(
+        "presence",
+        _resolveUpdatedEventNameBestEffort("dwkit.services.presence_service", "Service:Presence:Updated"),
+        _handlePresenceUpdated
+    )
+    if ok1 ~= true then errs[#errs + 1] = "presence=" .. tostring(err1) end
+
+    local ok2, err2 = _subscribeBusEvent(
+        "cpc",
+        _resolveUpdatedEventNameBestEffort("dwkit.services.cross_profile_comm_service",
+            "Service:CrossProfileComm:Updated"),
+        _handleCpcUpdated
+    )
+    if ok2 ~= true then errs[#errs + 1] = "cpc=" .. tostring(err2) end
+
+    local ok3, err3 = _subscribeBusEvent(
+        "practice",
+        _resolveUpdatedEventNameBestEffort("dwkit.services.practice_store_service", "Service:PracticeStore:Updated"),
+        _handlePracticeUpdated
+    )
+    if ok3 ~= true then errs[#errs + 1] = "practice=" .. tostring(err3) end
+
+    local ok4, err4 = _subscribeBusEvent(
+        "score",
+        _resolveUpdatedEventNameBestEffort("dwkit.services.score_store_service", "Service:ScoreStore:Updated"),
+        _handleScoreUpdated
+    )
+    if ok4 ~= true then errs[#errs + 1] = "score=" .. tostring(err4) end
+
+    if #errs > 0 then
+        STATE.subscriptions.lastErr = table.concat(errs, "; ")
+        return false, STATE.subscriptions.lastErr
+    end
+
+    STATE.subscriptions.lastErr = nil
+    return true, nil
+end
+
 -- -------------------------------------------------------------------------
 -- Owned profiles mapping (authoritative for "my profiles")
 -- -------------------------------------------------------------------------
@@ -272,6 +600,23 @@ local function _findOnlineRowByName(name)
             return r
         end
     end
+    return nil
+end
+
+local function _resolveProfileLabelForCharacterBestEffort(name)
+    name = _trim(name)
+    if name == "" then return nil end
+
+    local row = _findOnlineRowByName(name)
+    if type(row) == "table" and _trim(row.profileLabel) ~= "" then
+        return _trim(row.profileLabel)
+    end
+
+    local label, err = M.resolveOwnedProfileLabel(name)
+    if label then
+        return label
+    end
+
     return nil
 end
 
@@ -482,7 +827,7 @@ local function _assistByIsOnline(name)
     return false
 end
 
-local function _assistByResolve()
+_assistByResolve = function()
     local st = STATE.assistBy
     st.candidates = _assistByBuildCandidates()
 
@@ -631,13 +976,8 @@ function M.getRowFactsForCharacter(name)
     name = _trim(name)
     if name == "" then return nil end
 
-    local row = _findOnlineRowByName(name)
-    if type(row) ~= "table" then
-        return nil
-    end
-
-    local profileLabel = _trim(row.profileLabel)
-    if profileLabel == "" then
+    local profileLabel = _resolveProfileLabelForCharacterBestEffort(name)
+    if profileLabel == nil or _trim(profileLabel) == "" then
         return nil
     end
 
@@ -1164,6 +1504,10 @@ function M.getUpdatedEventName()
 end
 
 function M.getState()
+    _ensureSubscriptionsBestEffort()
+
+    local rf = _getRefreshFreezeState()
+
     return {
         version = M.VERSION,
         lastTs = STATE.lastTs,
@@ -1173,10 +1517,13 @@ function M.getState()
         rowsOnline = _copyArrayOfTables(STATE.rowsOnline),
         rowCount = (type(STATE.rowsOnline) == "table") and #STATE.rowsOnline or 0,
         assistBy = _shallowCopy(M.getAssistByState()),
+        refreshFreezeDepth = (tonumber(rf.depth or 0) or 0),
     }
 end
 
 function M.getStats()
+    _ensureSubscriptionsBestEffort()
+
     local st = M.getState()
     return {
         version = st.version,
@@ -1185,16 +1532,27 @@ function M.getStats()
         rowCount = st.rowCount,
         lastSource = st.lastSource,
         lastErr = st.lastErr,
+        refreshFreezeDepth = st.refreshFreezeDepth,
+        subscriptions = _copySubscriptionsStatus(),
     }
 end
 
 function M.getRowsOnlineOnly()
+    _ensureSubscriptionsBestEffort()
     return _copyArrayOfTables(STATE.rowsOnline)
 end
 
 function M.recompute(opts)
+    _ensureSubscriptionsBestEffort()
+
     opts = (type(opts) == "table") and opts or {}
     local source = tostring(opts.source or "actionpad:recompute")
+
+    if _shouldSuppressRecomputeDuringRefresh(source) == true and opts.allowDuringRefresh == true then
+        -- explicit bypass allowed for diagnostics only
+    elseif _shouldSuppressRecomputeDuringRefresh(source) == true then
+        return true, nil
+    end
 
     local rows, err = _rowsFromPresenceBestEffort()
     local used = "presence"
@@ -1208,10 +1566,10 @@ function M.recompute(opts)
     end
 
     STATE.rowsOnline = rows
-    STATE.lastTs = os.time()
-    STATE.updates = (tonumber(STATE.updates) or 0) + 1
     STATE.lastSource = used
     STATE.lastErr = nil
+    STATE.lastTs = os.time()
+    STATE.updates = (tonumber(STATE.updates) or 0) + 1
 
     _assistByResolve()
 
@@ -1401,12 +1759,17 @@ function M.dispatchAssistExec(healerName, targetName, cmdTemplate, opts)
 end
 
 function M.onUpdated(handlerFn)
+    _ensureSubscriptionsBestEffort()
     return BUS.on(EV_UPDATED, handlerFn)
 end
 
 do
     STATE.rowsOnline = {}
     _assistByResolve()
+    _ensureSubscriptionsBestEffort()
+    pcall(function()
+        M.recompute({ source = "actionpad:init" })
+    end)
 end
 
 return M
