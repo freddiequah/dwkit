@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-11B
+-- Version     : v2026-03-11D
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-11B"
+M.VERSION = "v2026-03-11D"
 
 local SUITES = {
     default = {
@@ -551,6 +551,96 @@ local SUITES = {
                 cmd =
                 'lua do print("[dwverify-actionpad-ui] VISUAL CHECK: ActionPad window appears, shows Alpha/Beta rows, and placeholders still print PLAN while real service spells can dispatch when receiver allowlisted.") end',
                 note = "Human visual PASS/FAIL gate.",
+            },
+        },
+    },
+
+    actionpad_refresh_smoke = {
+        title = "actionpad_refresh_smoke",
+        description =
+        "ActionPad refresh smoke: reload EventRegistry/EventBus plus all participating ActionPad emitter/consumer modules onto one shared runtime instance, assert live subscriptions exist, seed owned_profiles + CPC baseline, show ActionPad UI, then prove live refresh from Presence/CPC/PracticeStore/ScoreStore updates without manual ActionPad recompute/apply after the initial baseline setup. Preserves represented-row truth model; no gameplay sends.",
+        delay = 0.25,
+        steps = {
+            {
+                cmd =
+                'lua do package.loaded["dwkit.bus.event_registry"]=nil; package.loaded["dwkit.bus.event_bus"]=nil; package.loaded["dwkit.services.presence_service"]=nil; package.loaded["dwkit.services.cross_profile_comm_service"]=nil; package.loaded["dwkit.services.practice_store_service"]=nil; package.loaded["dwkit.services.score_store_service"]=nil; package.loaded["dwkit.services.actionpad_service"]=nil; package.loaded["dwkit.ui.actionpad_ui"]=nil; DWKit=DWKit or {}; DWKit.bus=DWKit.bus or {}; DWKit.bus.eventRegistry=require("dwkit.bus.event_registry"); DWKit.bus.eventBus=require("dwkit.bus.event_bus"); local P=require("dwkit.services.presence_service"); local C=require("dwkit.services.cross_profile_comm_service"); local PS=require("dwkit.services.practice_store_service"); local SS=require("dwkit.services.score_store_service"); local A=require("dwkit.services.actionpad_service"); local UI=require("dwkit.ui.actionpad_ui"); print(string.format("[dwverify-actionpad-refresh] reloaded registry=%s bus=%s actionpad=%s actionpad_ui=%s", tostring(DWKit.bus.eventRegistry and DWKit.bus.eventRegistry.getRegistryVersion and DWKit.bus.eventRegistry.getRegistryVersion() or "nil"), tostring(DWKit.bus.eventBus and DWKit.bus.eventBus.VERSION or "nil"), tostring(A.getVersion()), tostring(UI and "ok" or "nil"))) end',
+                note = "Reload registry/bus plus all participating services/UI onto one shared runtime instance.",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local st=A.getStats(); local s=st.subscriptions or {}; print(string.format("[dwverify-actionpad-refresh] subs presence=%s cpc=%s practice=%s score=%s lastErr=%s", tostring(s.presence and s.presence.subscribed==true), tostring(s.cpc and s.cpc.subscribed==true), tostring(s.practice and s.practice.subscribed==true), tostring(s.score and s.score.subscribed==true), tostring(s.lastErr))) if not (s.presence and s.presence.subscribed==true) then error("Expected presence subscription") end; if not (s.cpc and s.cpc.subscribed==true) then error("Expected cpc subscription") end; if not (s.practice and s.practice.subscribed==true) then error("Expected practice subscription") end; if not (s.score and s.score.subscribed==true) then error("Expected score subscription") end end',
+                note = "ASSERT: ActionPadService live subscriptions are wired.",
+            },
+            {
+                cmd =
+                'lua do local O=require("dwkit.config.owned_profiles"); local ok,err=O.setMap({["Alpha"]="Profile-A",["Beta"]="Profile-B"},{noSave=true}); if ok==false then error("owned_profiles.setMap failed: "..tostring(err)) end; local st=O.status(); print(string.format("[dwverify-actionpad-refresh] seeded owned_profiles count=%s", tostring(st.count))) end',
+                note = "Seed deterministic owned_profiles (session-only).",
+            },
+            {
+                cmd =
+                'lua do local C=require("dwkit.services.cross_profile_comm_service"); local ok1,err1=C._testClearPeers(); if ok1==false then error("testClearPeers failed: "..tostring(err1)) end; local ok2,err2=C._testClearRowFacts(); if ok2==false then error("testClearRowFacts failed: "..tostring(err2)) end; print("[dwverify-actionpad-refresh] cleared CPC peer + rowFacts fixtures") end',
+                note = "Clear CPC deterministic fixtures to known baseline.",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.practice_store_service"); local S=require("dwkit.services.score_store_service"); local ok1,err1=P.clear({source="dwverify:actionpad_refresh:practice_clear"}); if ok1==false then error("practice clear failed: "..tostring(err1)) end; local ok2,err2=S.clear({source="dwverify:actionpad_refresh:score_clear"}); if ok2==false then error("score clear failed: "..tostring(err2)) end; print("[dwverify-actionpad-refresh] cleared PracticeStore + ScoreStore to stale baseline") end',
+                note = "Seed stale local store baseline.",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.presence_service"); local ok,err=P.setState({myProfilesOnline={"Alpha (Profile-A) [ONLINE] [HERE]"},myProfilesOffline={"Beta (Profile-B) [OFFLINE]"},myProfilesHere={"Alpha (Profile-A) [ONLINE] [HERE]"},otherPlayersInRoom={},mapping={count=2},roomTs=os.time(),whoTs=os.time()},{source="dwverify:actionpad_refresh:seed_presence_baseline"}); if ok==false then error("PresenceService.setState baseline failed: "..tostring(err)) end; print("[dwverify-actionpad-refresh] seeded Presence baseline Alpha only") end',
+                note = "Seed baseline Presence roster (Alpha only).",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local ok,err=A.recompute({source="dwverify:actionpad_refresh:baseline_recompute"}); if ok==false then error("ActionPadService.recompute baseline failed: "..tostring(err)) end; local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("actionpad_ui", true, {noSave=true}); gs.setVisible("actionpad_ui", true, {noSave=true}); local UI=require("dwkit.ui.actionpad_ui"); local ok2,err2=UI.apply({source="dwverify:actionpad_refresh:show"}); if ok2==false then error("actionpad_ui.apply show failed: "..tostring(err2)) end; local ast=A.getStats(); local s=UI.getState(); local lr=s.lastRender or {}; print(string.format("[dwverify-actionpad-refresh] baseline rows=%s uiRows=%s updates=%s", tostring(ast.rowCount), tostring(lr.rowsCount or "nil"), tostring(ast.updates))) if tonumber(ast.rowCount or -1)~=1 then error("Expected baseline rowCount=1; got "..tostring(ast.rowCount)) end; if tonumber(lr.rowsCount or -1)~=1 then error("Expected baseline UI rows=1; got "..tostring(lr.rowsCount)) end; rawset(_G,"DWKIT_ACTIONPAD_REFRESH_UPDATES",{afterShow=tonumber(ast.updates or 0)}) end',
+                note = "Manual baseline setup only: recompute once, show UI, store baseline update counter.",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.presence_service"); local ok,err=P.setState({myProfilesOnline={"Alpha (Profile-A) [ONLINE] [HERE]","Beta (Profile-B) [ONLINE]"},myProfilesOffline={},myProfilesHere={"Alpha (Profile-A) [ONLINE] [HERE]"},otherPlayersInRoom={},mapping={count=2},roomTs=os.time(),whoTs=os.time()},{source="dwverify:actionpad_refresh:presence_expand"}); if ok==false then error("PresenceService.setState expand failed: "..tostring(err)) end; print("[dwverify-actionpad-refresh] triggered Presence update to Alpha+Beta online") end',
+                note = "Trigger live Presence update (no manual ActionPad recompute).",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local UI=require("dwkit.ui.actionpad_ui"); local ast=A.getStats(); local s=UI.getState(); local lr=s.lastRender or {}; local base=(rawget(_G,"DWKIT_ACTIONPAD_REFRESH_UPDATES") or {}).afterShow or -1; print(string.format("[dwverify-actionpad-refresh] after presence rows=%s uiRows=%s updates=%s baseline=%s", tostring(ast.rowCount), tostring(lr.rowsCount or "nil"), tostring(ast.updates), tostring(base))) if tonumber(ast.rowCount or -1)~=2 then error("Expected rowCount=2 after presence update; got "..tostring(ast.rowCount)) end; if tonumber(ast.updates or 0) <= tonumber(base or 0) then error("Expected updates to increase after presence update") end; if tonumber(lr.rowsCount or -1)~=2 then error("Expected UI rows=2 after presence update; got "..tostring(lr.rowsCount)) end; rawset(_G,"DWKIT_ACTIONPAD_REFRESH_UPDATES",{afterPresence=tonumber(ast.updates or 0)}) end',
+                note = "ASSERT: live Presence update refreshed ActionPadService + visible UI.",
+            },
+            {
+                cmd =
+                'lua do local C=require("dwkit.services.cross_profile_comm_service"); local ok,err=C._testSetRowFacts("Profile-B",{name="Beta",class="Cleric",level=20,learnedByPracticeKey={["heal"]=true,["power heal"]=false}},{source="dwverify:actionpad_refresh:cpc_rowfacts"}); if ok==false then error("testSetRowFacts failed: "..tostring(err)) end; print("[dwverify-actionpad-refresh] triggered CPC rowFacts update for Profile-B/Beta") end',
+                note = "Trigger live CPC rowFacts update (no manual ActionPad recompute/apply).",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local ast=A.getStats(); local rf=A.getRowFactsForCharacter("Beta"); local prev=(rawget(_G,"DWKIT_ACTIONPAD_REFRESH_UPDATES") or {}).afterPresence or -1; print(string.format("[dwverify-actionpad-refresh] after cpc updates=%s prev=%s rfName=%s rfClass=%s rfLevel=%s", tostring(ast.updates), tostring(prev), tostring(rf and rf.name or "nil"), tostring(rf and (rf.class or rf.classKey) or "nil"), tostring(rf and rf.level or "nil"))) if tonumber(ast.updates or 0) <= tonumber(prev or 0) then error("Expected updates to increase after CPC rowFacts update") end; if type(rf)~="table" then error("Expected row facts for Beta after CPC update") end; if tostring(rf.name or "")~="Beta" then error("Expected rf.name=Beta; got "..tostring(rf.name)) end; if tostring(rf.class or "")~="Cleric" then error("Expected rf.class=Cleric; got "..tostring(rf.class)) end; if tonumber(rf.level or 0)~=20 then error("Expected rf.level=20; got "..tostring(rf.level)) end; rawset(_G,"DWKIT_ACTIONPAD_REFRESH_UPDATES",{afterCpc=tonumber(ast.updates or 0)}) end',
+                note =
+                "ASSERT: live CPC update refreshed ActionPadService and represented rowFacts are visible for Beta.",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.practice_store_service"); local ok,err=P.ingestFixture("basic",{source="dwverify:actionpad_refresh:practice_fixture"}); if ok~=true then error("practice ingestFixture failed: "..tostring(err)) end; print("[dwverify-actionpad-refresh] triggered PracticeStore update") end',
+                note = "Trigger live PracticeStore update (no manual ActionPad recompute/apply).",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local ast=A.getStats(); local prev=(rawget(_G,"DWKIT_ACTIONPAD_REFRESH_UPDATES") or {}).afterCpc or -1; print(string.format("[dwverify-actionpad-refresh] after practice updates=%s prev=%s", tostring(ast.updates), tostring(prev))) if tonumber(ast.updates or 0) <= tonumber(prev or 0) then error("Expected updates to increase after PracticeStore update") end; rawset(_G,"DWKIT_ACTIONPAD_REFRESH_UPDATES",{afterPractice=tonumber(ast.updates or 0)}) end',
+                note = "ASSERT: live PracticeStore update triggered ActionPad refresh emit.",
+            },
+            {
+                cmd =
+                'lua do local S=require("dwkit.services.score_store_service"); local ok,err=S.ingestFixture("score_table_short",{source="dwverify:actionpad_refresh:score_fixture"}); if ok~=true then error("score ingestFixture failed: "..tostring(err)) end; print("[dwverify-actionpad-refresh] triggered ScoreStore update") end',
+                note = "Trigger live ScoreStore update (no manual ActionPad recompute/apply).",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local UI=require("dwkit.ui.actionpad_ui"); local ast=A.getStats(); local s=UI.getState(); local lr=s.lastRender or {}; local prev=(rawget(_G,"DWKIT_ACTIONPAD_REFRESH_UPDATES") or {}).afterPractice or -1; print(string.format("[dwverify-actionpad-refresh] after score updates=%s prev=%s uiRows=%s", tostring(ast.updates), tostring(prev), tostring(lr.rowsCount or "nil"))) if tonumber(ast.updates or 0) <= tonumber(prev or 0) then error("Expected updates to increase after ScoreStore update") end; if tonumber(lr.rowsCount or -1)~=2 then error("Expected UI rows to remain 2 after ScoreStore update; got "..tostring(lr.rowsCount)) end; print("[dwverify-actionpad-refresh] PASS actionpad_refresh_smoke") end',
+                note = "ASSERT: live ScoreStore update triggered ActionPad refresh emit and visible UI stayed current.",
+            },
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("actionpad_ui", true, {noSave=true}); gs.setVisible("actionpad_ui", false, {noSave=true}); local UI=require("dwkit.ui.actionpad_ui"); local ok,err=UI.apply({source="dwverify:actionpad_refresh:hide"}); if ok==false then error("actionpad_ui.apply hide failed: "..tostring(err)) end; local s=UI.getState(); print(string.format("[dwverify-actionpad-refresh] HIDE visible=%s runtimeVisible=%s lastErr=%s", tostring(s.visible), tostring(s.runtimeVisible), tostring(s.lastError))) end',
+                note = "Hide ActionPad UI after refresh verification.",
             },
         },
     },

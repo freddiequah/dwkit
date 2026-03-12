@@ -2,19 +2,26 @@
 -- #########################################################################
 -- Module Name : dwkit.ui.actionpad_ui
 -- Owner       : UI
--- Version     : v2026-03-10A
+-- Version     : v2026-03-11C
 -- Purpose     :
 --   - ActionPad UI (Bucket A): online-only owned roster view with real button groups.
 --   - Consumes ActionPadService rowsOnlineOnly.
 --   - Bucket B: wires deterministic enable/disable gating (Practice/Score/Registry) + disabled reasons.
 --   - Bucket B represented-row-facts path: when ActionPadService provides row facts
 --     for a represented character, UI passes those facts into resolveActionGate so
---     gating reflects the represented row instead of only the local viewer.
+--     gating reflects the represented row instead of the local viewer.
 --   - Bucket C: assistBy/healer selection rule (session-only) wired to ActionPadService.
 --   - Bucket D: dispatches owned-only RemoteExec for real non-placeholder commands, while
 --     placeholder actions remain PLAN-only.
 --   - Bucket F: corrects cleric service row wiring so ActionPad service buttons align with
 --     the agreed service set (Buff / Feed / Heal / PHeal / Rst / Rej).
+--   - Refresh hardening:
+--     prefer the shared ActionPadService instance already bound by this UI and, on
+--     ActionPadService updated events, prefer the emitted rowsOnline snapshot from
+--     the event payload so UI refresh stays on the same runtime truth after reloads.
+--   - Empty refresh guard:
+--     when refresh-only ActionPad events (practice/score) arrive without roster rows,
+--     preserve the last good visible roster instead of blanking the UI.
 --   - Follows UI contracts: shared frame (ui_window + ui_theme) + content kits.
 --
 -- Public API  :
@@ -33,7 +40,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-10A"
+M.VERSION = "v2026-03-11C"
 M.UI_ID = "actionpad_ui"
 
 local U = require("dwkit.ui.ui_base")
@@ -53,6 +60,9 @@ local _state = {
     lastApplySource = nil,
     lastRender = nil,
     sub = nil,
+    subService = nil,
+    service = nil,
+    lastRowsSnapshot = {},
     widgets = {
         bundle = nil,
         listRoot = nil,
@@ -71,6 +81,120 @@ local _render
 
 local function _safeDelete(w)
     pcall(function() U.safeDelete(w) end)
+end
+
+local function _shallowCopy(t)
+    local out = {}
+    if type(t) ~= "table" then return out end
+    for k, v in pairs(t) do out[k] = v end
+    return out
+end
+
+local function _copyRows(rows)
+    local out = {}
+    if type(rows) ~= "table" then return out end
+    for i = 1, #rows do
+        if type(rows[i]) == "table" then
+            out[#out + 1] = _shallowCopy(rows[i])
+        end
+    end
+    return out
+end
+
+local function _rowCount(rows)
+    if type(rows) ~= "table" then return 0 end
+    return #rows
+end
+
+local function _serviceFromLoadedCache()
+    local loaded = package.loaded["dwkit.services.actionpad_service"]
+    if type(loaded) == "table" then
+        return loaded
+    end
+    return nil
+end
+
+local function _getActionPadService()
+    local loaded = _serviceFromLoadedCache()
+    if type(loaded) == "table" then
+        if _state.service ~= loaded then
+            _state.service = loaded
+        end
+        return _state.service, nil
+    end
+
+    if type(_state.service) == "table" then
+        return _state.service, nil
+    end
+
+    local okA, A = pcall(require, "dwkit.services.actionpad_service")
+    if not okA or type(A) ~= "table" then
+        _state.service = nil
+        return nil, "ActionPadService not available"
+    end
+
+    _state.service = A
+    return A, nil
+end
+
+local function _rowsFromPayload(payload)
+    if type(payload) ~= "table" then return nil end
+
+    local rows = nil
+
+    if type(payload.rowsOnline) == "table" then
+        rows = payload.rowsOnline
+    elseif type(payload.state) == "table" and type(payload.state.rowsOnline) == "table" then
+        rows = payload.state.rowsOnline
+    end
+
+    if type(rows) ~= "table" then
+        return nil
+    end
+
+    return _copyRows(rows)
+end
+
+local function _getPayloadRefreshKind(payload)
+    if type(payload) ~= "table" then return nil end
+    local changed = payload.changed
+    if type(changed) ~= "table" then return nil end
+
+    local refresh = tostring(changed.refresh or "")
+    if refresh == "" then return nil end
+    return refresh
+end
+
+local function _isRefreshOnlyPayload(payload)
+    local refresh = _getPayloadRefreshKind(payload)
+    if refresh == "practice" or refresh == "score" then
+        return true, refresh
+    end
+    return false, nil
+end
+
+local function _getServiceStatsBestEffort(A)
+    if type(A) ~= "table" or type(A.getStats) ~= "function" then
+        return nil
+    end
+
+    local ok, st = pcall(A.getStats)
+    if not ok or type(st) ~= "table" then
+        return nil
+    end
+    return st
+end
+
+local function _getServiceRowsBestEffort(A)
+    if type(A) ~= "table" or type(A.getRowsOnlineOnly) ~= "function" then
+        return {}
+    end
+
+    local ok, rows = pcall(A.getRowsOnlineOnly)
+    if not ok or type(rows) ~= "table" then
+        return {}
+    end
+    return _copyRows(rows)
 end
 
 local function _clearRows()
@@ -308,16 +432,23 @@ local function _layoutRightButtons(parent, y, rowH, btnW, gap, specs, namePrefix
 end
 
 local function _gateBestEffort(kind, practiceKey, displayName, rowFacts)
-    local okA, A = pcall(require, "dwkit.services.actionpad_service")
-    if not okA or type(A) ~= "table" or type(A.resolveActionGate) ~= "function" then
-        return { enabled = false, reason = "service_missing", detail = "ActionPadService.resolveActionGate not available" }
+    local A, errA = _getActionPadService()
+    if not A or type(A.resolveActionGate) ~= "function" then
+        return {
+            enabled = false,
+            reason = "service_missing",
+            detail = tostring(errA or
+                "ActionPadService.resolveActionGate not available")
+        }
     end
+
     local g = A.resolveActionGate({
         kind = kind,
         practiceKey = practiceKey,
         displayName = displayName,
         rowFacts = rowFacts,
     }, {})
+
     if type(g) ~= "table" then
         return { enabled = false, reason = "gate_error", detail = "resolveActionGate returned invalid gate" }
     end
@@ -325,8 +456,8 @@ local function _gateBestEffort(kind, practiceKey, displayName, rowFacts)
 end
 
 local function _getAssistBy()
-    local okA, A = pcall(require, "dwkit.services.actionpad_service")
-    if not okA or type(A) ~= "table" or type(A.getAssistByState) ~= "function" then
+    local A, errA = _getActionPadService()
+    if not A or type(A.getAssistByState) ~= "function" then
         return {
             mode = "auto",
             resolvedName = nil,
@@ -335,6 +466,7 @@ local function _getAssistBy()
             lastReason = "service_missing"
         }
     end
+
     local st = A.getAssistByState()
     if type(st) ~= "table" then
         return {
@@ -349,10 +481,11 @@ local function _getAssistBy()
 end
 
 local function _getRowFactsForCharacter(name)
-    local okA, A = pcall(require, "dwkit.services.actionpad_service")
-    if not okA or type(A) ~= "table" or type(A.getRowFactsForCharacter) ~= "function" then
+    local A, errA = _getActionPadService()
+    if not A or type(A.getRowFactsForCharacter) ~= "function" then
         return nil
     end
+
     local ok, rf = pcall(A.getRowFactsForCharacter, tostring(name or ""))
     if not ok or type(rf) ~= "table" then
         return nil
@@ -396,9 +529,9 @@ local function _assistLabel(assistState)
 end
 
 local function _dispatchSelfExec(rowName, cmd, metaLabel)
-    local okA, A = pcall(require, "dwkit.services.actionpad_service")
-    if not okA or type(A) ~= "table" then
-        return false, "ActionPadService missing"
+    local A, errA = _getActionPadService()
+    if not A then
+        return false, tostring(errA or "ActionPadService missing")
     end
     if type(A.dispatchSelfExec) ~= "function" then
         return false, "ActionPadService.dispatchSelfExec missing"
@@ -432,9 +565,9 @@ local function _dispatchSelfExec(rowName, cmd, metaLabel)
 end
 
 local function _dispatchAssistExec(healerName, targetName, cmdTemplate, metaLabel)
-    local okA, A = pcall(require, "dwkit.services.actionpad_service")
-    if not okA or type(A) ~= "table" then
-        return false, "ActionPadService missing"
+    local A, errA = _getActionPadService()
+    if not A then
+        return false, tostring(errA or "ActionPadService missing")
     end
     if type(A.dispatchAssistExec) ~= "function" then
         return false, "ActionPadService.dispatchAssistExec missing"
@@ -499,8 +632,8 @@ local function _renderGlobal(topY, rowH, gap, btnW)
             enabled = true,
             tooltip = "ActionPad: AssistBy Auto (AU)\nstate=ENABLED\nreason=ok\ndetail=Set assistBy mode to auto",
             onClick = function()
-                local okA, A = pcall(require, "dwkit.services.actionpad_service")
-                if okA and type(A) == "table" and type(A.setAssistByAuto) == "function" then
+                local A = _state.service
+                if type(A) == "table" and type(A.setAssistByAuto) == "function" then
                     local ok, err = A.setAssistByAuto({ source = "actionpad_ui:assist_auto" })
                     if ok ~= true then
                         _setStatusLine("[ActionPad] AssistBy Auto failed: " .. tostring(err))
@@ -518,8 +651,8 @@ local function _renderGlobal(topY, rowH, gap, btnW)
             enabled = true,
             tooltip = "ActionPad: AssistBy Next (NX)\nstate=ENABLED\nreason=ok\ndetail=Cycle to next online owned",
             onClick = function()
-                local okA, A = pcall(require, "dwkit.services.actionpad_service")
-                if okA and type(A) == "table" and type(A.cycleAssistBy) == "function" then
+                local A = _state.service
+                if type(A) == "table" and type(A.cycleAssistBy) == "function" then
                     local name, err = A.cycleAssistBy(1, { source = "actionpad_ui:assist_next" })
                     if not name then
                         _setStatusLine("[ActionPad] AssistBy Next failed: " .. tostring(err))
@@ -542,14 +675,57 @@ local function _renderGlobal(topY, rowH, gap, btnW)
     _setStatusLine(assistLine)
 end
 
-_render = function()
-    local okA, A = pcall(require, "dwkit.services.actionpad_service")
-    if not okA or type(A) ~= "table" or type(A.getRowsOnlineOnly) ~= "function" then
+_render = function(opts)
+    opts = (type(opts) == "table") and opts or {}
+
+    local A, errA = _getActionPadService()
+    if not A or type(A.getRowsOnlineOnly) ~= "function" then
         _setStatusLine("ActionPadService not available.")
-        return false, "ActionPadService not available"
+        return false, tostring(errA or "ActionPadService not available")
     end
 
-    local rows = A.getRowsOnlineOnly() or {}
+    local rows = nil
+    local rowsSource = "service"
+    local retainedLastGood = false
+    local isRefreshOnly, refreshKind = _isRefreshOnlyPayload(opts.payload)
+
+    if type(opts.rows) == "table" then
+        rows = _copyRows(opts.rows)
+        rowsSource = "opts.rows"
+    else
+        rows = _rowsFromPayload(opts.payload)
+        if type(rows) == "table" then
+            rowsSource = "payload"
+        end
+    end
+
+    if type(rows) ~= "table" then
+        rows = _getServiceRowsBestEffort(A)
+        rowsSource = "service"
+    elseif _rowCount(rows) == 0 then
+        if isRefreshOnly == true and _rowCount(_state.lastRowsSnapshot) > 0 then
+            rows = _copyRows(_state.lastRowsSnapshot)
+            rowsSource = "ui:last_good_snapshot:" .. tostring(refreshKind or "refresh")
+            retainedLastGood = true
+        else
+            local fallbackRows = _getServiceRowsBestEffort(A)
+            if _rowCount(fallbackRows) > 0 then
+                rows = fallbackRows
+                rowsSource = "service:fallback_after_empty_payload"
+            end
+        end
+    end
+
+    if _rowCount(rows) == 0 then
+        local st = _getServiceStatsBestEffort(A)
+        local svcCount = tonumber(st and st.rowCount or 0) or 0
+        if svcCount > 0 and _rowCount(_state.lastRowsSnapshot) > 0 then
+            rows = _copyRows(_state.lastRowsSnapshot)
+            rowsSource = "ui:last_good_snapshot"
+            retainedLastGood = true
+        end
+    end
+
     local assist = _getAssistBy()
 
     _clearRows()
@@ -859,6 +1035,16 @@ _render = function()
         yCursor = blockTop + (rowH + gap) * 4 + gap + 2
     end
 
+    if _rowCount(rows) > 0 then
+        _state.lastRowsSnapshot = _copyRows(rows)
+    else
+        local st = _getServiceStatsBestEffort(A)
+        local svcCount = tonumber(st and st.rowCount or 0) or 0
+        if svcCount <= 0 then
+            _state.lastRowsSnapshot = {}
+        end
+    end
+
     _state.lastRender = {
         ts = os.time(),
         rowsCount = #rows,
@@ -866,6 +1052,9 @@ _render = function()
         assistBy = assist,
         healerName = healerName,
         healerOnline = healerOnline,
+        rowsSource = rowsSource,
+        retainedLastGood = retainedLastGood,
+        refreshKind = refreshKind,
     }
 
     local hInfo = _assistLabel(assist)
@@ -875,19 +1064,25 @@ _render = function()
 end
 
 local function _ensureSubscribed()
-    if _state.sub then
+    local A, errA = _getActionPadService()
+    if not A or type(A.onUpdated) ~= "function" then
+        return false, tostring(errA or "ActionPadService.onUpdated not available")
+    end
+
+    if _state.sub and _state.subService == A then
         return true, nil
     end
 
-    local okA, A = pcall(require, "dwkit.services.actionpad_service")
-    if not okA or type(A) ~= "table" or type(A.onUpdated) ~= "function" then
-        return false, "ActionPadService.onUpdated not available"
+    if _state.sub and _state.subService ~= A then
+        pcall(U.unsubscribeServiceUpdates, _state.sub)
+        _state.sub = nil
+        _state.subService = nil
     end
 
-    local function handlerFn(payload, sub)
+    local function handlerFn(payload, eventName, token, meta)
         if _state.enabled ~= true then return end
         if _state.runtimeVisible ~= true then return end
-        pcall(_render)
+        pcall(_render, { payload = payload, eventName = eventName, token = token, meta = meta })
     end
 
     local okSub, sub, errSub = U.subscribeServiceUpdates(
@@ -902,6 +1097,7 @@ local function _ensureSubscribed()
     end
 
     _state.sub = sub
+    _state.subService = A
     return true, nil
 end
 
@@ -909,6 +1105,7 @@ local function _unsubscribe()
     if not _state.sub then return true end
     pcall(U.unsubscribeServiceUpdates, _state.sub)
     _state.sub = nil
+    _state.subService = nil
     return true
 end
 
@@ -1007,7 +1204,7 @@ function M.apply(opts)
     pcall(U.setUiStateVisibleBestEffort, M.UI_ID, true)
     pcall(U.setUiRuntime, M.UI_ID, { state = { visible = true }, meta = { source = "actionpad_ui:apply_show" } })
 
-    local okR, errR = _render()
+    local okR, errR = _render(opts)
     if not okR then
         _state.lastError = tostring(errR)
         return false, _state.lastError

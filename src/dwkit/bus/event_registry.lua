@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.bus.event_registry
 -- Owner       : Bus
--- Version     : v2026-03-04C
+-- Version     : v2026-03-11A
 -- Purpose     :
 --   - Canonical registry for all DWKit events (code mirror of docs/Event_Registry_v1.0.md).
 --   - No events are emitted here. Registry only.
@@ -34,7 +34,7 @@
 
 local M                             = {}
 
-M.VERSION                           = "v2026-03-04C"
+M.VERSION                           = "v2026-03-11A"
 
 local ID                            = require("dwkit.core.identity")
 
@@ -46,6 +46,7 @@ local EV_SVC_ACTIONMODEL_UPDATED    = PREFIX .. "Service:ActionModel:Updated"
 local EV_SVC_ACTIONPAD_UPDATED      = PREFIX .. "Service:ActionPad:Updated"
 local EV_SVC_SKILLREG_UPDATED       = PREFIX .. "Service:SkillRegistry:Updated"
 local EV_SVC_SCORESTORE_UPDATED     = PREFIX .. "Service:ScoreStore:Updated"
+local EV_SVC_PRACTICESTORE_UPDATED  = PREFIX .. "Service:PracticeStore:Updated"
 local EV_SVC_ROOMENTITIES_UPDATED   = PREFIX .. "Service:RoomEntities:Updated"
 local EV_SVC_WHOSTORE_UPDATED       = PREFIX .. "Service:WhoStore:Updated"
 local EV_SVC_ROOMFEEDSTATUS_UPDATED = PREFIX .. "Service:RoomFeedStatus:Updated"
@@ -74,7 +75,7 @@ end
 -- - M.VERSION is the code module version tag (calendar style)
 -- -------------------------
 local REG = {
-  version = "v1.13",
+  version = "v1.14",
   moduleVersion = M.VERSION,
   events = {
     [EV_BOOT_READY] = {
@@ -200,6 +201,28 @@ local REG = {
       notes = {
         "SAFE internal event (no gameplay commands).",
         "Emitted when ScoreStoreService ingest API is invoked (may be triggered by passive capture during loader.init, or manual/fixture ingestion).",
+        "Parsing is optional; raw capture is the stable core contract.",
+      },
+    },
+
+    [EV_SVC_PRACTICESTORE_UPDATED] = {
+      name = EV_SVC_PRACTICESTORE_UPDATED,
+      description =
+      "Emitted when PracticeStoreService ingests or clears a practice-like text snapshot (SAFE; no gameplay sends).",
+      payloadSchema = {
+        ts = "number",
+        snapshot = "table",
+        source = "string (optional)",
+      },
+      producers = {
+        "dwkit.services.practice_store_service",
+      },
+      consumers = {
+        "internal (actionpad_service/cross_profile_comm_service/future ui/tests)",
+      },
+      notes = {
+        "SAFE internal event (no gameplay commands).",
+        "Emitted when PracticeStoreService ingest/clear/wipe API is invoked (may be triggered by passive capture during loader.init, or manual/fixture ingestion).",
         "Parsing is optional; raw capture is the stable core contract.",
       },
     },
