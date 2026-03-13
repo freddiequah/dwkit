@@ -4,7 +4,7 @@
 -- #########################################################################
 -- Module Name : dwkit.verify.verification_plan
 -- Owner       : Verify
--- Version     : v2026-03-12A
+-- Version     : v2026-03-13B
 -- Purpose     :
 --   - Defines verification suites (data only) for dwverify.
 --   - Each suite is a table with: title, description, delay, steps.
@@ -18,7 +18,7 @@
 
 local M = {}
 
-M.VERSION = "v2026-03-12A"
+M.VERSION = "v2026-03-13B"
 
 local SUITES = {
     default = {
@@ -692,6 +692,67 @@ local SUITES = {
                 cmd =
                 'lua do local P=require("dwkit.services.presence_service"); local s=P.getState(); local function dump(tag,t) if type(t)~="table" then print(tag.."=nil") return end; print(tag..".count="..tostring(#t)); for i=1,#t do print(tag.."["..i.."]="..tostring(t[i])) end end; print(string.format("[dwverify-live] presence roomTs=%s whoTs=%s mappingCount=%s", tostring(s.roomTs or "nil"), tostring(s.whoTs or "nil"), tostring(s.mapping and s.mapping.count or "nil"))) dump("[dwverify-live] myProfilesOnline", s.myProfilesOnline or {}); dump("[dwverify-live] myProfilesOffline", s.myProfilesOffline or {}); dump("[dwverify-live] otherPlayersInRoom", s.otherPlayersInRoom or {}) end',
                 note = "Presence derived lists (what UI should show).",
+            },
+        },
+    },
+
+    presence_fixture_recovery_smoke = {
+        title = "presence_fixture_recovery_smoke",
+        description =
+        "Presence recovery smoke: seed stale Alpha/Beta Presence fixture, seed current RoomEntities snapshot + WhoStore truth, then ASSERT PresenceService.getState self-heals away from stale fixture state and that Presence_UI / ActionPad can be manually re-applied onto the healed Presence truth. Restores owned_profiles after verification so the suite does not contaminate later live checks. This verifies fixture contamination recovery; it does not claim hidden auto-refresh.",
+        delay = 0.30,
+        steps = {
+            {
+                cmd =
+                'lua do local O=require("dwkit.config.owned_profiles"); local before=(type(O.getMap)=="function" and O.getMap()) or {}; local saved={}; if type(before)=="table" then for k,v in pairs(before) do saved[k]=v end end; rawset(_G,"DWKIT_VERIFY_PRESENCE_RECOVERY_OWNED_BEFORE",saved); print(string.format("[dwverify-presence-recovery] saved owned_profiles count=%s", tostring((function() local n=0; for _ in pairs(saved) do n=n+1 end; return n end)()))) end',
+                note = "Save current owned_profiles map so the suite can restore it afterwards.",
+            },
+            {
+                cmd =
+                'lua do local O=require("dwkit.config.owned_profiles"); local ok,err=O.setMap({["Alpha"]="Profile-A",["Beta"]="Profile-B"},{noSave=true}); if ok==false then error("owned_profiles.setMap failed: "..tostring(err)) end; print("[dwverify-presence-recovery] seeded owned_profiles Alpha/Beta") end',
+                note = "Seed deterministic owned_profiles (session-only).",
+            },
+            {
+                cmd =
+                'lua do local W=require("dwkit.services.whostore_service"); local ok1,err1=W.clear({source="dwverify:presence_recovery:whoclear"}); if ok1==false then error("WhoStore.clear failed: "..tostring(err1)) end; local ok2,err2=W.setState({players={Alpha=true}},{source="dwverify:presence_recovery:whoseed"}); if ok2==false then error("WhoStore.setState failed: "..tostring(err2)) end; print("[dwverify-presence-recovery] seeded WhoStore Alpha online only") end',
+                note = "Seed WhoStore so only Alpha is online.",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.presence_service"); local ok,err=P.setState({myProfilesOnline={"Alpha (Profile-A) [ONLINE] [HERE]","Beta (Profile-B) [ONLINE]"},myProfilesOffline={},myProfilesHere={"Alpha (Profile-A) [ONLINE] [HERE]"},otherPlayersInRoom={},mapping={count=2},roomTs=1,whoTs=1,roomPlayers={"Alpha the adventurer","Beta the adventurer"}},{source="dwverify:presence_recovery:stale_fixture"}); if ok==false then error("PresenceService.setState stale fixture failed: "..tostring(err)) end; print("[dwverify-presence-recovery] seeded stale Presence Alpha/Beta fixture") end',
+                note = "Seed stale Presence fixture which must later be healed away.",
+            },
+            {
+                cmd =
+                'lua do local R=require("dwkit.services.roomentities_service"); local ok,err=R.clear({source="dwverify:presence_recovery:roomclear",forceEmit=true}); if ok==false then error("RoomEntities.clear failed: "..tostring(err)) end; local C=require("dwkit.capture.roomfeed_capture"); local ok2,err2=C._testIngestSnapshot({"Some Room (#1) [ INDOORS ]","Alpha the adventurer is standing here.","OtherGuy is standing here.","A small bulletin board designed for Quests is here.","Obvious exits:","North - Somewhere"},{hasExits=true,startKind="strong"}); if ok2==false then error("roomfeed _testIngestSnapshot failed: "..tostring(err2)) end; print("[dwverify-presence-recovery] ingested fresh RoomEntities snapshot Alpha+OtherGuy") end',
+                note = "Seed current RoomEntities snapshot that differs from stale Presence fixture.",
+            },
+            {
+                cmd =
+                'lua do local P=require("dwkit.services.presence_service"); local s=P.getState(); local function has(arr,needle) if type(arr)~="table" then return false end; for i=1,#arr do if tostring(arr[i])==needle then return true end end return false end; print(string.format("[dwverify-presence-recovery] state roomTs=%s myOnline=%s myOffline=%s other=%s", tostring(s.roomTs or "nil"), tostring(#(s.myProfilesOnline or {})), tostring(#(s.myProfilesOffline or {})), tostring(#(s.otherPlayersInRoom or {})))) if has(s.myProfilesOnline,"Alpha (Profile-A) [ONLINE] [HERE]")~=true then error("Expected healed myProfilesOnline to contain Alpha (Profile-A) [ONLINE] [HERE]") end; if has(s.myProfilesOnline,"Beta (Profile-B) [ONLINE]")==true then error("Did not expect stale Beta online to survive after heal") end; if has(s.myProfilesOffline,"Beta (Profile-B) [OFFLINE]")~=true then error("Expected healed myProfilesOffline to contain Beta (Profile-B) [OFFLINE]") end; if has(s.otherPlayersInRoom,"OtherGuy")~=true then error("Expected OtherGuy in healed otherPlayersInRoom") end; print("[dwverify-presence-recovery] PASS PresenceService.getState healed stale fixture") end',
+                note =
+                "ASSERT: getter-path self-heal overrides stale Presence fixture using current RoomEntities snapshot.",
+            },
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("presence_ui", true, {noSave=true}); gs.setVisible("presence_ui", true, {noSave=true}); local UI=require("dwkit.ui.presence_ui"); local ok,err=UI.apply({source="dwverify:presence_recovery:show_presence_ui"}); if ok==false then error("presence_ui.apply failed: "..tostring(err)) end; local s=UI.getState(); local lr=s.lastRender or {}; print(string.format("[dwverify-presence-recovery] presence_ui visible=%s runtimeVisible=%s my=%s other=%s", tostring(s.visible), tostring(s.runtimeVisible), tostring(lr.myCount or "nil"), tostring(lr.otherCount or "nil"))) end',
+                note = "Presence_UI manual apply should consume healed Presence state.",
+            },
+            {
+                cmd =
+                'lua do local A=require("dwkit.services.actionpad_service"); local ok,err=A.recompute({source="dwverify:presence_recovery:actionpad_recompute"}); if ok==false then error("ActionPadService.recompute failed: "..tostring(err)) end; local rows=A.getRowsOnlineOnly(); print(string.format("[dwverify-presence-recovery] actionpad rows=%s", tostring(#rows))) if #rows~=1 then error("Expected ActionPad rows=1 after healed Presence; got "..tostring(#rows)) end; if tostring(rows[1] and rows[1].name or "")~="Alpha" then error("Expected sole ActionPad row=Alpha; got "..tostring(rows[1] and rows[1].name)) end end',
+                note = "ASSERT: ActionPad recompute follows healed Presence truth.",
+            },
+            {
+                cmd =
+                'lua do local gs=require("dwkit.config.gui_settings"); gs.enableVisiblePersistence({noSave=true}); gs.setEnabled("actionpad_ui", true, {noSave=true}); gs.setVisible("actionpad_ui", true, {noSave=true}); local UI=require("dwkit.ui.actionpad_ui"); local ok,err=UI.apply({source="dwverify:presence_recovery:show_actionpad"}); if ok==false then error("actionpad_ui.apply failed: "..tostring(err)) end; local s=UI.getState(); local lr=s.lastRender or {}; print(string.format("[dwverify-presence-recovery] actionpad_ui visible=%s runtimeVisible=%s rows=%s rowsSource=%s", tostring(s.visible), tostring(s.runtimeVisible), tostring(lr.rowsCount or "nil"), tostring(lr.rowsSource or "nil"))) if tonumber(lr.rowsCount or -1)~=1 then error("Expected actionpad_ui rows=1 after healed Presence; got "..tostring(lr.rowsCount)) end end',
+                note = "Console-first UI proof: manual apply consumes healed ActionPad rows.",
+            },
+            {
+                cmd =
+                'lua do local O=require("dwkit.config.owned_profiles"); local saved=rawget(_G,"DWKIT_VERIFY_PRESENCE_RECOVERY_OWNED_BEFORE") or {}; local ok,err=O.setMap(saved,{noSave=true}); if ok==false then error("owned_profiles restore failed: "..tostring(err)) end; rawset(_G,"DWKIT_VERIFY_PRESENCE_RECOVERY_OWNED_BEFORE",nil); local P=require("dwkit.services.presence_service"); local s=P.getState(); local A=require("dwkit.services.actionpad_service"); local ok2,err2=A.recompute({source="dwverify:presence_recovery:cleanup_recompute",allowDuringRefresh=true}); if ok2==false then error("ActionPad cleanup recompute failed: "..tostring(err2)) end; local rows=A.getRowsOnlineOnly(); print(string.format("[dwverify-presence-recovery] restored owned_profiles count=%s postRestoreRows=%s roomTs=%s", tostring((function() local n=0; for _ in pairs(saved) do n=n+1 end; return n end)()), tostring(#rows), tostring(s.roomTs or "nil"))); print("[dwverify-presence-recovery] PASS presence_fixture_recovery_smoke") end',
+                note =
+                "Cleanup: restore prior owned_profiles and refresh ActionPad so the suite does not contaminate later live checks.",
             },
         },
     },
