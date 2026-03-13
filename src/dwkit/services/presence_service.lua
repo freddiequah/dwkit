@@ -2,7 +2,7 @@
 -- #########################################################################
 -- Module Name : dwkit.services.presence_service
 -- Owner       : Services
--- Version     : v2026-03-12A
+-- Version     : v2026-03-13D
 -- Purpose     :
 --   - SAFE, profile-portable PresenceService (data only).
 --   - No GMCP dependency, no Mudlet events, no timers, no send().
@@ -13,6 +13,23 @@
 --     only peer-presence CPC actions may recompute Presence roster truth.
 --     CPC ROWFACTS/non-roster updates must NOT rewrite Presence online/offline
 --     state, because ROWFACTS are represented-row facts, not roster-composition truth.
+--   - Direct room-snapshot self-heal hardening:
+--     if getter paths detect a newer/different current RoomEntities snapshot than
+--     the stored Presence room snapshot, rebuild Presence directly from current
+--     RoomEntities/WhoStore/CPC truth. This preserves Presence roster ownership
+--     semantics while preventing stale fixture/runtime state from persisting after
+--     verification-driven reload/bus-split situations.
+--   - Owned online truth hardening:
+--     owned profiles are online only via CPC/local profile truth, not WhoStore.
+--     WhoStore remains for non-owned player truth and diagnostics only.
+--   - RoomEntities payload-first hardening:
+--     live room recompute prefers fresh RoomEntities event payload snapshots over
+--     service getter fallback so a real look reasserts current room truth into
+--     Presence immediately.
+--   - Owned in-room truth hardening:
+--     if an owned profile is seen in the current room snapshot, Presence treats it
+--     as online/here even when CPC peer online state has not yet reasserted on
+--     that tab. This uses live room truth, not WhoStore.
 --
 -- Public API  :
 --   - getVersion() -> string
@@ -47,11 +64,31 @@
 --   - CPC ROWFACTS updates must NOT trigger Presence roster recompute.
 --   - Presence only recomputes from CPC when the CPC delta action is roster-related
 --     (seen/bye/install/reannounce/testSeen).
+--
+-- Fix v2026-03-13B:
+--   - Getter-path self-heal from current RoomEntities snapshot when stored Presence
+--     room snapshot is stale/different.
+--   - Owned profiles online/offline truth now comes from CPC/local profile only;
+--     WhoStore no longer marks owned profiles online.
+--   - This aligns Presence with DWKit semantics: WhoStore is for other players,
+--     while owned profiles communicate their own truth via CPC.
+--
+-- Fix v2026-03-13C:
+--   - RoomEntities live-event bridge now prefers fresh payload entities/state data
+--     over RoomEntities getter fallback.
+--   - This prevents stale getter snapshots from winning during a real look-driven
+--     room update and restores immediate Presence refresh semantics.
+--
+-- Fix v2026-03-13D:
+--   - Owned profiles seen in the current room snapshot are treated as online/here
+--     even if CPC peer online truth has not yet reasserted on that tab.
+--   - This preserves the "no WhoStore for owned roster truth" rule while letting
+--     a real look immediately reassert owned in-room truth for Presence/UI/ActionPad.
 -- #########################################################################
 
 local M = {}
 
-M.VERSION = "v2026-03-12A"
+M.VERSION = "v2026-03-13D"
 
 local ID = require("dwkit.core.identity")
 local BUS = require("dwkit.bus.event_bus")
@@ -152,6 +189,23 @@ end
 local function _trim(s)
     if type(s) ~= "string" then return "" end
     return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function _sameStringArray(a, b)
+    a = _dedupeAndSortStrings(a)
+    b = _dedupeAndSortStrings(b)
+
+    if #a ~= #b then
+        return false
+    end
+
+    for i = 1, #a do
+        if tostring(a[i] or "") ~= tostring(b[i] or "") then
+            return false
+        end
+    end
+
+    return true
 end
 
 -- -------------------------------------------------------------------------
@@ -430,72 +484,119 @@ local _bridge = {
     lastWhoCount = nil,
 }
 
-local function _extractRoomPlayersBestEffort(payload)
-    payload = (type(payload) == "table") and payload or {}
-
-    do
-        local okR, R = _safeRequire("dwkit.services.roomentities_service")
-        if okR and type(R) == "table" and type(R.getState) == "function" then
-            local okS, st = pcall(R.getState)
-            if okS and type(st) == "table"
-                and type(st.entitiesV2) == "table"
-            then
-                local roomTs = nil
-
-                if type(R.getStats) == "function" then
-                    local okG, stats = pcall(R.getStats)
-                    if okG and type(stats) == "table" then
-                        roomTs = stats.lastTs
-                    end
-                end
-
-                if roomTs == nil then
-                    roomTs = payload.ts
-                end
-
-                local names = {}
-                if type(st.entitiesV2.players) == "table" then
-                    local ks = _sortedStringKeys(st.entitiesV2.players)
-                    for i = 1, #ks do names[#names + 1] = ks[i] end
-                end
-                if type(st.entitiesV2.unknown) == "table" then
-                    local ks = _sortedStringKeys(st.entitiesV2.unknown)
-                    for i = 1, #ks do names[#names + 1] = ks[i] end
-                end
-
-                return _dedupeAndSortStrings(names), roomTs
-            end
-        end
+local function _extractRoomPlayersFromEntitiesV2(entitiesV2, roomTs)
+    if type(entitiesV2) ~= "table" then
+        return nil, nil
     end
 
-    if type(payload.entitiesV2) == "table" then
-        local names = {}
-        if type(payload.entitiesV2.players) == "table" then
-            local ks = _sortedStringKeys(payload.entitiesV2.players)
-            for i = 1, #ks do names[#names + 1] = ks[i] end
-        end
-        if type(payload.entitiesV2.unknown) == "table" then
-            local ks = _sortedStringKeys(payload.entitiesV2.unknown)
-            for i = 1, #ks do names[#names + 1] = ks[i] end
-        end
-        if #names > 0 then
-            return _dedupeAndSortStrings(names), payload.ts
-        end
+    local names = {}
+    if type(entitiesV2.players) == "table" then
+        local ks = _sortedStringKeys(entitiesV2.players)
+        for i = 1, #ks do names[#names + 1] = ks[i] end
+    end
+    if type(entitiesV2.unknown) == "table" then
+        local ks = _sortedStringKeys(entitiesV2.unknown)
+        for i = 1, #ks do names[#names + 1] = ks[i] end
+    end
+
+    return _dedupeAndSortStrings(names), roomTs
+end
+
+local function _extractRoomPlayersFromLegacyState(state, roomTs)
+    if type(state) ~= "table" then
+        return nil, nil
+    end
+
+    local sawPlayers = (type(state.players) == "table")
+    local sawUnknown = (type(state.unknown) == "table")
+    if sawPlayers ~= true and sawUnknown ~= true then
+        return nil, nil
+    end
+
+    local names = {}
+    if sawPlayers == true then
+        local ks = _sortedStringKeys(state.players)
+        for i = 1, #ks do names[#names + 1] = ks[i] end
+    end
+    if sawUnknown == true then
+        local ks = _sortedStringKeys(state.unknown)
+        for i = 1, #ks do names[#names + 1] = ks[i] end
+    end
+
+    return _dedupeAndSortStrings(names), roomTs
+end
+
+local function _extractRoomPlayersFromPayload(payload)
+    payload = (type(payload) == "table") and payload or {}
+    local roomTs = payload.ts
+
+    local names, ts = _extractRoomPlayersFromEntitiesV2(payload.entitiesV2, roomTs)
+    if type(names) == "table" then
+        return names, ts
     end
 
     if type(payload.state) == "table" then
-        local names = {}
-        if type(payload.state.players) == "table" then
-            local ks = _sortedStringKeys(payload.state.players)
-            for i = 1, #ks do names[#names + 1] = ks[i] end
+        names, ts = _extractRoomPlayersFromEntitiesV2(payload.state.entitiesV2, roomTs)
+        if type(names) == "table" then
+            return names, ts
         end
-        if type(payload.state.unknown) == "table" then
-            local ks = _sortedStringKeys(payload.state.unknown)
-            for i = 1, #ks do names[#names + 1] = ks[i] end
+
+        names, ts = _extractRoomPlayersFromLegacyState(payload.state, roomTs)
+        if type(names) == "table" then
+            return names, ts
         end
-        if #names > 0 then
-            return _dedupeAndSortStrings(names), payload.ts
+    end
+
+    return nil, nil
+end
+
+local function _extractRoomPlayersFromServiceBestEffort(payload)
+    local okR, R = _safeRequire("dwkit.services.roomentities_service")
+    if not okR or type(R) ~= "table" or type(R.getState) ~= "function" then
+        return nil, nil
+    end
+
+    local okS, st = pcall(R.getState)
+    if not okS or type(st) ~= "table" then
+        return nil, nil
+    end
+
+    local roomTs = nil
+    if type(R.getStats) == "function" then
+        local okG, stats = pcall(R.getStats)
+        if okG and type(stats) == "table" then
+            roomTs = stats.lastTs
         end
+    end
+
+    if roomTs == nil and type(payload) == "table" then
+        roomTs = payload.ts
+    end
+
+    local names, ts = _extractRoomPlayersFromEntitiesV2(st.entitiesV2, roomTs)
+    if type(names) == "table" then
+        return names, ts
+    end
+
+    names, ts = _extractRoomPlayersFromLegacyState(st, roomTs)
+    if type(names) == "table" then
+        return names, ts
+    end
+
+    return nil, nil
+end
+
+local function _extractRoomPlayersBestEffort(payload)
+    payload = (type(payload) == "table") and payload or {}
+
+    local names, roomTs = _extractRoomPlayersFromPayload(payload)
+    if type(names) == "table" then
+        return names, roomTs
+    end
+
+    names, roomTs = _extractRoomPlayersFromServiceBestEffort(payload)
+    if type(names) == "table" then
+        return names, roomTs
     end
 
     return {}, payload.ts
@@ -606,9 +707,11 @@ local function _computePresenceSnapshot(roomPlayers, roomTs, whoPayload, source)
                 -- skip
             else
                 local localOnline = _isLocalProfileOnlineBestEffort(label)
-                local whoOnline = _isOnlineBestEffort(W, name)
+                local roomOnline = (inRoom[name] == true)
 
-                local online = (localOnline == true) or (whoOnline == true)
+                -- Owned profile online truth comes from CPC/local-profile truth or
+                -- current in-room truth. WhoStore is never used for owned roster truth.
+                local online = (localOnline == true) or (roomOnline == true)
 
                 if online then
                     local tags = { "ONLINE" }
@@ -675,6 +778,70 @@ local function _applyPresenceSnapshot(snapshot, source)
         return false, "snapshot must be table"
     end
     return M.setState(snapshot, { source = source or snapshot.source or "presence_bridge:setState" })
+end
+
+local function _currentStateRoomPlayers()
+    local st = (type(STATE.state) == "table") and STATE.state or {}
+    local arr = (type(st.roomPlayers) == "table") and st.roomPlayers or {}
+    return _dedupeAndSortStrings(arr)
+end
+
+local function _currentStateRoomTs()
+    local st = (type(STATE.state) == "table") and STATE.state or {}
+    return st.roomTs
+end
+
+local function _shouldDirectSyncRoomSnapshot(roomPlayers, roomTs)
+    roomPlayers = _dedupeAndSortStrings(roomPlayers)
+
+    if type(roomTs) ~= "number" and roomTs == nil then
+        return false
+    end
+
+    local stateRoomTs = _currentStateRoomTs()
+    local curTs = tonumber(roomTs or 0) or 0
+    local stTs = tonumber(stateRoomTs or 0) or 0
+
+    if stTs <= 0 and curTs > 0 then
+        return true
+    end
+
+    if curTs > stTs then
+        return true
+    end
+
+    if _sameStringArray(roomPlayers, _currentStateRoomPlayers()) ~= true then
+        return true
+    end
+
+    return false
+end
+
+local function _directSyncFromCurrentRoomSnapshotBestEffort(source)
+    if _bridge.running == true then
+        return false, nil
+    end
+
+    local roomPlayers, roomTs = _extractRoomPlayersBestEffort(nil)
+    roomPlayers = (type(roomPlayers) == "table") and roomPlayers or {}
+
+    if _shouldDirectSyncRoomSnapshot(roomPlayers, roomTs) ~= true then
+        return false, nil
+    end
+
+    _bridge.lastRoomPlayers = roomPlayers
+    _bridge.lastRoomTs = roomTs
+
+    local snap = _computePresenceSnapshot(roomPlayers, roomTs, nil, source or "presence_bridge:direct_room_sync")
+    if type(snap) ~= "table" then
+        return false, "direct room sync snapshot invalid"
+    end
+
+    STATE.state = _shallowCopy(snap)
+    STATE.lastTs = os.time()
+    STATE.updates = STATE.updates + 1
+
+    return true, nil
 end
 
 local function _recomputeFromLastKnown(source, whoPayload)
@@ -867,6 +1034,11 @@ local function _armSubscriptionsBestEffort()
     else
         _bridge.lastErr = nil
     end
+
+    local okSync, errSync = _directSyncFromCurrentRoomSnapshotBestEffort("presence_bridge:arm_subscriptions")
+    if okSync == false and errSync ~= nil then
+        _bridge.lastErr = tostring(errSync)
+    end
 end
 
 function M.getVersion()
@@ -878,6 +1050,7 @@ function M.getUpdatedEventName()
 end
 
 function M.getState()
+    _directSyncFromCurrentRoomSnapshotBestEffort("presence_bridge:getState")
     return _shallowCopy(STATE.state)
 end
 
@@ -936,6 +1109,8 @@ function M.onUpdated(handlerFn)
 end
 
 function M.getStats()
+    _directSyncFromCurrentRoomSnapshotBestEffort("presence_bridge:getStats")
+
     local map = _getOwnedProfilesMapBestEffort()
 
     return {
